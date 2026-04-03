@@ -6,23 +6,23 @@
 ## 📂 完整文件结构
 ```
 ComfyUI_JosiaNodes/
-├── __init__.py                    # 节点总注册、统一导出、加载日志
-├── node_properties.py # 全节点常量、尺寸预设、描述文案
-├── cache_cleanup.py # 显存 / 内存 / 系统缓存清理节点
-├── seed.py # 随机种子管理节点
-├── flow_valve.py # 5 通道流量阀门节点（Python 逻辑）
-├── encoder.py # 文本 + 多图参考编码节点
-├── image_comparer.py # 双图对比预览节点
-├── image_scaling.py # 多功能图像缩放裁切节点
-├── group_controller.py # 分组控制节点（多组 + 单组）
+├── __init__.py            # 节点总注册、统一导出、加载日志
+├── node_properties.py     # 全节点常量、尺寸预设、描述文案
+├── cache_cleanup.py       # 显存 / 内存 / 系统缓存清理节点
+├── seed.py                # 随机种子管理节点
+├── flow_valve.py          # 5 通道流量阀门节点（Python 逻辑）
+├── encoder.py             # 文本 + 多图参考编码节点
+├── image_comparer.py      # 双图对比预览节点
+├── image_scaling.py       # 多功能图像缩放裁切节点
+├── group_controller.py    # 分组控制节点（多组 + 单组）
 │
 └── web/
     └── js/
-        ├── flow_valve.js # 流量阀门前端美化
-        ├── seed.js # 随机种子前端按钮、快捷操作
-        ├── encoder.js # 文本编码节点默认尺寸配置
-        ├── image_comparer.js # 图像对比滑动 / 按住对比交互
-        └── group_controller.js # 分组控制前端 UI、开关、导航逻辑
+        ├── flow_valve.js         # 流量阀门前端美化
+        ├── seed.js               # 随机种子前端按钮、快捷操作
+        ├── encoder.js            # 文本编码节点默认尺寸配置
+        ├── image_comparer.js     # 图像对比滑动 / 按住对比交互
+        └── group_controller.js   # 分组控制前端 UI、开关、导航逻辑
 ```
 
 ---
