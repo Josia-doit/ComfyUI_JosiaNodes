@@ -1,91 +1,73 @@
 """
-Josia_Nodes 核心注册文件 - 修复相对导入，所有节点恢复正常
+Josia ComfyUI 自定义节点集 - 总注册文件
+规范：
+1. 本地文件名：全小写（如encoder.py、image_comparer.py）
+2. 代码内类名/注册名：带Josia（如JosiaEncoder、JosiaImageComparer）
+3. 中文显示名：带Josia（如Josia文本编码、Josia图像对比）
+包含节点：文本编码、流量阀门、缓存清理、随机种子、图像对比、图像缩放、分组控制
 """
 import os
+import importlib.util
 import sys
-sys.path.append(os.path.dirname(__file__))
 
-# 全局注册映射
+# ==================== 核心配置 ====================
+NODE_PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, NODE_PACKAGE_DIR)  # 【关键修复】解决相对导入失败
+WEB_DIRECTORY = os.path.join(NODE_PACKAGE_DIR, "web/js")
+
+# ==================== 全局节点映射初始化 ====================
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
 
-# ====================== 原有正常节点（完全还原你最初的相对导入写法，确保100%正常） ======================
-# 种子节点
-try:
-    from .seed import NODE_CLASS_MAPPINGS as SEED_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS as SEED_DISPLAY
-    NODE_CLASS_MAPPINGS.update(SEED_MAPPINGS)
-    NODE_DISPLAY_NAME_MAPPINGS.update(SEED_DISPLAY)
-    print(f"[JosiaNodes] ✅ 种子节点加载成功")
-except Exception as e:
-    print(f"[JosiaNodes] 种子节点加载失败: {e}")
+# ==================== 节点注册通用函数 ====================
+def register_node(module_name, node_alias, display_name):
+    try:
+        module_file = os.path.join(NODE_PACKAGE_DIR, f"{module_name}.py")
+        spec = importlib.util.spec_from_file_location(module_name, module_file)
+        if spec is None or spec.loader is None:
+            raise FileNotFoundError(f"模块 {module_name} 加载失败")
+        
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        
+        if hasattr(module, "NODE_CLASS_MAPPINGS"):
+            if node_alias in module.NODE_CLASS_MAPPINGS:
+                NODE_CLASS_MAPPINGS[node_alias] = module.NODE_CLASS_MAPPINGS[node_alias]
+                NODE_DISPLAY_NAME_MAPPINGS[node_alias] = display_name
+                print(f"[JosiaNodes] ✅ {display_name} 加载成功")
+            else:
+                available_nodes = list(module.NODE_CLASS_MAPPINGS.keys())
+                print(f"[JosiaNodes] ⚠️ {display_name} 未找到别名 {node_alias}，可用：{available_nodes}")
+        else:
+            print(f"[JosiaNodes] ⚠️ {display_name} 无 NODE_CLASS_MAPPINGS")
+    except FileNotFoundError:
+        print(f"[JosiaNodes] ❌ {display_name} 未找到文件 {module_file}")
+    except Exception as e:
+        print(f"[JosiaNodes] ❌ {display_name} 加载异常：{str(e)}")
 
-# 缓存清理节点
-try:
-    from .cache_cleanup import NODE_CLASS_MAPPINGS as CACHE_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS as CACHE_DISPLAY
-    NODE_CLASS_MAPPINGS.update(CACHE_MAPPINGS)
-    NODE_DISPLAY_NAME_MAPPINGS.update(CACHE_DISPLAY)
-    print(f"[JosiaNodes] ✅ 缓存清理节点加载成功")
-except Exception as e:
-    print(f"[JosiaNodes] 缓存清理节点加载失败: {e}")
+# ==================== 批量注册所有节点 ====================
+register_node("encoder", "JosiaEncoder", "Josia文本编码")
+register_node("flow_valve", "JosiaFlowValve", "Josia流量阀门")
+register_node("cache_cleanup", "JosiaCacheCleanup", "Josia缓存清理")
+register_node("seed", "JosiaSeed", "Josia随机种子")
+register_node("image_comparer", "JosiaImageComparer", "Josia图像对比")
+register_node("image_scaling", "JosiaImageScaling", "Josia图像缩放")
+register_node("group_controller", "JosiaGroupControllerM", "Josia多组控制")
+register_node("group_controller", "JosiaGroupControllerS", "Josia单组控制")
 
-# 图像缩放节点
-try:
-    from .image_scaling import NODE_CLASS_MAPPINGS as SCALE_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS as SCALE_DISPLAY
-    NODE_CLASS_MAPPINGS.update(SCALE_MAPPINGS)
-    NODE_DISPLAY_NAME_MAPPINGS.update(SCALE_DISPLAY)
-    print(f"[JosiaNodes] ✅ 图像缩放节点加载成功")
-except Exception as e:
-    print(f"[JosiaNodes] 图像缩放节点加载失败: {e}")
+# ==================== 兼容旧版导入 ====================
+__all__ = [
+    "NODE_CLASS_MAPPINGS",
+    "NODE_DISPLAY_NAME_MAPPINGS",
+    "WEB_DIRECTORY",
+    "NODE_PACKAGE_DIR"
+]
 
-# 图像对比节点
-try:
-    from .Image_Comparer import NODE_CLASS_MAPPINGS as IMGCMP_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS as IMGCMP_DISPLAY
-    NODE_CLASS_MAPPINGS.update(IMGCMP_MAPPINGS)
-    NODE_DISPLAY_NAME_MAPPINGS.update(IMGCMP_DISPLAY)
-    print(f"[JosiaNodes] ✅ 图像对比节点加载成功")
-except Exception as e:
-    print(f"[JosiaNodes] 图像对比节点加载失败: {e}")
-
-# 组控制器节点
-try:
-    from .group_controller import JosiaGrpCtrlM, JosiaGrpCtrlS
-    GRP_CTRL_MAPPINGS = {
-        "JosiaGrpCtrlM": JosiaGrpCtrlM,
-        "JosiaGrpCtrlS": JosiaGrpCtrlS,
-    }
-    GRP_CTRL_DISPLAY = {
-        "JosiaGrpCtrlM": "Josia多组控制",
-        "JosiaGrpCtrlS": "Josia单组控制",
-    }
-    NODE_CLASS_MAPPINGS.update(GRP_CTRL_MAPPINGS)
-    NODE_DISPLAY_NAME_MAPPINGS.update(GRP_CTRL_DISPLAY)
-    print(f"[JosiaNodes] ✅ 组控制器节点加载成功")
-except Exception as e:
-    print(f"[JosiaNodes] 组控制器节点加载失败: {e}")
-
-# 流量阀门节点
-try:
-    from .flow_switch import NODE_CLASS_MAPPINGS as FLOW_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS as FLOW_DISPLAY
-    NODE_CLASS_MAPPINGS.update(FLOW_MAPPINGS)
-    NODE_DISPLAY_NAME_MAPPINGS.update(FLOW_DISPLAY)
-    print(f"[JosiaNodes] ✅ 流量阀门节点加载成功")
-except Exception as e:
-    print(f"[JosiaNodes] 流量阀门节点加载失败: {e}")
-
-# 文本编码节点
-try:
-    from .multi_img_encoder import NODE_CLASS_MAPPINGS as ENCODER_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS as ENCODER_DISPLAY
-    NODE_CLASS_MAPPINGS.update(ENCODER_MAPPINGS)
-    NODE_DISPLAY_NAME_MAPPINGS.update(ENCODER_DISPLAY)
-    print(f"[JosiaNodes] ✅ 文本编码节点加载成功")
-except Exception as e:
-    print(f"[JosiaNodes] 文本编码节点加载失败: {e}")
-
-# 前端目录配置
-WEB_DIRECTORY = "./web/js"
-
-# 最终导出
-__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
-
-# 最终完成日志
-print(f"[JosiaNodes] ✅ 全部节点加载完成，总计注册 {len(NODE_CLASS_MAPPINGS)} 个节点")
+# ==================== 最终验证输出 ====================
+print(f"\n[JosiaNodes] 📋 最终注册节点总数：{len(NODE_CLASS_MAPPINGS)}")
+if NODE_CLASS_MAPPINGS:
+    for node_alias, node_class in NODE_CLASS_MAPPINGS.items():
+        display_name = NODE_DISPLAY_NAME_MAPPINGS.get(node_alias, "未设置显示名")
+        print(f"             ✅ {node_alias} → {display_name}")
+else:
+    print("[JosiaNodes] ⚠️ 无任何节点成功注册")
