@@ -1,0 +1,14 @@
+[project]
+name = "comfyui-josianodes"
+description = "一套功能完整、轻量稳定的 ComfyUI 实用节点集。包含文本编码（文生图/图生图/参考Latent一体化）、图像缩放裁切（4大比例+3种自定义模式）、图像对比、流量阀门、随机种子、分组控制、缓存清理共8个节点。"
+version = "1.0.0"
+license = { file = "LICENSE" }
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/Josia-doit/ComfyUI_JosiaNodes"
+
+[tool.comfy]
+PublisherId = "josia"
+DisplayName = "JosiaNodes"
+Icon = ""

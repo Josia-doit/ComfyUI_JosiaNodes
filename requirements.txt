@@ -1,0 +1,2 @@
+# JosiaNodes 无额外 Python 依赖
+# 所有依赖均为 ComfyUI 内置库：torch, numpy, Pillow, etc.
