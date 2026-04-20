@@ -38,10 +38,27 @@ class AnyType(str):
 any = AnyType("*")  # 定义任意类型常量
 
 class JosiaCacheCleanup:
+    """🧹 Josia 缓存清理
+轻量释放显存/内存缓存，不卸载模型，适配各类显存规格。
+
+• 显存缓存：清理 ComfyUI 推理产生的临时显存（保留模型）
+• 文件缓存：释放 Windows 系统文件缓存，提升流畅度
+• 进程内存：释放非系统进程空闲内存，降低占用
+
+特点：单端口任意输入透传，不影响工作流数据流转"""
+
+    DESCRIPTION = """🧹 Josia 缓存清理
+轻量释放显存/内存缓存，不卸载模型，适配各类显存规格。
+
+• 显存缓存：清理 ComfyUI 推理产生的临时显存（保留模型）
+• 文件缓存：释放 Windows 系统文件缓存，提升流畅度
+• 进程内存：释放非系统进程空闲内存，降低占用
+
+特点：单端口任意输入透传，不影响工作流数据流转。"""
+    
     VERSION = "1.0.0"
     CATEGORY = NODE_CATEGORY  # 节点分类（与其他Josia节点统一）
     FUNCTION = "execute_clean"  # 核心执行函数名
-    DESCRIPTION = "清理ComfyUI显存/内存缓存，透传任意输入数据"
 
     # 定义节点输入参数（ComfyUI核心要求）
     INPUT_TYPES = lambda: {
