@@ -7,12 +7,28 @@ Josia 流量阀门节点
 """
 
 class JosiaFlowValve:  # 类名与__init__.py注册的JosiaFlowValve严格一致
+    """🔀 Josia 流量阀门
+5 路独立通道开关，控制任意类型数据的透传与截断。
+
+• 通道开 ✅：数据原样透传到下游
+• 通道关 ❌：输出 None，截断数据流
+
+支持任意数据类型，全 5 路独立控制。"""
+
+    DESCRIPTION = """🔀 Josia 流量阀门
+5 路独立通道开关，控制任意类型数据的透传与截断。
+
+• 通道开 ✅：数据原样透传到下游
+• 通道关 ❌：输出 None，截断数据流
+
+支持任意数据类型，全 5 路独立控制。"""
+
     # 输出类型：支持任意类型数据（*），5个输出通道
     RETURN_TYPES = ("*", "*", "*", "*", "*")
     RETURN_NAMES = ("输出1", "输出2", "输出3", "输出4", "输出5")
 
     FUNCTION = "run"  # 核心执行函数名
-    CATEGORY = "Josia 专用节点/流量控制"  # 节点分类（ComfyUI左侧菜单路径）
+    CATEGORY = "Josia"  # 节点分类（ComfyUI左侧菜单路径）
 
     @classmethod
     def INPUT_TYPES(cls):
