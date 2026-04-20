@@ -21,6 +21,15 @@ class JosiaGroupControllerM:
     - 所有交互逻辑由前端 JS 实现，Python 端仅为占位节点。
     """
 
+    DESCRIPTION = """🎛️ Josia 多组控制
+批量控制工作流中所有编组的跳过/启用状态。
+
+• 全部跳过 — 批量将所有编组设为跳过
+• 全部启用 — 批量恢复所有编组为启用
+• 点击编组名称 — 跳转至该编组位置
+
+状态：绿色=已启用，红色=已跳过，橙色=部分跳过"""
+
     @classmethod
     def INPUT_TYPES(cls):
         """节点输入参数（无实际输入，仅占位）"""
@@ -29,8 +38,7 @@ class JosiaGroupControllerM:
     RETURN_TYPES = ()          # 无输出
     FUNCTION = "run"           # 核心执行函数（空实现）
     OUTPUT_NODE = True         # 标记为输出节点（无实际输出）
-    CATEGORY = "Josia Nodes/group_control"  # 统一节点分类
-    DESCRIPTION = DESCRIPTION_M  # 节点描述（从配置文件导入）
+    CATEGORY = "Josia"  # 统一节点分类
 
     def run(self):
         """核心执行函数（空实现，交互由前端 JS 处理）"""
@@ -46,6 +54,14 @@ class JosiaGroupControllerS:
     - 所有交互逻辑由前端 JS 实现，Python 端仅为占位节点。
     """
 
+    DESCRIPTION = """🎚️ Josia 单组控制
+精确控制工作流中的单个编组。
+
+• 下拉选择 — 选择要控制的目标编组
+• 开关按钮 — 切换编组的跳过/启用状态
+
+选中编组信息随工作流保存，重新打开自动恢复。"""
+
     @classmethod
     def INPUT_TYPES(cls):
         """节点输入参数（无实际输入，仅占位）"""
@@ -54,8 +70,7 @@ class JosiaGroupControllerS:
     RETURN_TYPES = ()          # 无输出
     FUNCTION = "run"           # 核心执行函数（空实现）
     OUTPUT_NODE = True         # 标记为输出节点（无实际输出）
-    CATEGORY = "Josia Nodes/group_control"  # 统一节点分类
-    DESCRIPTION = DESCRIPTION_S  # 节点描述（从配置文件导入）
+    CATEGORY = "Josia"  # 统一节点分类
 
     def run(self):
         """核心执行函数（空实现，交互由前端 JS 处理）"""
