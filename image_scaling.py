@@ -5,7 +5,7 @@ Josia 图像缩放节点（4比例横竖版合并版）
 2. 多维度缩放控制：边长缩放/像素缩放/手动宽高缩放
 3. 渐进式缩放（低分辨率优化）、分辨率上限限制、锁定倍数对齐
 4. 多裁剪方式（居中/左/右/上/下）、多缩放算法（BOX/BICUBIC等）
-5. 支持图像/遮罩/Latent输入输出，批量处理
+5. 支持图像/遮罩输入输出，批量处理，输出宽度和高度数值
 本地文件名：image_scaling.py
 节点英文标识：JosiaImageScaling
 节点中文显示名：Josia图像缩放
@@ -20,15 +20,27 @@ import gc
 # 导入常量配置（外部化参数，便于维护）
 from node_properties import (
     NODE_CATEGORY, PRESET_SIZES, LOCK_MULTIPLE_CHOICES,
-    CROP_METHODS, RESAMPLE_FILTERS, DEFAULT_PARAMS, NODE_DISPLAY_NAME_SCALING
+    CROP_METHODS, RESAMPLE_FILTERS, DEFAULT_PARAMS, NODE_DISPLAY_NAME_SCALING,
+    IMAGE_SCALING_DESCRIPTION
 )
 
 class JosiaImageScaling:
-    """Josia图像缩放节点（4比例横竖版合并版）"""
+    """📐 Josia 图像缩放
+多功能图像缩放裁切节点，支持 4 大比例预设与 3 种自定义模式。
+
+• 🖼️ 像素缩放：按百万像素目标自动计算尺寸（最高优先级）
+• ✏️ 手动宽高：直接指定宽高，支持一键切换宽高
+• 📏 边长缩放：按最长边 / 最短边缩放至指定像素
+• 预设比例：1:1 / 2:3 / 3:4 / 16:9（含横竖双方向）
+
+⚙️ 高级特性：锁定倍数 / 多种裁剪方式 / 5 种缩放算法 / 分辨率保护
+❗ 不设置任何尺寸时，图像原封不动透传；无图像输入时可提供宽高数值用于文生图"""
+
+    DESCRIPTION = IMAGE_SCALING_DESCRIPTION
     CATEGORY = NODE_CATEGORY  # 节点分类（与其他Josia节点统一）
     FUNCTION = "process_image"  # 核心执行函数名
-    RETURN_TYPES = ("IMAGE", "MASK", "LATENT", "INT", "INT")  # 输出类型
-    RETURN_NAMES = ("图像", "遮罩", "Latent", "宽度", "高度")  # 输出端口名称
+    RETURN_TYPES = ("IMAGE", "MASK", "INT", "INT")  # 输出类型
+    RETURN_NAMES = ("图像", "遮罩", "宽度", "高度")  # 输出端口名称
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -100,7 +112,6 @@ class JosiaImageScaling:
             "optional": {
                 "图像": ("IMAGE",),    # 可选图像输入
                 "遮罩": ("MASK",),      # 可选遮罩输入
-                "Latent": ("LATENT",), # 可选Latent输入
             }
         }
 
@@ -124,14 +135,13 @@ class JosiaImageScaling:
             return new_w, new_h
         return width, height
 
-    def process_image(self, 图像=None, 遮罩=None, Latent=None, **kwargs):
+    def process_image(self, 图像=None, 遮罩=None, **kwargs):
         """
         核心图像缩放处理函数
         :param 图像: 输入图像张量（可选）
         :param 遮罩: 输入遮罩张量（可选）
-        :param Latent: 输入Latent张量（可选）
         :param kwargs: 节点界面参数
-        :return: (处理后图像, 处理后遮罩, 生成的Latent, 最终宽度, 最终高度)
+        :return: (处理后图像, 处理后遮罩, 最终宽度, 最终高度)
         """
         # 1. 提取界面参数
         square = kwargs.get("1:1 正方形", "关")
@@ -163,11 +173,9 @@ class JosiaImageScaling:
         if swap_wh:
             manual_width, manual_height = manual_height, manual_width
 
-        # 3. 获取原始尺寸（优先级：图像 > Latent > 默认值）
+        # 3. 获取原始尺寸（仅来自图像输入，无图像时使用默认值）
         if 图像 is not None:
             orig_h, orig_w = 图像.shape[1], 图像.shape[2]
-        elif Latent is not None and "samples" in Latent:
-            orig_h, orig_w = Latent["samples"].shape[2] * 8, Latent["samples"].shape[3] * 8
         else:
             orig_w = DEFAULT_PARAMS["default_base_width"]
             orig_h = DEFAULT_PARAMS["default_base_height"]
@@ -247,23 +255,14 @@ class JosiaImageScaling:
             del processed_images, processed_masks
             gc.collect()
         else:
-            # 无输入图像时返回空张量
-            img_result = torch.zeros((1, final_h, final_w, 3), dtype=torch.float32)
-            mask_result = torch.zeros((1, final_h, final_w), dtype=torch.float32)
+            # 无输入图像时返回 None（防止误接入下游导致图像劣化）
+            img_result = None
+            mask_result = None
 
-        # 8. 生成Latent输出（8倍下采样）
-        latent_h = final_h // 8
-        latent_w = final_w // 8
-        if Latent is not None and "samples" in Latent:
-            latent_samples = torch.zeros((Latent["samples"].shape[0], 4, latent_h, latent_w), dtype=torch.float32)
-        else:
-            latent_samples = torch.zeros((1, 4, latent_h, latent_w), dtype=torch.float32)
-        latent_result = {"samples": latent_samples}
-
-        # 9. 最终内存释放
+        # 8. 最终内存释放
         gc.collect()
 
-        return (img_result, mask_result, latent_result, final_w, final_h)
+        return (img_result, mask_result, final_w, final_h)
 
     def _calculate_target_size(self, orig_w, orig_h, square, photo, short, video,
                               enable_side, side_type, side_len, enable_pixel, pixel_mill, lock_mult,
@@ -275,9 +274,14 @@ class JosiaImageScaling:
         # 像素缩放模式
         if enable_pixel:
             total_pixels = pixel_mill * 1_000_000
+            # 使用原始图像的宽高比计算目标尺寸
             aspect_ratio = orig_w / orig_h if orig_h > 0 else 1.0
-            target_h = math.sqrt(total_pixels / aspect_ratio)
-            target_w = target_h * aspect_ratio
+            # 根据总像素和宽高比计算目标宽高
+            # 总像素 = w * h, 宽高比 = w / h
+            # 因此: w * (w / aspect_ratio) = total_pixels
+            # w^2 = total_pixels * aspect_ratio
+            target_w = math.sqrt(total_pixels * aspect_ratio)
+            target_h = target_w / aspect_ratio
             target_w, target_h = int(round(target_w)), int(round(target_h))
             if lock_mult > 1:
                 target_w = (target_w // lock_mult) * lock_mult
@@ -295,10 +299,22 @@ class JosiaImageScaling:
 
         # 边长缩放模式
         if enable_side:
-            orig_max = max(orig_w, orig_h) if orig_w > 0 and orig_h > 0 else side_len
-            orig_min = min(orig_w, orig_h) if orig_w > 0 and orig_h > 0 else side_len
-            scale = side_len / orig_max if side_type == "最长边" else side_len / orig_min
-            target_w, target_h = int(orig_w * scale), int(orig_h * scale)
+            # 根据选择的最长边或最短边进行缩放
+            if orig_w > 0 and orig_h > 0:
+                orig_max = max(orig_w, orig_h)
+                orig_min = min(orig_w, orig_h)
+                # 计算缩放比例：目标边长 / 原始对应边长
+                if side_type == "最长边":
+                    scale = side_len / orig_max
+                else:  # 最短边
+                    scale = side_len / orig_min
+                # 应用等比例缩放
+                target_w = int(orig_w * scale)
+                target_h = int(orig_h * scale)
+            else:
+                # 无有效原始尺寸时，使用目标边长作为正方形
+                target_w = target_h = side_len
+            
             if lock_mult > 1:
                 target_w = (target_w // lock_mult) * lock_mult
                 target_h = (target_h // lock_mult) * lock_mult
@@ -316,10 +332,9 @@ class JosiaImageScaling:
                             preset_h = (preset_h // lock_mult) * lock_mult
                         return (preset_w, preset_h)
 
-        # 默认返回原始尺寸（对齐锁定倍数）
-        orig_w_final = orig_w if lock_mult == 1 else (orig_w // lock_mult) * lock_mult
-        orig_h_final = orig_h if lock_mult == 1 else (orig_h // lock_mult) * lock_mult
-        return (max(32, orig_w_final), max(32, orig_h_final))
+        # 默认返回原始尺寸（无任何尺寸设置时，原封不动透传）
+        # 不对齐锁定倍数，保持原图尺寸完全一致
+        return (max(32, orig_w), max(32, orig_h))
 
     def _progressive_scale(self, img_pil, mask_pil, target_w, target_h, steps, algo, crop_method):
         """
