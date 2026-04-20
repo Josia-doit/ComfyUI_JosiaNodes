@@ -85,8 +85,9 @@ app.registerExtension({
                 const origOnExecuted = this.onExecuted;
                 this.onExecuted = function (output) {
                     origOnExecuted?.apply(this, arguments);
-                    if (output && output.seed != null) {
-                        this.lastSeed = output.seed;
+                    // 后端通过 ui 机制回传种子值：output.seed = [seed_value]
+                    if (output && output.seed && Array.isArray(output.seed) && output.seed.length > 0) {
+                        this.lastSeed = output.seed[0];
                         this.lastSeedButton.name = `♻️ ${this.lastSeed}`;
                         this.lastSeedButton.disabled = false;
                     }
