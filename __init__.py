@@ -34,7 +34,7 @@ def register_node(module_name, node_alias, display_name):
             if node_alias in module.NODE_CLASS_MAPPINGS:
                 NODE_CLASS_MAPPINGS[node_alias] = module.NODE_CLASS_MAPPINGS[node_alias]
                 NODE_DISPLAY_NAME_MAPPINGS[node_alias] = display_name
-                print(f"[JosiaNodes] ✅ {display_name} 加载成功")
+                # 成功时不打印，最后统一汇总
             else:
                 available_nodes = list(module.NODE_CLASS_MAPPINGS.keys())
                 print(f"[JosiaNodes] ⚠️ {display_name} 未找到别名 {node_alias}，可用：{available_nodes}")
@@ -64,10 +64,7 @@ __all__ = [
 ]
 
 # ==================== 最终验证输出 ====================
-print(f"\n[JosiaNodes] 📋 最终注册节点总数：{len(NODE_CLASS_MAPPINGS)}")
 if NODE_CLASS_MAPPINGS:
-    for node_alias, node_class in NODE_CLASS_MAPPINGS.items():
-        display_name = NODE_DISPLAY_NAME_MAPPINGS.get(node_alias, "未设置显示名")
-        print(f"             ✅ {node_alias} → {display_name}")
+    print(f"[JosiaNodes] ✅ JosiaNodes 加载成功，注册节点数：{len(NODE_CLASS_MAPPINGS)}")
 else:
     print("[JosiaNodes] ⚠️ 无任何节点成功注册")
