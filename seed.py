@@ -116,7 +116,8 @@ class JosiaSeed:
             except Exception as e:
                 log_node_info(self.NAME, f"更新Prompt种子失败: {e}")
 
-        return (seed,)
+        # 通过 ui 机制向前端回传实际使用的种子值（用于"使用上一次种子"功能）
+        return {"ui": {"seed": [seed]}, "result": (seed,)}
 
 # ==================== ComfyUI 节点映射（与__init__.py注册名严格一致） ====================
 NODE_CLASS_MAPPINGS = {
