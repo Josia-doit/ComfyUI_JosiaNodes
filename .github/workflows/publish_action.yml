@@ -13,13 +13,12 @@ jobs:
   publish-node:
     name: Publish Custom Node to registry
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
     steps:
       - name: Check out code
         uses: actions/checkout@v4
+
       - name: Publish Custom Node
         uses: Comfy-Org/publish-node-action@main
         with:
-          node_path: "."
+          # 你需要在 GitHub 仓库的 Secrets 里配置 REGISTRY_ACCESS_TOKEN
+          personal_access_token: ${{ secrets.REGISTRY_ACCESS_TOKEN }}
