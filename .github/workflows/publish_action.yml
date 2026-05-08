@@ -20,5 +20,4 @@ jobs:
       - name: Publish Custom Node
         uses: Comfy-Org/publish-node-action@main
         with:
-          # 你需要在 GitHub 仓库的 Secrets 里配置 REGISTRY_ACCESS_TOKEN
           personal_access_token: ${{ secrets.REGISTRY_ACCESS_TOKEN }}
