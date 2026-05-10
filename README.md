@@ -1,5 +1,6 @@
 # Josia ComfyUI 自定义节点集
 一套功能完整、轻量稳定、高度兼容最新版 ComfyUI 的实用节点集。专为解决老旧节点包兼容性差、体积臃肿、运行卡顿问题而设计，把高频刚需功能浓缩为一套轻量化扩展，让 ComfyUI 工作流更简洁、更顺畅。
+<img width="1853" height="1174" alt="image" src="https://github.com/user-attachments/assets/61bd0a91-650c-49cc-92a4-d118405a723f" />
 
 ---
 
@@ -24,7 +25,7 @@ ComfyUI_JosiaNodes/
         ├── seed.js                # 随机种子前端按钮、快捷操作
         ├── image_comparer.js      # 图像对比滑动 / 按住对比交互
         ├── group_controller.js    # 分组控制前端 UI、开关、导航逻辑
-        └── lora_stack.js         # LoRA 堆叠前端交互（滑块、开关、强度调节）
+        └── lora_stack.js          # LoRA 堆叠前端交互（滑块、开关、强度调节）
 ```
 
 ---
@@ -53,6 +54,7 @@ ComfyUI_JosiaNodes/
   | 参考图生图 | 开 | 开 | VAE 编码 Latent | 参考 Latent 条件 |
 
 - **特点**：VAE 端口可选（未接入时自动降级为空 Latent）、原生逻辑兼容 Flux / 千问等模型
+<img width="708" height="980" alt="image" src="https://github.com/user-attachments/assets/486e8d56-1a87-4e0b-a8de-7d708009cc01" />
 
 ---
 
@@ -77,6 +79,7 @@ ComfyUI_JosiaNodes/
   - 渐进式多步缩放，低像素更清晰
   - 自动分辨率保护，上限 400 万像素
 - **特点**：不设置任何尺寸时图像原封不动透传；无图像输入时可提供宽高数值用于文生图
+<img width="526" height="932" alt="image" src="https://github.com/user-attachments/assets/9712297a-0ceb-4928-86b8-c53da88fcda6" />
 
 ---
 
@@ -88,6 +91,7 @@ ComfyUI_JosiaNodes/
   - Slide 模式：鼠标滑动显示竖直分割线，左 A 右 B
   - Click 模式：按住显示 B 图，松开显示 A 图
 - **特点**：继承官方 PreviewImage、自动保存、前端渲染流畅、支持拉大节点舒适对比
+<img width="875" height="776" alt="image" src="https://github.com/user-attachments/assets/b751189a-acae-4643-97a1-9fba48375b22" />
 
 ---
 
@@ -97,6 +101,7 @@ ComfyUI_JosiaNodes/
 - **输入**：通道1~5（任意类型，可选）
 - **输出**：输出1~5（开 = 原数据透传，关 = None 截断）
 - **特点**：全类型兼容、可视化开关状态、前端自动美化、容错性极强
+<img width="503" height="505" alt="image" src="https://github.com/user-attachments/assets/aef75660-1f87-475a-9507-7be755620d3e" />
 
 ---
 
@@ -112,6 +117,7 @@ ComfyUI_JosiaNodes/
   - 🎲 每次随机
   - 🎲 新固定随机
   - ♻️ 使用上一次种子（快捷按钮）
+<img width="734" height="496" alt="image" src="https://github.com/user-attachments/assets/a81eaa52-b3f6-4344-830b-f59ec17d59d0" />
 
 ---
 
@@ -124,6 +130,7 @@ ComfyUI_JosiaNodes/
   - 红色：已跳过
   - 橙色：部分跳过
 - **特点**：纯前端交互、不占算力、支持右键菜单、状态随工作流保存
+<img width="652" height="757" alt="image" src="https://github.com/user-attachments/assets/dcc74c21-55d5-4c2c-9adf-ef447583df19" />
 
 ---
 
@@ -149,6 +156,7 @@ ComfyUI_JosiaNodes/
   - 箭头步进调节（±0.05）
   - 支持键盘输入精确值（-10.00 ~ 10.00）
 - **特点**：纯前端交互、不占算力、状态随工作流保存
+<img width="1169" height="705" alt="image" src="https://github.com/user-attachments/assets/c710b123-aa4e-44c3-ad91-c98edcf540b0" />
 
 ---
 
@@ -165,6 +173,7 @@ ComfyUI_JosiaNodes/
   - 任意数据透传，串联不中断工作流
   - 自动识别系统，非 Windows 自动安全降级（仅清显存）
   - 实时日志输出，耗时统计
+<img width="588" height="378" alt="image" src="https://github.com/user-attachments/assets/fee19c3a-ff28-4d69-852b-8ea974046ba5" />
 
 ---
 
