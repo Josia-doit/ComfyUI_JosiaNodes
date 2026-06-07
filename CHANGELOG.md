@@ -7,6 +7,65 @@
 
 ---
 
+## [1.3.0] - 2026-06-07
+
+### ✨ 新增功能
+
+#### 模型加载节点（JosiaCheckpointPlus）
+- **智能一体化模型加载**：一个节点 100% 平替原生 CheckpointLoader / UNETLoader / CLIPLoader / VAELoader
+- **自动识别三种模型类型**：
+  - AIO Checkpoint（三合一）：自动复用模型内置 CLIP/VAE，自动禁用外部选框
+  - 独立 UNET：可自由选配外部 CLIP 与 VAE
+  - GGUF UNET：量化模型，支持搭配任意格式 CLIP（GGUF 或非 GGUF 均可）
+  - **GGUF 格式依赖**：加载 GGUF 模型需安装 [ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF) 插件；ckpt/safetensors/bin 格式完全独立运行
+- **CLIP 类型手动选择**：1:1 复刻原生 CLIPLoader 全部 24 种类型（sdxl / flux / flux2 / sd3 / wan / LTXV / hunyuan_image 等）
+  - AIO 模式自动适配，独立 UNET/GGUF 模式需手动选择
+  - 未选择类型时使用 STABLE_DIFFUSION 兜底
+- **UNET 保活模式**（默认开启）：
+  - 防止 ComfyUI 意外卸载 UNET 模型，复用工作流时跳过重新加载
+  - 不强制占用物理显存，允许 ComfyUI 智能调度（`force_full_load=False`）
+- **前端智能状态栏**：
+  - 选中模型后自动调用 API 识别类型，显示动态加载动画
+  - 实时显示模型类型标签（AIO / UNET / GGUF 量化等级）
+  - 显示模型文件名、UNET / CLIP / VAE 尺寸
+  - 显示 CLIP / VAE 来源（内置 or 外部文件名）
+  - 显示 UNET保活开关状态
+- **公共 API 端点**：注册 `/josia/detect_model_type`，供前端实时识别模型类型
+- **GGUF 扩展名自动注册**：启动时自动将 `.gguf` 注册到 ComfyUI 文件系统
+- **支持格式**：ckpt / safetensors / bin / gguf 全格式
+
+### 🐛 Bug 修复
+
+#### 模型加载节点
+- **修复非 safetensors 文件重复加载**：`_detect_category_from_file()` 对非 safetensors 文件不再重复检测，默认按 AIO 处理
+- **修复 AIO 模式下 CLIP 类型 "Value not in list" 报错**（v2.9.4）：AIO 模式不再替换 options.values，改为值合法性检查
+- **修复 AIO 提示文本渲染**（v2.9.2-hotfix）：禁用控件时不再修改 value/options，避免运行时验证失败
+- **修复 GGUF CLIP 过滤问题**（v2.9.2）：GGUF 模式不再过滤 CLIP 列表，允许搭配非 GGUF CLIP
+- **修复 CLIP 类型下拉框只显示 LTXV**（v2.9.1）：取消枚举过滤，全量显示 24 种类型
+
+### 🎨 界面优化
+
+- **占位文本统一**：主模型🖼️ / CLIP🧠 / VAE🎨 / CLIP类型🏷️，带 Emoji 图标
+- **控件联动禁用**：AIO 模式下自动禁用外部 CLIP/VAE 选框，灰色样式提示
+- **GGUF 量化等级显示**：自动解析文件名中的 Q4/Q5/Q8 等量化等级
+- **状态栏信息增强**（v2.9.7）：新增 CLIP/VAE 来源指示，标签 "保活" 扩展为 "UNET保活"
+
+### ⚠️ 重要变更
+
+- **移除分时显存优化功能**（v2.9.7）：开启后出图速度降至 201s，功能鸡肋且有副作用，彻底移除
+- **移除模型精度调节功能**（v2.9.5）：RTX 4060 无 FP8 硬件加速，精度转换导致内存抖动 + 画质劣化
+- **移除 SmartCLIP/SmartVAE 包装器**（v2.9.6）：不再干扰 ComfyUI 原生调度，直接使用原生对象
+
+### 📝 文档更新
+- 更新 `README.md`，新增模型加载节点完整说明
+- 更新 `README.md` 文件结构，添加 `checkpoint_plus.py` 和 `checkpoint_plus.js`
+- 更新 `README.md` 安装方法，新增 ComfyUI-GGUF 插件安装步骤
+- 更新 `README.md` 重要说明，新增 GGUF 依赖提示
+- 更新 `CHANGELOG.md`，记录 v1.3.0 版本变更
+- 更新 `CHANGELOG.md` v1.3.0，补充 GGUF 格式依赖 ComfyUI-GGUF 插件的说明
+
+---
+
 ## [1.2.0] - 2026-05-08
 
 ### ✨ 新增功能
