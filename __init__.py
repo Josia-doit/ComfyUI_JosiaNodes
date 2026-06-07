@@ -4,7 +4,7 @@ Josia ComfyUI 自定义节点集 - 总注册文件
 1. 本地文件名：全小写（如encoder.py、image_comparer.py）
 2. 代码内类名/注册名：带Josia（如JosiaEncoder、JosiaImageComparer）
 3. 中文显示名：带Josia（如Josia文本编码、Josia图像对比）
-包含节点：文本编码、流量阀门、缓存清理、随机种子、图像对比、图像缩放、分组控制、LoRA堆叠
+包含节点：文本编码、流量阀门、缓存清理、随机种子、图像对比、图像缩放、分组控制、LoRA堆叠、模型加载
 """
 import os
 import importlib.util
@@ -55,6 +55,7 @@ register_node("image_scaling", "JosiaImageScaling", "Josia图像缩放")
 register_node("group_controller", "JosiaGroupControllerM", "Josia多组控制")
 register_node("group_controller", "JosiaGroupControllerS", "Josia单组控制")
 register_node("lora_stack", "JosiaLoraStack", "JosiaLoRA堆叠")
+register_node("checkpoint_plus", "JosiaCheckpointPlus", "Josia模型加载")
 
 # ==================== 兼容旧版导入 ====================
 __all__ = [
