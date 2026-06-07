@@ -207,7 +207,7 @@ CHECKPOINT_PLUS_DESCRIPTION = """\
   关闭 — 允许 ComfyUI 在显存压力时正常卸载 UNET
 
 【状态栏信息】
-  显示模型类型/文件名/尺寸、CLIP/VAE来源与尺寸、UNET保活状态
+  显示模型类型/文件名/尺寸、UNET保活状态
 
 【平替兼容】
   直接替换 CheckpointLoader / UNETLoader / CLIPLoader / VAEloader\
