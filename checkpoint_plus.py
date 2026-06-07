@@ -3,7 +3,6 @@ Josia CheckpointPlus - 高级智能模型加载节点 v2.9.7
 v2.9.7 变更：
   - 彻底移除「分时显存优化」功能（定时卸载CLIP/VAE导致出图降速至201s）
     该功能已无存在价值，后续可用独立节点实现显存调度
-  - 状态栏增加 CLIP/VAE 来源指示（内置 or 外部文件名）
   - 状态栏"保活"标签扩展为"UNET保活"
 v2.9.6 变更：
   - 移除 _SmartCLIP / _SmartVAE 包装器（不再干扰 ComfyUI 原生调度）
@@ -529,18 +528,10 @@ class JosiaCheckpointPlus:
         # ═════ 回传识别结果 ═════
         clip_size_mb = None
         vae_size_mb  = None
-        clip_source  = ""
-        vae_source   = ""
         if clip_obj is not None and clip_name and clip_name != PLACEHOLDER_CLIP:
             clip_size_mb = _get_file_size_for_folder(clip_name, "clip")
-            clip_source  = os.path.basename(clip_name)
-        elif is_aio:
-            clip_source = "内置"
         if vae_obj is not None and vae_name and vae_name != PLACEHOLDER_VAE:
             vae_size_mb = _get_file_size_for_folder(vae_name, "vae")
-            vae_source  = os.path.basename(vae_name)
-        elif is_aio:
-            vae_source = "内置"
 
         ui_state = {
             "model_type": [model_type],
@@ -551,8 +542,6 @@ class JosiaCheckpointPlus:
             "vae_size_mb": [vae_size_mb],
             "gguf_quant": [gguf_quant],
             "clip_type": [clip_type],
-            "clip_source": [clip_source],
-            "vae_source": [vae_source],
         }
         return {"ui": ui_state, "result": (model_obj, clip_obj, vae_obj)}
 
