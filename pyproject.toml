@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-josianodes"
 description = "一套功能完整、轻量稳定的 ComfyUI 实用节点集。包含模型加载（多合一平替多个加载模型节点）、文本编码（文生图/图生图/参考Latent一体化）、图像缩放裁切（4大比例+3种自定义模式）、图像对比、流量阀门、随机种子、分组控制（2种）、缓存清理共九类（10个）节点。"
-version = "1.3.0"
+version = "1.3.1"
 license = { file = "LICENSE" }
 authors = [
   { name = "Josia", email = "icejj@qq.com" }
