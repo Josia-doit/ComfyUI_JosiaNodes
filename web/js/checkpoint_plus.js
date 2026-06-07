@@ -3,8 +3,7 @@
  *
  * v2.9.7 变更：
  *  1. 彻底移除分时显存优化(timed_vram)功能
- *  2. 状态栏增加 CLIP/VAE 来源指示（内置 or 外部文件名）
- *  3. 状态栏"保活"标签扩展为"UNET保活"
+ *  2. 状态栏"保活"标签扩展为"UNET保活"
  * v2.9.6 变更：
  *  1. 移除 SmartCLIP / SmartVAE 包装器（不再干扰 ComfyUI 原生调度）
  *  2. UNET 锁定改为仅保活模式，不强制占满 VRAM
@@ -314,8 +313,6 @@ function drawIdentifiedState(ctx, bx, by, bw, bh, info, node) {
     const vaeSizeMB   = info.vaeSizeMB || 0;
     const ggufQuant   = info.ggufQuant || null;
     const lockUnet    = info.lockUnet ?? true;
-    const clipSource  = info.clipSource || "";
-    const vaeSource   = info.vaeSource || "";
 
     // ── 第一行：[Tag] 文件名… → 类型描述 ──
     const row1Y = by + 14;
@@ -355,42 +352,21 @@ function drawIdentifiedState(ctx, bx, by, bw, bh, info, node) {
     ctx.textAlign = "right";
     ctx.fillText(tagLabel, bx + bw - 10, row1Y);
 
-    // ── 第二行：模型尺寸 + CLIP/VAE来源（左）→ UNET保活状态（右）──
+    // ── 第二行：模型尺寸（左）→ UNET保活状态（右）──
     const row2Y = by + 38;
     ctx.font = "9.5px sans-serif";
     ctx.textAlign = "left"; ctx.textBaseline = "middle";
 
     let sizeStr = "";
     if (mt === MT.AIO) {
-        const parts = [fileSizeMB > 0 ? formatSize(fileSizeMB) : ""];
-        if (clipSource) parts.push("内置CLIP");
-        if (vaeSource) parts.push("内置VAE");
-        sizeStr = parts.filter(Boolean).join("  ·  ");
+        sizeStr = fileSizeMB > 0 ? formatSize(fileSizeMB) : "";
     } else {
         const parts = [];
         if (fileSizeMB > 0) parts.push(`UNET ${formatSize(fileSizeMB)}`);
-        if (clipSizeMB > 0) {
-            let clipLabel = `CLIP ${formatSize(clipSizeMB)}`;
-            if (clipSource && clipSource !== "内置") clipLabel += ` (${clipSource})`;
-            parts.push(clipLabel);
-        } else if (clipSource && clipSource !== "内置") {
-            parts.push(`CLIP (${clipSource})`);
-        } else if (clipSource === "内置") {
-            parts.push("CLIP 内置");
-        } else {
-            parts.push("CLIP -");
-        }
-        if (vaeSizeMB > 0) {
-            let vaeLabel = `VAE ${formatSize(vaeSizeMB)}`;
-            if (vaeSource && vaeSource !== "内置") vaeLabel += ` (${vaeSource})`;
-            parts.push(vaeLabel);
-        } else if (vaeSource && vaeSource !== "内置") {
-            parts.push(`VAE (${vaeSource})`);
-        } else if (vaeSource === "内置") {
-            parts.push("VAE 内置");
-        } else {
-            parts.push("VAE -");
-        }
+        if (clipSizeMB > 0) parts.push(`CLIP ${formatSize(clipSizeMB)}`);
+        else if (mt !== MT.AIO) parts.push("CLIP -");
+        if (vaeSizeMB > 0) parts.push(`VAE ${formatSize(vaeSizeMB)}`);
+        else if (mt !== MT.AIO) parts.push("VAE -");
         sizeStr = parts.join("  |  ");
     }
 
@@ -816,8 +792,6 @@ app.registerExtension({
                     clipSizeMB: message?.clip_size_mb?.[0] || 0,
                     vaeSizeMB: message?.vae_size_mb?.[0] || 0,
                     ggufQuant: message?.gguf_quant?.[0] || null,
-                    clipSource: message?.clip_source?.[0] || "",
-                    vaeSource: message?.vae_source?.[0] || "",
                 });
 
                 console.log(
@@ -833,8 +807,6 @@ app.registerExtension({
                     fileSizeMB: message?.file_size_mb?.[0] || 0,
                     clipSizeMB: message?.clip_size_mb?.[0] || 0,
                     vaeSizeMB: message?.vae_size_mb?.[0] || 0,
-                    clipSource: message?.clip_source?.[0] || "",
-                    vaeSource: message?.vae_source?.[0] || "",
                 });
             }
         };
