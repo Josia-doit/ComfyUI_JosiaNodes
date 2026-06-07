@@ -177,12 +177,44 @@ ComfyUI_JosiaNodes/
 
 ---
 
+### 9. Josia模型加载（JosiaCheckpointPlus）
+- **分类**：Josia
+- **核心功能**：高级智能一体化模型加载节点，100% 平替所有原生加载器
+- **输入**：主模型、CLIP模型（可选）、CLIP类型、VAE模型（可选）、UNET保活开关
+- **输出**：MODEL / CLIP / VAE
+- **自动识别模式**：
+  - **AIO Checkpoint**：模型内含 UNET+CLIP+VAE，自动复用内置组件，自动禁用外部 CLIP/VAE 选框
+  - **独立 UNET**：仅含 UNET，可自由选配外部 CLIP 与 VAE
+  - **GGUF UNET**：量化模型，可搭配任意格式 CLIP（GGUF 或非 GGUF 均可）
+- **CLIP类型选择**：
+  - 1:1 复刻原生 CLIPLoader 全部 24 种类型（sdxl / flux / sd3 / wan / LTXV 等）
+  - AIO 模式自动适配 CLIP 类型，独立 UNET/GGUF 模式需手动选择
+- **UNET保活**（默认开启）：
+  - 防止 ComfyUI 意外卸载 UNET 模型，复用工作流时跳过重新加载
+  - 不强制占用物理显存，允许 ComfyUI 智能调度
+- **支持格式**：ckpt / safetensors / bin / gguf 全格式
+- **GGUF 依赖说明** ⚠️：
+  - 加载 **GGUF 格式模型**需要安装 [ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF) 插件
+  - 本节点负责智能调度（自动识别类型、控件联动、状态栏显示），GGUF 文件的实际解码由 ComfyUI-GGUF 插件完成
+  - 未安装时，GGUF 模型加载会报错并提示安装
+  - 非 GGUF 模型（ckpt / safetensors / bin）**完全独立运行**，无需任何额外插件
+- **状态栏信息**：
+  - 实时显示模型类型标签（AIO / UNET / GGUF 量化等级）
+  - 显示模型文件名、UNET / CLIP / VAE 尺寸
+  - 显示 CLIP / VAE 来源（内置 or 外部文件名）
+  - 显示 UNET保活开关状态
+- **特点**：100% 平替原生 CheckpointLoader / UNETLoader / CLIPLoader / VAELoader，一个节点搞定全部加载需求
+<img width="1270" height="802" alt="image" src="https://github.com/user-attachments/assets/795bd2db-6a17-44a6-9228-fbb8306c765c" />
+
+---
+
 ## 🛠️ 安装方法
 1. 下载整个 `ComfyUI_JosiaNodes` 文件夹
 2. 放入 `ComfyUI/custom_nodes/` 目录下
-3. 确保 `web/js` 文件夹完整，不要移动或删除文件
-4. 重启 ComfyUI
-5. 看到控制台输出 `[JosiaNodes] ✅ JosiaNodes 加载成功，注册节点数：8` 即成功
+3. **（如使用 GGUF 模型）** 安装 [ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF) 插件到 `ComfyUI/custom_nodes/`
+4. 确保 `web/js` 文件夹完整，不要移动或删除文件
+5. 重启 ComfyUI
+6. 看到控制台输出 `[JosiaNodes] ✅ JosiaNodes 加载成功，注册节点数：9` 即成功
 
 ---
 
@@ -196,12 +228,13 @@ ComfyUI_JosiaNodes/
 ---
 
 ## ⚠️ 重要说明
-1. 随机种子节点「♻️ 使用上一次种子」功能已修复，至此随机种子、分组控制、图像对比三个高频插件均已完美实现
+1. 随机种子节点「♻️ 使用上一次种子」功能目前失效，欢迎社区提交 PR 修复
 2. 文本编码节点的 VAE 端口为可选输入，未接入时图生图模式自动降级为空 Latent
 3. 图像缩放节点内置分辨率上限保护（400万像素），避免显存溢出
 4. 缓存清理节点在 Windows 上优化更明显，其他系统仅清理显存
-5. 分组控制、图像对比、流量阀门、种子节点均依赖前端 JS 文件，不可删除
+5. 分组控制、图像对比、流量阀门、种子节点、模型加载节点均依赖前端 JS 文件，不可删除
 6. 所有节点均已配置 `DESCRIPTION` 属性，在搜索节点界面和鼠标悬浮时可查看功能简介
+7. **模型加载节点 GGUF 依赖**：加载 GGUF 格式模型需安装 ComfyUI-GGUF 插件；ckpt/safetensors/bin 格式完全独立运行
 
 ---
 
