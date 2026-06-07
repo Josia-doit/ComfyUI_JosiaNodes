@@ -58,7 +58,6 @@ PRESET_SIZES = {
     ],
     "3:4/4:3 短视频比例": [
         ("关", None),
-        # 补充3:4竖屏（适配短视频场景，尺寸为你原有逻辑扩展）
         ("768×1024 (3:4)", (768, 1024)),
         ("960×1280 (3:4)", (960, 1280)),
         ("1080×1440 (3:4)", (1080, 1440)),
@@ -144,12 +143,11 @@ IMAGE_COMPARER_DESCRIPTION = """🖼️ Josia 图像对比
 • 🖱️ 点击对比（按住鼠标切换图像）
 
 使用方法：连接 图像A 与 图像B，拉大节点即可舒适对比。"""
-
 IMAGE_COMPARER_TOOLTIPS = {}
 
 # ===================== 组控制器节点配置 =====================
 DESCRIPTION_M = """\
-Josia多组控制 — 批量控制工作流中所有编组。
+Josia多组控制 — 批量控制工作流中的所有编组。
 
 【全局按钮】
   全部跳过 — 批量将所有编组内的节点设为跳过（Bypass）
@@ -188,6 +186,33 @@ Josia单组控制 — 精确控制工作流中的单个编组。
 选中的编组名称会随工作流保存，重新打开后自动恢复。\
 """
 
+# ===================== Checkpoint Plus 节点描述 =====================
+CHECKPOINT_PLUS_DESCRIPTION = """\
+🚀 Josia 模型加载 — 高级智能一体化模型加载节点 v2.9.7
+
+【自动识别模式】（全自动，无需手动切换）
+  AIO Checkpoint  — 模型内含UNET+CLIP+VAE，自动复用内置组件
+  独立 UNET       — 仅含UNET，可自由选配外部CLIP与VAE
+  GGUF UNET       — 量化模型，可搭配任意格式CLIP（GGUF或非GGUF）
+
+【CLIP类型选择】（手动选择，1:1复刻原生CLIPLoader）
+  AIO模式自动识别CLIP类型，无需手动选择（复刻原生CheckpointLoader行为）
+  独立UNET/GGUF模式需手动选择CLIP模型对应的架构类型
+  未选择类型时将使用STABLE_DIFFUSION兜底
+
+【UNET保活】（默认开启）
+  开启 — 防止 ComfyUI 意外卸载 UNET 模型
+          不强制占用物理显存，允许 ComfyUI 智能调度
+          修改提示词或下游节点时，UNET 保留在内存中
+  关闭 — 允许 ComfyUI 在显存压力时正常卸载 UNET
+
+【状态栏信息】
+  显示模型类型/文件名/尺寸、CLIP/VAE来源与尺寸、UNET保活状态
+
+【平替兼容】
+  直接替换 CheckpointLoader / UNETLoader / CLIPLoader / VAEloader\
+"""
+
 # ===================== LoRA 堆叠节点配置 =====================
 LORA_STACK_DESCRIPTION = """\
 🎛️ Josia LoRA 堆叠 — 多组 LoRA 顺序堆叠节点。
@@ -210,4 +235,3 @@ LORA_STACK_DESCRIPTION = """\
   模型强度 — LoRA 对模型的影响强度（-3.00 ~ 3.00，步进 0.05）
   CLIP 强度 — LoRA 对 CLIP 的影响强度（-3.00 ~ 3.00，步进 0.05）
   拖拽滑块或点击箭头步进调节，支持键盘输入精确值（-10.00 ~ 10.00）"""
-
