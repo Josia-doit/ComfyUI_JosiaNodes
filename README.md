@@ -17,6 +17,7 @@ ComfyUI_JosiaNodes/
 ├── lora_stack.py                  # LoRA 堆叠节点（多组顺序应用）
 ├── seed.py                        # 随机种子管理节点
 ├── cache_cleanup.py               # 显存 / 内存 / 系统缓存清理节点
+├── checkpoint_plus.py             # 高级智能一体化模型加载节点
 │
 └── web/
     └── js/
@@ -25,7 +26,8 @@ ComfyUI_JosiaNodes/
         ├── seed.js                # 随机种子前端按钮、快捷操作
         ├── image_comparer.js      # 图像对比滑动 / 按住对比交互
         ├── group_controller.js    # 分组控制前端 UI、开关、导航逻辑
-        └── lora_stack.js          # LoRA 堆叠前端交互（滑块、开关、强度调节）
+        ├── lora_stack.js          # LoRA 堆叠前端交互（滑块、开关、强度调节）
+        └── checkpoint_plus.js     # 模型加载节点类型识别与状态栏
 ```
 
 ---
