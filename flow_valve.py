@@ -40,31 +40,31 @@ class JosiaFlowValve:  # 类名与__init__.py注册的JosiaFlowValve严格一致
                     "default": True, 
                     "label": "通道1",
                     "label_on": "开✅数据透传",
-                    "label_off": "关❌流量截断"
+                    "label_off": "关❎流量截断"
                 }),
                 "通道2": ("BOOLEAN", {
                     "default": True, 
                     "label": "通道2",
                     "label_on": "开✅数据透传",
-                    "label_off": "关❌流量截断"
+                    "label_off": "关❎流量截断"
                 }),
                 "通道3": ("BOOLEAN", {
                     "default": True, 
                     "label": "通道3",
                     "label_on": "开✅数据透传",
-                    "label_off": "关❌流量截断"
+                    "label_off": "关❎流量截断"
                 }),
                 "通道4": ("BOOLEAN", {
                     "default": True, 
                     "label": "通道4",
                     "label_on": "开✅数据透传",
-                    "label_off": "关❌流量截断"
+                    "label_off": "关❎流量截断"
                 }),
                 "通道5": ("BOOLEAN", {
                     "default": True, 
                     "label": "通道5",
                     "label_on": "开✅数据透传",
-                    "label_off": "关❌流量截断"
+                    "label_off": "关❎流量截断"
                 }),
             },
             "optional": {
