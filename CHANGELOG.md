@@ -7,6 +7,18 @@
 
 ---
 
+## [1.3.1] - 2026-06-07
+
+### ⚠️ 临时修复
+
+- **移除 CLIP/VAE 外部文件名显示功能**：该功能代码不稳定，且在状态栏显示外部文件名作用甚微，直接删除
+  - 删除 `checkpoint_plus.py` 中 `clip_source`/`vae_source` 变量及 UI state 回传
+  - 删除 `web/js/checkpoint_plus.js` 中 `clipSource`/`vaeSource` 变量及所有使用
+  - 第二行状态栏回归纯尺寸显示（`UNET 5.2 GB | CLIP 320 MB | VAE 180 MB`）
+  - 同步更新 `node_properties.py` / `README.md` / `CHANGELOG.md` 相关描述
+
+---
+
 ## [1.3.0] - 2026-06-07
 
 ### ✨ 新增功能
