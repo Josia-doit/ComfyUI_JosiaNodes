@@ -31,13 +31,13 @@ class JosiaEncoder:
                 "image_reference_switch": ("BOOLEAN", {
                     "default": True,
                     "label_on": "✅ 图生图模式",
-                    "label_off": "❌ 文生图模式",
+                    "label_off": "❎ 文生图模式",
                     "display_name": "图像参考模式"
                 }),
                 "reference_latent_mode": ("BOOLEAN", {
                     "default": True,
                     "label_on": "✅ 参考Latent条件",
-                    "label_off": "❌ 标准VAE编码",
+                    "label_off": "❎ 标准VAE编码",
                     "display_name": "参考Latent模式"
                 }),
                 "positive_prompt": ("STRING", {
@@ -50,7 +50,7 @@ class JosiaEncoder:
                 "negative_switch": ("BOOLEAN", {
                     "default": True,
                     "label_on": "✅ 负向提示词正常生效",
-                    "label_off": "❌ 负向提示词条件归零",
+                    "label_off": "❎ 负向提示词条件归零",
                     "display_name": "负向提示词生效"
                 }),
                 "negative_prompt": ("STRING", {
