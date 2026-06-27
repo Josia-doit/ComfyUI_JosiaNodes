@@ -10,6 +10,7 @@ ComfyUI_JosiaNodes/
 ├── __init__.py                    # 节点总注册、统一导出、加载日志
 ├── node_properties.py             # 全节点常量、尺寸预设、描述文案
 ├── encoder.py                     # 文本 + 多图参考编码节点
+├── multi_image_loader.py          # 多图批量加载节点（缩放/上传/拖拽/粘贴）
 ├── image_scaling.py               # 多功能图像缩放裁切节点
 ├── image_comparer.py              # 双图对比预览节点
 ├── flow_valve.py                  # 5 通道流量阀门节点
@@ -22,6 +23,7 @@ ComfyUI_JosiaNodes/
 └── web/
     └── js/
         ├── encoder.js             # 文本编码节点默认尺寸配置
+        ├── multi_image_loader.js  # 多图加载前端（图库/拖拽/缩略图/自适应布局）
         ├── flow_valve.js          # 流量阀门前端美化
         ├── seed.js                # 随机种子前端按钮、快捷操作
         ├── image_comparer.js      # 图像对比滑动 / 按住对比交互
@@ -60,7 +62,38 @@ ComfyUI_JosiaNodes/
 
 ---
 
-### 2. Josia图像缩放（JosiaImageScaling）
+### 2. Josia多图加载（JosiaMultiImageLoader）
+- **分类**：Josia
+- **核心功能**：批量加载多张图片，支持选择文件 / 拖拽 / 粘贴，每张图独立等比缩放
+- **输入**：
+  - 图片路径（前端图库区自动管理，无需手动输入）
+  - 上游图像（可选，串联模式：上游图像插入本节点图像之前合并输出）
+  - 缩放模式 / 百万像素 / 缩放步数 / 边长方向 / 边长值 / 缩放算法 / 对齐倍数
+- **输出**：
+  - `image_list`：批次输出（所有图像合并为一个 batch，混合比例时自动 letterbox）
+  - `image_1` ~ `image_N`：每张图独立输出（各自正确的等比缩放尺寸，无黑边无拉伸）
+- **缩放模式**（原生 BOOLEAN 开关，全中文参数名）：
+  - 🖼️ **按像素缩放**：按总像素目标等比缩放（参考原生 ImageScaleToTotalPixels），每张图独立计算
+  - 📐 **按边长缩放**：按长边或短边等比缩放，另一方向自动适配
+    - ➡️ 按长边缩放 / ⬇️ 按短边缩放
+- **缩放步数**（N 步渐进缩放）：
+  - 默认 1 = 一步到位（最快）
+  - 2~16 = 分步渐进缩放，大比例缩小时减少锯齿和伪影，质量更好
+- **高级特性**：
+  - 6 种缩放算法（lanczos / nearest / bilinear / bicubic / area / nearest-exact）
+  - 尺寸对齐倍数（0 / 8 / 16 / 32），适配 VAE 编解码
+  - 绝对路径去重，防止同名不同目录的图片重复载入
+  - 缩放值=0 表示不缩放，原图直出
+- **前端图库**：
+  - 自适应缩略图网格（参考对标节点 optimizeGrid 算法，无限缩放）
+  - 节点尺寸随图库区域自动变化（wasFresh 检测 + force-shrink 机制）
+  - 支持文件选择 / 拖拽 / 粘贴三种来源
+  - 滚轮缩放、分辨率标签显示、一键排序 / 清空 / 重置参数
+- **特点**：使用 ComfyUI 标准 `/upload/image` API，原生 BOOLEAN 开关（不破坏 ComfyUI 布局），全中文参数名
+
+---
+
+### 3. Josia图像缩放（JosiaImageScaling）
 - **分类**：Josia
 - **核心功能**：全能图像缩放裁切，支持 4 大比例 + 3 种自定义模式
 - **输入**：图像（可选）、遮罩（可选）
@@ -85,7 +118,7 @@ ComfyUI_JosiaNodes/
 
 ---
 
-### 3. Josia图像对比（JosiaImageComparer）
+### 4. Josia图像对比（JosiaImageComparer）
 - **分类**：Josia
 - **核心功能**：双图实时对比预览，支持两种交互模式
 - **输入**：image_a、image_b（均为可选）
@@ -97,7 +130,7 @@ ComfyUI_JosiaNodes/
 
 ---
 
-### 4. Josia流量阀门（JosiaFlowValve）
+### 5. Josia流量阀门（JosiaFlowValve）
 - **分类**：Josia
 - **核心功能**：5 路独立通道开关，自由控制数据透传或截断
 - **输入**：通道1~5（任意类型，可选）
@@ -107,7 +140,7 @@ ComfyUI_JosiaNodes/
 
 ---
 
-### 5. Josia随机种子（JosiaSeed）
+### 6. Josia随机种子（JosiaSeed）
 - **分类**：Josia
 - **核心功能**：专业级随机种子管理，支持自动/递增/递减/固定模式
 - **种子规则**：
@@ -123,9 +156,9 @@ ComfyUI_JosiaNodes/
 
 ---
 
-### 6. Josia分组控制（JosiaGroupControllerM / JosiaGroupControllerS）
+### 7. Josia分组控制（JosiaGroupControllerM / JosiaGroupControllerS）
 - **分类**：Josia
-- **多组控制（Josia多组控制）**：自动扫描所有编组，一键全部跳过/启用，点击组名快速定位，激活“单选模式”可启用互斥激活
+- **多组控制（Josia多组控制）**：自动扫描所有编组，一键全部跳过/启用，点击组名快速定位，激活"单选模式"可启用互斥激活
 - **单组控制（Josia单组控制）**：下拉选择编组，单个开关精准控制启用/跳过
 - **状态显示**：
   - 绿色：已启用
@@ -136,7 +169,7 @@ ComfyUI_JosiaNodes/
 
 ---
 
-### 7. Josia LoRA 堆叠（JosiaLoraStack）
+### 8. Josia LoRA 堆叠（JosiaLoraStack）
 - **分类**：Josia
 - **核心功能**：多组 LoRA 顺序堆叠，支持 1-10 组独立控制
 - **输入**：模型、CLIP（可选）
@@ -162,7 +195,7 @@ ComfyUI_JosiaNodes/
 
 ---
 
-### 8. Josia缓存清理（JosiaCacheCleanup）
+### 9. Josia缓存清理（JosiaCacheCleanup）
 - **分类**：Josia
 - **核心功能**：轻量安全释放显存/内存/系统缓存，不卸载模型
 - **输入**：任意类型数据（可选，透传用）
@@ -179,7 +212,7 @@ ComfyUI_JosiaNodes/
 
 ---
 
-### 9. Josia模型加载（JosiaCheckpointPlus）
+### 10. Josia模型加载（JosiaCheckpointPlus）
 - **分类**：Josia
 - **核心功能**：高级智能一体化模型加载节点，100% 平替所有原生加载器
 - **输入**：主模型、CLIP模型（可选）、CLIP类型、VAE模型（可选）、UNET保活开关
@@ -215,7 +248,7 @@ ComfyUI_JosiaNodes/
 3. **（如使用 GGUF 模型）** 安装 [ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF) 插件到 `ComfyUI/custom_nodes/`
 4. 确保 `web/js` 文件夹完整，不要移动或删除文件
 5. 重启 ComfyUI
-6. 看到控制台输出 `[JosiaNodes] ✅ JosiaNodes 加载成功，注册节点数：9` 即成功
+6. 看到控制台输出 `[JosiaNodes] ✅ JosiaNodes 加载成功，注册节点数：10` 即成功
 
 ---
 
@@ -233,9 +266,10 @@ ComfyUI_JosiaNodes/
 2. 文本编码节点的 VAE 端口为可选输入，未接入时图生图模式自动降级为空 Latent
 3. 图像缩放节点内置分辨率上限保护（400万像素），避免显存溢出
 4. 缓存清理节点在 Windows 上优化更明显，其他系统仅清理显存
-5. 分组控制、图像对比、流量阀门、种子节点、模型加载节点均依赖前端 JS 文件，不可删除
+5. 分组控制、图像对比、流量阀门、种子节点、模型加载节点、多图加载节点均依赖前端 JS 文件，不可删除
 6. 所有节点均已配置 `DESCRIPTION` 属性，在搜索节点界面和鼠标悬浮时可查看功能简介
 7. **模型加载节点 GGUF 依赖**：加载 GGUF 格式模型需安装 ComfyUI-GGUF 插件；ckpt/safetensors/bin 格式完全独立运行
+8. **多图加载节点**：`image_list` 批次输出在混合不同比例图片时会自动 letterbox（黑边居中），这是 PyTorch tensor batch 的数学限制；如需每张图独立的正确尺寸，请使用 `image_1` ~ `image_N` 单独输出端口
 
 ---
 

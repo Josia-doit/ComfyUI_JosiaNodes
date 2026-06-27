@@ -7,6 +7,77 @@
 
 ---
 
+## [1.4.0] - 2026-06-27
+
+### ✨ 新增功能
+
+#### 多图加载节点（JosiaMultiImageLoader）
+- **批量加载多张图片**：支持文件选择 / 拖拽 / 粘贴三种来源，一键批量载入
+- **每张图独立等比缩放**（参考原生 ImageScaleToTotalPixels），无黑边无拉伸
+  - 🖼️ 按像素缩放：按总像素目标等比缩放，每张图独立计算目标尺寸
+  - 📐 按边长缩放：➡️ 按长边 / ⬇️ 按短边等比缩放，另一方向自动适配
+  - 默认值=0：不缩放，原图直出
+- **N 步渐进缩放**：`缩放步数` 控制分几步缩放到目标分辨率
+  - 默认 1 = 一步到位（最快）
+  - 2~16 = 分步渐进，大比例缩小时减少锯齿和伪影
+  - 单步走 PIL 直接缩放路径（更快），多步转 tensor 分步执行（质量更好）
+- **动态输出端口**：`image_list` 批次输出 + `image_1` ~ `image_N` 独立输出（最多 50 张）
+- **串联模式**：可选 `images` 输入端口，上游图像插入本节点图像之前合并输出
+- **原生 BOOLEAN 开关**：缩放模式 / 边长方向使用 ComfyUI 原生 BOOLEAN 控件
+  - 全中文参数名 + Emoji 标签（参考 Josia文本编码节点 label_on/label_off 模式）
+  - 开关状态动态显隐对应参数（syncWidgetVisibility）
+- **6 种缩放算法**：lanczos / nearest / bilinear / bicubic / area / nearest-exact
+- **尺寸对齐倍数**：0 / 8 / 16 / 32，适配 VAE 编解码
+- **前端图库**：
+  - 自适应缩略图网格（参考对标节点 optimizeGrid 算法，缩略图无限缩放）
+  - 节点尺寸随图库区域自动变化（wasFresh 检测 + force-shrink 机制）
+  - 使用 ComfyUI 标准 `/upload/image` API（稳定可靠）
+  - 绝对路径去重，防止同名不同目录的图片重复载入
+  - 滚轮缩放、分辨率标签显示、一键排序 / 清空 / 重置参数
+- **公共 API 端点**：
+  - `/josia_multi_image/info` — 获取图片原始宽高
+  - `/josia_multi_image/input_dir` — 获取 input 目录路径
+  - `/josia_multi_image/thumbnail` — 缩略图服务（多策略路径解析 + 占位图）
+  - `/josia_multi_image/upload` — 拷贝外部图像到 input 目录
+  - `/josia_multi_image/upload_files` — 批量上传 multipart 文件
+
+### 🐛 Bug 修复
+
+#### 多图加载节点
+- **修复自定义 DOM 注入破坏 ComfyUI 布局**：v6.2 使用 `insertBefore` 注入开关按钮导致 `last_y`/`computeSize` 全乱 → v6.4 彻底改用原生 BOOLEAN 控件
+- **修复节点高度失控**：v6.5 调用链时序混乱导致高度递增 → v6.6 完全基于对标节点重做布局系统（LAYOUT 常量 + wasFresh 检测 + force-shrink）
+- **修复图像无法加载**：v6.6 自定义 `/josia_multi_image/upload` API 不稳定 → v6.7 改用 ComfyUI 标准 `/upload/image` API
+- **修复"分辨率步数"名称歧义**：之前实际只做尺寸取整 → v6.8 实现真正的 N 步渐进缩放功能 + 改名"缩放步数"
+
+### 🎨 界面优化
+
+- **两组开关 Emoji 完全区分**：
+  - 缩放模式：🖼️ 按像素缩放 / 📐 按边长缩放（图画 + 尺子系列）
+  - 边长方向：➡️ 按长边缩放 / ⬇️ 按短边缩放（方向箭头系列）
+- **全中文参数名**：缩放模式 / 百万像素 / 缩放步数 / 边长方向 / 边长值 / 缩放算法 / 对齐倍数
+
+### 🔧 技术改进
+
+- **布局系统完全对标参考节点**：
+  - 统一 `LAYOUT = { MIN_GALLERY: 250, PB: 25, MIN_W: 220 }` 常量对象
+  - `updateOutputPorts()` 返回 `{changed, wasFresh}` — wasFresh 检测初始 51 端口状态
+  - `updateLayout(forceShrink)` 支持强制收缩模式（首次/清空时触发）
+  - 覆盖 `computeSize` / `setSize` / `onResize` / `onConfigure` / `onAdded` 统一使用 LAYOUT 常量
+  - 初始化不设固定尺寸，靠 `updateLayout(true)` 自动计算最小高度
+- **多步渐进缩放**：`resize_tensor_multi_step()` 函数，每步线性插值中间尺寸，最后一步精确到达目标 + 对齐倍数
+- **安全图像打开**：`safe_pil_open()` 参考原生 `node_helpers.pillow` 处理截断图像
+- **多策略路径解析**：绝对路径 / 相对 input / 按文件名查找 / output 目录查找
+
+### 📝 文档更新
+- 更新 `README.md`，新增多图加载节点完整说明
+- 更新 `README.md` 文件结构，添加 `multi_image_loader.py` 和 `multi_image_loader.js`
+- 更新 `README.md` 安装方法，节点数 9 → 10
+- 更新 `README.md` 重要说明，新增 image_list letterbox 说明
+- 更新 `CHANGELOG.md`，记录 v1.4.0 版本变更
+- 更新 `pyproject.toml`，版本号 1.3.1 → 1.4，描述新增多图加载节点
+
+---
+
 ## [1.3.1] - 2026-06-07
 
 ### ⚠️ 临时修复

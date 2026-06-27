@@ -235,3 +235,43 @@ LORA_STACK_DESCRIPTION = """\
   模型强度 — LoRA 对模型的影响强度（-3.00 ~ 3.00，步进 0.05）
   CLIP 强度 — LoRA 对 CLIP 的影响强度（-3.00 ~ 3.00，步进 0.05）
   拖拽滑块或点击箭头步进调节，支持键盘输入精确值（-10.00 ~ 10.00）"""
+
+# ===================== 多图加载节点配置 =====================
+NODE_DISPLAY_NAME_MULTI_IMAGE = "Josia多图加载"
+
+# 缩放模式 — BOOLEAN 开关（参考 Josia文本编码节点 label_on/label_off 模式）
+# resize_mode: True = 按像素缩放, False = 按边长缩放
+
+# 边长方向 — BOOLEAN 开关
+# edge_direction: True = 按长边缩放, False = 按短边缩放
+
+# 插值算法
+MULTI_IMAGE_INTERPOLATIONS = ["lanczos", "nearest", "bilinear", "bicubic", "area", "nearest-exact"]
+
+# 对齐倍数下拉选项
+MULTI_IMAGE_MULTIPLE_OF_OPTIONS = ["0", "8", "16", "32"]
+
+# 数值参数默认值
+MULTI_IMAGE_DEFAULT_PARAMS = {
+    "resize_mode": True,            # BOOLEAN: True=按像素缩放, False=按边长缩放
+    "megapixels": 0.0,              # 0=不缩放（原图直出），>0=按总像素等比缩放
+    "resolution_steps": 1,           # 缩放步数（分几步渐进缩放到目标，默认1=一步到位）
+    "edge_direction": True,         # BOOLEAN: True=按长边缩放, False=按短边缩放
+    "edge_value": 0,                # 0=不缩放，>0=按边长等比缩放
+    "interpolation": "lanczos",
+    "multiple_of": "16",
+}
+
+# 各参数中文提示（用于 INPUT_TYPES tooltip）
+MULTI_IMAGE_PARAM_DESCRIPTIONS = {
+    "image_paths": "（内部使用）图片路径列表，由前端图库区管理，无需手动输入",
+    "resize_mode": "开关：🖼️ 按像素缩放 = 按总像素目标等比缩放（每张图独立计算）；📐 按边长缩放 = 按长边或短边等比缩放",
+    "megapixels": "目标总像素（百万像素），0=不缩放（原图直出），1.0≈1024×1024。每张图按自身比例独立计算。仅在「按像素缩放」模式下生效。",
+    "resolution_steps": "缩放步数，分几步渐进缩放到目标分辨率（默认1=一步到位）。步数越多，大比例缩小时质量越好但越慢。仅在「按像素缩放」模式下生效。",
+    "edge_direction": "开关：➡️ 按长边缩放 = 长边适配目标值、短边等比；⬇️ 按短边缩放 = 短边适配目标值、长边等比",
+    "edge_value": "边长目标像素值，0=不缩放。仅在「按边长缩放」模式下生效。",
+    "interpolation": "缩放插值算法：lanczos高质量/nearest最近邻/bilinear双线性/bicubic双三次/area区域/nearest-exact精确最近邻",
+    "multiple_of": "尺寸对齐倍数（默认16适配VAE），0=不对齐。每张图独立对齐。",
+}
+
+MULTI_IMAGE_LOADER_DESCRIPTION = "Josia 多图加载 v6.8 — 批量加载多张图片，支持上传/拖拽/粘贴。每张图独立等比缩放（无黑边无拉伸），支持 N 步渐进缩放。原生 BOOLEAN 开关切换缩放模式，全中文参数名。缩放值=0 表示不缩放原图直出。"
