@@ -1,6 +1,7 @@
 # Josia ComfyUI 自定义节点集
 一套功能完整、轻量稳定、高度兼容最新版 ComfyUI 的实用节点集。专为解决老旧节点包兼容性差、体积臃肿、运行卡顿问题而设计，把高频刚需功能浓缩为一套轻量化扩展，让 ComfyUI 工作流更简洁、更顺畅。
-<img width="1853" height="1174" alt="image" src="https://github.com/user-attachments/assets/61bd0a91-650c-49cc-92a4-d118405a723f" />
+<img width="2228" height="1158" alt="image" src="https://github.com/user-attachments/assets/2e9e0946-c160-4edb-9c58-df5461456473" />
+
 
 ---
 
@@ -90,6 +91,8 @@ ComfyUI_JosiaNodes/
   - 支持文件选择 / 拖拽 / 粘贴三种来源
   - 滚轮缩放、分辨率标签显示、一键排序 / 清空 / 重置参数
 - **特点**：使用 ComfyUI 标准 `/upload/image` API，原生 BOOLEAN 开关（不破坏 ComfyUI 布局），全中文参数名
+<img width="1566" height="889" alt="image" src="https://github.com/user-attachments/assets/a763d047-5df4-4bf4-836f-2220b4b0ae02" />
+
 
 ---
 
