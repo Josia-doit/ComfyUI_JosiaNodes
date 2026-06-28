@@ -1,25 +1,25 @@
 /**
- * JosiaMultiImageLoader 前端 v6.8
+ * JosiaMultiImageLoader 前端 v7.2
  *
- * v6.8 改进（真正的分步缩放+Emoji统一）:
- * - ★ 实现真正的 N 步渐进缩放：设置几就分几次缩放到目标分辨率
- *   （之前 resolution_steps 只做尺寸取整，现在改为真实的分步缩放逻辑）
- *   steps=1: 一步到位（最快，默认）
- *   steps=2~16: 分步渐进缩放（大比例缩小时质量更好）
- * - ★ "缩放分段" 改回 "缩放步数"（用户要求名称）
- * - ★ 边长方向 Emoji 统一为方向箭头系列：➡️ 按长边 / ⬇️ 按短边
+ * v7.2 改进（完全重做递增机制 — 抛弃 control_after_generate）:
+ * - ★ 后端维护 self._next_index，通过 PromptServer 自定义消息 "josia_mil_inc" 通知前端
+ * - ★ 监听 josia_mil_inc 消息 → 更新 output_index widget（后递增+1）
+ * - ★ ★ api.addEventListener 接收 CustomEvent，数据在 event.detail 里（不是 raw dict！）
+ * - ★ 支持工作流运行和下游预览单独执行（自定义消息不限返回格式）
+ * - ★ 达到最大值归零（next_index=0，显示0=已全部输出完毕），不循环
+ * - ★ 序号=0 时输出空列表，下游不执行，提示用户恢复默认后再运行
+ * - ★ 上游端口连接/断开 → 序号自动复位为1（onConnectionsChange）
+ * - ★ 恢复默认按钮：重置参数（output_index→1），不清空图库，不切换输出模式
+ * - ★ display_name: 输出序号→下次输出序号（避免歧义）
+ * - ★ 移除所有 control_after_generate COMBO 搜索/隐藏代码
+ * - ★ 移除 afterQueued 备用方案
  *
- * v6.7 修复（图像加载+参数改名+Emoji更换）:
- * - ★ 修复图像加载：统一使用 ComfyUI 标准 /upload/image API（对标节点模式）
- * - ★ "分辨率步数" 改名为 "缩放分段"
- * - ★ 缩放模式 Emoji：🖼️ 按像素 / 📐 按边长
- * - ★ 边长方向 Emoji：↔️ 按长边 / 🔲 按短边
- *
- * v6.6 完全基于对标节点重做布局系统（修复节点高度失控）:
- * - ★ LAYOUT 常量对象 + wasFresh 检测 + force-shrink
- * - ★ 统一调用链：render → syncOutputs → rAF(updateLayout)
- *
- * v6.3: 删除自定义开关按钮（DOM注入破坏布局）→ 恢复原生控件
+ * v7.1: control_after_generate 种子递增尝试（已废弃）
+ * v7.0: 输出序号 + 原生开关 + 自动递增
+ * v6.9: 输出模式开关 + 端口改名 images_out
+ * v6.8: 真正的 N 步渐进缩放 + Emoji统一
+ * v6.7: 标准上传 API + Emoji更换
+ * v6.6: 完全基于对标节点重做布局系统
  * v6.0: 每图独立等比缩放 + 图库自适应 optimizeGrid
  */
 
@@ -51,6 +51,9 @@ const STYLES = `
 .josia-mil-btn-danger:hover{background:#e74c3c}
 .josia-mil-btn-normal{background:#2a2a2a;color:#ccc}
 .josia-mil-btn-normal:hover{background:#3a3a3a}
+.josia-mil-btn-toggle{background:#2a2a2a;color:#ccc;border-color:#555;font-weight:normal}
+.josia-mil-btn-toggle:hover{background:#3a3a3a}
+.josia-mil-btn-toggle.active{background:#4a3a6d;color:#c8b0ff;border-color:#6a5a8d;font-weight:bold}
 .josia-mil-count{font-size:11px;color:#888;margin-left:auto}
 /* Grid wrapper — 参考对标节点：绝对定位填满区域 */
 .josia-mil-grid-wrapper{
@@ -165,6 +168,8 @@ async function initNode(node) {
     const resStepsW      = node.widgets.find(w => w.name === "resolution_steps");
     const edgeDirectionW = node.widgets.find(w => w.name === "edge_direction");
     const edgeValueW     = node.widgets.find(w => w.name === "edge_value");
+    const outputModeW    = node.widgets.find(w => w.name === "output_mode");
+    const outputIdxW     = node.widgets.find(w => w.name === "output_index");
 
     // ── widget 显隐辅助 ──
     function setWidgetVisible(w, visible) {
@@ -188,6 +193,31 @@ async function initNode(node) {
         // 按边长缩放参数
         setWidgetVisible(edgeDirectionW, !isPixel);
         setWidgetVisible(edgeValueW, !isPixel);
+        // v7.0: output_index 灰化 — 批次模式不可编辑
+        syncOutputIndexEditable();
+    }
+
+    // ★ v7.2: output_index 灰化逻辑（简化版 — 不再操作 COMBO widget）
+    // 批次模式：灰化 output_index（不可编辑，序号不递增）
+    // 列表模式：可编辑 output_index（后端执行后自动递增）
+    function syncOutputIndexEditable() {
+        if (!outputIdxW || !outputModeW) return;
+        const isList = !!outputModeW.value;
+        try {
+            outputIdxW.disabled = !isList;
+            const rowEl = outputIdxW.inputEl && (
+                outputIdxW.inputEl.closest(".comfy-widget-row") ||
+                outputIdxW.inputEl.closest(".widget-row")
+            );
+            if (rowEl) {
+                rowEl.style.opacity = isList ? "1" : "0.4";
+                rowEl.style.pointerEvents = isList ? "auto" : "none";
+            }
+            if (outputIdxW.inputEl) {
+                outputIdxW.inputEl.disabled = !isList;
+                outputIdxW.inputEl.style.opacity = isList ? "1" : "0.4";
+            }
+        } catch(e) { /* 静默 */ }
     }
 
     if (resizeModeW) {
@@ -195,6 +225,16 @@ async function initNode(node) {
         resizeModeW.callback = function(v) {
             origCallback(v);
             syncWidgetVisibility();
+            node.setDirtyCanvas(true, true);
+        };
+    }
+
+    // ★ v7.0: output_mode callback — 切换列表/批次时更新 output_index 灰化状态
+    if (outputModeW) {
+        const origModeCallback = outputModeW.callback || (()=>{});
+        outputModeW.callback = function(v) {
+            origModeCallback(v);
+            syncOutputIndexEditable();
             node.setDirtyCanvas(true, true);
         };
     }
@@ -629,6 +669,7 @@ async function initNode(node) {
         node.setDirtyCanvas(true, true);
     }
 
+    // ★ v7.2: 万能恢复默认 — 重置所有参数回归默认值（不清空图库已加载图像）
     function resetParamsOnly() {
         const defaults = {
             resize_mode: true,        // BOOLEAN: 🖼️=按像素缩放
@@ -638,15 +679,21 @@ async function initNode(node) {
             edge_value: 0,
             interpolation: "lanczos",
             multiple_of: "16",
+            // ★ v7.2: 不重置 output_mode！保持用户选择的图像列表/图像批次状态
+            output_index: 1,          // ★ v7.2: 重置序号为 1（万能恢复）
         };
         for (const w of node.widgets) {
+            if (w.name === "output_mode") continue; // ★ 不重置输出模式
             if (defaults.hasOwnProperty(w.name)) {
                 w.value = defaults[w.name];
                 if (w.callback) w.callback(w.value);
             }
         }
+        // ★ 重置后端实例变量（通过 PromptServer 消息同步 next_index=1）
         syncWidgetVisibility();
+        syncOutputIndexEditable();
         node.setDirtyCanvas(true, true);
+        console.log("[Josia多图加载] ✅ 已恢复默认（参数重置，图库保留，输出模式不变）");
     }
 
     function resortByName() {
@@ -673,8 +720,76 @@ async function initNode(node) {
     const btnReset  = mkBtn("恢复默认", "josia-mil-btn-normal");
     const lblCount  = document.createElement("span");
     lblCount.className = "josia-mil-count";
-    // 工具栏（不含缩放模式开关，开关已移至参数区）
+    // 工具栏（v7.0: 删除 btnOutput，回到4按钮+计数，单行不换行）
     toolbar.append(btnUpload, btnResort, btnClear, btnReset, lblCount);
+
+    // ★ v7.2: PromptServer josia_mil_inc 消息监听 — 后端执行后通知前端更新序号
+    // 后端通过 PromptServer.send_sync 发送 {node_id, next_index, total, upstream_count}
+    // 前端监听并更新 output_index widget 值为 next_index（后递增 +1）
+    // 此机制支持工作流运行和下游预览单独执行（自定义消息不限返回格式）
+    let _lastTotal = 0;
+    let _lastUpstreamCount = -1;
+    const _milIncListener = (event) => {
+        // ★ ComfyUI api.addEventListener 接收 CustomEvent，数据在 event.detail 里
+        const data = event.detail;
+        if (String(data.node_id) !== String(node.id)) {
+            console.log(`[Josia多图加载] [调试] 收到其他节点的 josia_mil_inc 消息: node_id=${data.node_id}, 本节点id=${node.id}`);
+            return;
+        }
+        console.log(`[Josia多图加载] ✅ 收到本节点的 josia_mil_inc 消息: next_index=${data.next_index}, total=${data.total}`);
+        
+        // 只在列表模式下更新序号（批次模式不递增）
+        if (!outputModeW || !outputModeW.value) {
+            console.log(`[Josia多图加载] [调试] 当前为批次模式，不更新序号`);
+            return;
+        }
+        if (!outputIdxW) {
+            console.log(`[Josia多图加载] ⚠️ outputIdxW 不存在，无法更新序号`);
+            return;
+        }
+
+        _lastTotal = parseInt(data.total) ?? 0;
+        _lastUpstreamCount = parseInt(data.upstream_count) ?? 0;
+        // ★ 修复：不能用 || 1（0 || 1 = 1），必须用 ??（仅 null/undefined 时才回退）
+        const nextIndex = parseInt(data.next_index) ?? 1;
+
+        // 更新 widget 值 + 触发 callback 让 ComfyUI 同步到 graph
+        outputIdxW.value = nextIndex;
+        if (outputIdxW.callback) outputIdxW.callback(nextIndex);
+        node.setDirtyCanvas(true, true);
+        console.log(`[Josia多图加载] ✅ output_index 已更新为 ${nextIndex}`);
+    };
+    api.addEventListener("josia_mil_inc", _milIncListener);
+
+    // ★ v7.2: 节点移除时清理监听器
+    const origOnRemoved = node.onRemoved;
+    node.onRemoved = function() {
+        api.removeEventListener("josia_mil_inc", _milIncListener);
+        if (origOnRemoved) origOnRemoved.apply(this, arguments);
+    };
+
+    // ★ v7.2: 上游端口连接变化 → 序号自动复位为1
+    // 无论是连接还是断开上游"images"输入端口，都重置 output_index 为1
+    const origOnConnectionsChange = node.onConnectionsChange;
+    node.onConnectionsChange = function(type, slotIndex, isConnected, linkInfo, slotInfo) {
+        if (origOnConnectionsChange) origOnConnectionsChange.apply(this, arguments);
+        // type === 1 表示输入端口变化
+        if (type === 1 && node.inputs && node.inputs[slotIndex]) {
+            const inputName = node.inputs[slotIndex].name;
+            if (inputName === "images") {
+                // 上游端口变化（连接/断开）→ 序号复位为1
+                if (outputIdxW) {
+                    const prevValue = parseInt(outputIdxW.value) || 0;
+                    if (prevValue !== 1) {
+                        outputIdxW.value = 1;
+                        if (outputIdxW.callback) outputIdxW.callback(1);
+                        node.setDirtyCanvas(true, true);
+                        console.log(`[Josia多图加载] 上游端口"${inputName}"${isConnected ? "已连接" : "已断开"}，序号复位为1`);
+                    }
+                }
+            }
+        }
+    };
 
     // 事件绑定（v6.7: 统一使用 handleFiles）
     btnUpload.onclick = () => fileInput.click();
@@ -915,11 +1030,11 @@ async function initNode(node) {
     //   3. onAdded                → V1 模式下再次强制紧凑
     requestAnimationFrame(() => {
         setWidgetVisible(pathsW, false);
+        // ★ v7.0: outputModeW 为原生 BOOLEAN 开关（可见）
         syncWidgetVisibility();
-        // ★ v6.6: 不再设置固定初始尺寸！让布局系统自动计算
-        // 对标节点也不设固定尺寸，直接靠 refreshGallery → updateLayout(true) 计算
+        syncOutputIndexEditable();            // v7.2: 初始化灰化状态（简化版）
+        // ★ v7.2: 不再搜索 control_after_generate COMBO widget（已废弃该机制）
         if (node.syncLayoutToNode) node.syncLayoutToNode();
-        // ★ 直接调用 refreshImageList → 内部：render → updateOutputPorts(0) → wasFresh=true → rAF(updateLayout(true))
         try { refreshImageList(); } catch(e) { renderGallery(); }
     });
 

@@ -1,23 +1,37 @@
 """
-JosiaMultiImageLoader — 多图加载节点 v6.8
+JosiaMultiImageLoader — 多图加载节点 v7.2
 批量加载多张图片，支持路径列表、上传、拖拽、粘贴。
 支持串联：可选 images 输入端口，上游图像插入本节点图像之前合并输出。
-动态输出：根据载入图像数量自动激活对应数量的独立图像端口 + image_list 批次输出。
+动态输出：根据载入图像数量自动激活对应数量的独立图像端口 + images_out 汇总输出。
 
-v6.8 改进:
-- ★ 真正的 N 步渐进缩放：resolution_steps 控制分几步缩放到目标
-     steps=1: 一步到位（最快，默认）
-     steps=2~16: 分步渐进，大比例缩小时质量更好
-- ★ "缩放分段" -> "缩放步数"
-- ★ 边长方向 Emoji 统一：➡️ 按长边 / ⬇️ 按短边
+v7.2 改进（完全重做递增机制 — 抛弃 control_after_generate）:
+- ★ 标签重命名：输出列表→图像列表, 输出批次→图像批次
+- ★ total_count INT 输出端口：组合池大小（上游+本地），前端用于精确递增上界
+- ★ PromptServer 自定义消息 "josia_mil_inc" 通知前端更新 widget（后递增+1）
+- ★ ★ api.addEventListener 接收 CustomEvent，数据在 event.detail 里（不是 raw dict！）
+- ★ 后端 self._next_index 追踪：执行后递增，达到总数归零（next_index=0）
+- ★ output_index=0 表示已全部输出完毕，输出空列表，提示恢复默认后再运行
+- ★ 上游端口连接/断开 → 序号自动复位为1（前端 onConnectionsChange）
+- ★ 恢复默认按钮：重置参数（output_index→1），不清空图库，不切换输出模式
+- ★ display_name: 输出序号→下次输出序号（避免歧义）
+- ★ 移除 _prev_upstream_count 追踪和 ValueError 崩溃
+- ★ 移除 control_after_generate="increment"（种子递增机制完全不适用）
+- ★ 每次只递增 +1（解决 +2 bug）
+- ★ 支持工作流运行和下游预览单独执行（自定义消息不限返回格式）
 
-v6.7:
-- 图像加载改用 ComfyUI 标准 /upload/image API
-- Emoji 更换：缩放模式 🖼️/📐，边长方向 ↔️/🔲
+【上游兼容性】
+  ✅ 批次上游（如另一个多图加载的批次模式）：拆分为多张，与本地合并为组合池
+  ✅ 单图上游（如 LoadImage 节点）：作为1张上游加入组合池
+  ❌ 列表模式上游：不支持（ComfyUI 无迭代上下文，tensor 不可区分）
+     建议：需要串联时，将上游节点设为批次模式
 
-v6.4: resize_mode/edge_direction 改为原生 BOOLEAN 开关
-v6.3: 删除自定义开关按钮，恢复原生控件
-v6.0: 每图独立等比缩放（参考原生 ImageScaleToTotalPixels）+ 图库自适应 optimizeGrid
+v7.1: control_after_generate 种子递增尝试（已废弃）
+v7.0: 输出序号控制 + 原生开关 + 自动递增
+v6.9: 输出模式开关 + 端口改名 images_out
+v6.8: 真正的 N 步渐进缩放 + Emoji统一
+v6.7: 标准上传 API + Emoji更换
+v6.4: BOOLEAN 原生开关
+v6.0: 每图独立等比缩放 + 图库自适应 optimizeGrid
 """
 import os
 import math
@@ -241,8 +255,12 @@ class JosiaMultiImageLoader:
     OUTPUT_NODE = True
 
     MAX_OUTPUTS = 50
-    RETURN_TYPES = ("IMAGE",) * (1 + MAX_OUTPUTS)
-    RETURN_NAMES = ("image_list",) + tuple(f"image_{i}" for i in range(1, MAX_OUTPUTS + 1))
+    RETURN_TYPES = ("IMAGE",) * (1 + MAX_OUTPUTS) + ("INT",)
+    RETURN_NAMES = ("images_out",) + tuple(f"image_{i}" for i in range(1, MAX_OUTPUTS + 1)) + ("total_count",)
+    # ★ v6.9: 第一个端口始终为 list 类型 — 返回 [batch] 时下游收到整个 batch，
+    #   返回 [t1, t2, ...] 时下游逐张执行。实现 batch/list 运行时切换。
+    # 末尾新增 total_count INT 端口（OUTPUT_IS_LIST=False）
+    OUTPUT_IS_LIST = (True,) + (False,) * MAX_OUTPUTS + (False,)
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -296,6 +314,19 @@ class JosiaMultiImageLoader:
                     "display_name": "对齐倍数",
                     "tooltip": MULTI_IMAGE_PARAM_DESCRIPTIONS["multiple_of"],
                 }),
+                "output_mode": ("BOOLEAN", {
+                    "default": MULTI_IMAGE_DEFAULT_PARAMS["output_mode"],
+                    "label_on": "📋 图像列表",
+                    "label_off": "📦 图像批次",
+                    "display_name": "多图输出模式",
+                    "tooltip": MULTI_IMAGE_PARAM_DESCRIPTIONS["output_mode"],
+                }),
+                "output_index": ("INT", {
+                    "default": MULTI_IMAGE_DEFAULT_PARAMS["output_index"],
+                    "min": 0, "max": 9999, "step": 1,
+                    "display_name": "下次输出序号",
+                    "tooltip": MULTI_IMAGE_PARAM_DESCRIPTIONS["output_index"],
+                }),
             },
             "optional": {
                 "images": ("IMAGE", {
@@ -303,12 +334,34 @@ class JosiaMultiImageLoader:
                     "display_name": "上游图像",
                 }),
             },
+            "hidden": {"unique_id": "UNIQUE_ID"},
         }
+
+    def __init__(self):
+        self._next_index = 1  # v7.2: 执行后自动递增到的下一个序号（1-based）
 
     def load_images(self, image_paths, resize_mode, megapixels, resolution_steps,
                     edge_direction, edge_value, interpolation,
-                    multiple_of, images=None):
-        """v6.0: 每张图独立等比缩放，无黑边无拉伸"""
+                    multiple_of, output_mode, output_index=1, images=None, unique_id=None):
+        """
+        v7.2: 每张图独立等比缩放，无黑边无拉伸。
+        output_mode: True=图像列表(按序号单张), False=图像批次(合并)
+        output_index: 列表模式下的下次输出序号（1-based），上游图像在前、本地在后。
+            - output_index=0: 已全部输出完毕，输出空列表（下游不执行），需恢复默认后重新运行
+            - 1 ≤ output_index ≤ total: 正常输出该序号指向的图像
+            - 执行后自动递增+1，达到总数后归零（next_index=0）
+        total_count: 组合池大小（上游+本地），用于前端显示。
+        第一个端口 images_out 始终返回 list（OUTPUT_IS_LIST=True）：
+          - 批次模式: [batch_tensor] → 下游收到 1 个 batch
+          - 列表模式: [tensor_at_index] → 下游收到 1 张图，逐张执行
+
+        ★ v7.2: 上游变化不报错，自动根据实际情况调整序号
+        ★ v7.2: 通过 PromptServer 发送 josia_mil_inc 消息通知前端递增
+        【上游兼容性】
+          ✅ 批次上游：拆分为多张，与本地合并为组合池，output_index 跨全池计数
+          ✅ 单图上游（LoadImage）：作为1张上游加入池首
+          ❌ 列表模式上游：不支持（ComfyUI 无迭代上下文）
+        """
         paths = self._resolve_paths(image_paths.strip())
         multi_of = int(multiple_of)
 
@@ -334,20 +387,76 @@ class JosiaMultiImageLoader:
         all_tensors.extend(local_tensors)
 
         total = len(all_tensors)
+        current_upstream = 0 if images is None else images.shape[0]
+        empty = torch.zeros(1, 64, 64, 3)
+
         if total == 0:
-            empty = torch.zeros(1, 64, 64, 3)
-            return (empty,) + (empty,) * JosiaMultiImageLoader.MAX_OUTPUTS
+            # 无图像：输出空 → 序号归 1
+            self._next_index = 1
+            return ([empty],) + (empty,) * JosiaMultiImageLoader.MAX_OUTPUTS + (0,)
 
-        # ── image_list: batch（混合比例时 letterbox，数学限制）──
-        batch = assemble_batch_v6(all_tensors)
+        # ★ v7.2: 序号处理（不再自动归一，0=已全部输出完毕）
+        idx = int(output_index)
+        # idx=0 表示已全部输出完毕，输出空列表（下游不执行）
+        # idx < 0 理论上不应出现，但仍归一到 1
 
-        # ── 单独输出 image_N: 各自正确的等比缩放尺寸（无黑边）──
-        result = [batch]
+        # ═══ 输出 ────────────────────────────────────────
+        if not output_mode:
+            # ═══ 批次模式（与 v6.9 一致）════
+            batch = assemble_batch_v6(all_tensors)
+            first_output = [batch]
+        else:
+            # ═══ 列表模式 v7.2：按序号单张输出 ═══
+            if idx < 1:
+                # 序号=0：已全部输出完毕 → 输出空列表（下游不执行）
+                print(f"[Josia多图加载] ⚠️ 本轮图像列表输出完毕（共{total}张），请恢复默认后再运行")
+                first_output = []
+            elif idx > total:
+                # 序号越界 → 输出空列表（下游不执行）+ 归零
+                print(f"[Josia多图加载] ⚠️ 输出序号{idx}超出总数{total}，本轮图像列表输出完毕，请恢复默认后再运行")
+                first_output = []
+            else:
+                selected = all_tensors[idx - 1]
+                first_output = [selected]
+
+        # ── 单独输出 image_N ──
+        result = [first_output]
         for i in range(JosiaMultiImageLoader.MAX_OUTPUTS):
             if i < total:
                 result.append(all_tensors[i])
             else:
-                result.append(torch.zeros(1, 64, 64, 3))
+                result.append(empty)
+
+        # ★ v7.2: total_count INT 输出
+        result.append(total)
+
+        # ★ v7.2: 后递增 — 计算下一个序号（执行后递增 +1）
+        if idx < 1 or idx > total:
+            # 已全部输出完毕或越界 → 归零（next_index=0，前端显示0）
+            self._next_index = 0
+            print(f"[Josia多图加载] ℹ️ 序号已归零（idx={idx}, total={total}），下次输出序号=0（已全部输出完毕）")
+        else:
+            # 正常：当前序号 +1，达到总数后归零（不循环）
+            self._next_index = idx + 1
+            if self._next_index > total:
+                self._next_index = 0
+                print(f"[Josia多图加载] ℹ️ 序号已归零（idx={idx}, total={total}），下次输出序号=0（已全部输出完毕）")
+            else:
+                print(f"[Josia多图加载] ℹ️ 序号递增：{idx} → {self._next_index}（共{total}张）")
+
+        # ★ v7.2: 通过 PromptServer 发送递增消息到前端
+        # 使用自定义消息（不限返回格式，工作流运行和单节点预览都生效）
+        try:
+            PromptServer.instance.send_sync("josia_mil_inc", {
+                "node_id": str(unique_id),
+                "next_index": self._next_index,
+                "total": total,
+                "upstream_count": current_upstream,
+            })
+            print(f"[Josia多图加载] ✅ 已发送 josia_mil_inc 消息：node_id={unique_id}, next_index={self._next_index}, total={total}")
+        except Exception as e:
+            print(f"[Josia多图加载] ⚠️ 发送 josia_mil_inc 消息失败：{e}")
+
         return tuple(result)
 
     def _resize_existing_tensor(self, tensor, resize_mode, megapixels, resolution_steps,

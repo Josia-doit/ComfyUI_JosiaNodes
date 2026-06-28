@@ -260,6 +260,8 @@ MULTI_IMAGE_DEFAULT_PARAMS = {
     "edge_value": 0,                # 0=不缩放，>0=按边长等比缩放
     "interpolation": "lanczos",
     "multiple_of": "16",
+    "output_mode": False,           # BOOLEAN: False=输出批次(batch), True=输出列表(list)
+    "output_index": 1,              # INT: 列表模式下次输出序号（1=第1张，0=已全部输出完毕需恢复默认）
 }
 
 # 各参数中文提示（用于 INPUT_TYPES tooltip）
@@ -272,6 +274,8 @@ MULTI_IMAGE_PARAM_DESCRIPTIONS = {
     "edge_value": "边长目标像素值，0=不缩放。仅在「按边长缩放」模式下生效。",
     "interpolation": "缩放插值算法：lanczos高质量/nearest最近邻/bilinear双线性/bicubic双三次/area区域/nearest-exact精确最近邻",
     "multiple_of": "尺寸对齐倍数（默认16适配VAE），0=不对齐。每张图独立对齐。",
+    "output_mode": "开关：📦 图像批次 = 所有图像合并为一个 batch（混合比例时 letterbox 黑边）；📋 图像列表 = 按序号逐张输出，下游逐张执行（无黑边）。⚠️ 图像列表模式不支持上游列表串联——如需串联，请将上游节点设为批次模式。",
+    "output_index": "列表模式：下次输出的图像序号（1=第1张，从上游图像开始计数）。上游在前、本节点在后。达到总数后自动归零（序号显示0=已全部输出完毕），需点击「恢复默认」重置为1后再运行。批次模式下此参数灰化不可编辑。⚠️ 上游为列表时可能跳过上游图像，请将上游设为批次模式。连接或断开上游端口时序号自动复位为1。",
 }
 
-MULTI_IMAGE_LOADER_DESCRIPTION = "Josia 多图加载 v6.8 — 批量加载多张图片，支持上传/拖拽/粘贴。每张图独立等比缩放（无黑边无拉伸），支持 N 步渐进缩放。原生 BOOLEAN 开关切换缩放模式，全中文参数名。缩放值=0 表示不缩放原图直出。"
+MULTI_IMAGE_LOADER_DESCRIPTION = "Josia 多图加载 v7.2.1 — 批量加载多张图片，支持上传/拖拽/粘贴。每张图独立等比缩放（无黑边无拉伸），支持 N 步渐进缩放。图像列表模式按序号逐张输出（后端后递增+1，归零不循环），上游端口变化自动复位序号，恢复默认万能修复（不清空图库、不切换模式），全中文参数名。修复：归零显示0（不循环）、手动设0输出空列表+友好提示、??替代||修复JS falsy bug。"

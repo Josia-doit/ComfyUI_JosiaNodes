@@ -7,6 +7,51 @@
 
 ---
 
+## [1.4.5] - 2026-06-29
+
+### ✨ 新增功能
+
+#### 随机种子节点（JosiaSeed）v7.2.2
+- **新增 ⬆️ 递增 / ⬇️ 递减按钮**：与 🎲 每次随机同一行，使用原生 `addWidget("button")` 实现
+- **递增/递减按钮初始灰化**：无历史种子时禁用（opacity:0.35 + pointer-events:none），运行生成种子后自动激活
+- **后端逻辑简化**：删除 `_current_mode` 状态追踪，改为仅检查 `self._last_seed is not None`
+  - `-2`（递增）：有历史种子则 `_last_seed + 1`，无则返回 `0`（不再随机初始化基数）
+  - `-3`（递减）：有历史种子则 `_last_seed - 1`，无则返回 `0`（不再随机初始化基数）
+- **修复固定种子分支**：else 分支新增 `self._last_seed = seed`，确保用户设定的种子值可作为后续递增/递减基数
+
+#### 多图加载节点（JosiaMultiImageLoader）v7.2.1
+- **完全重做递增机制**：抛弃 `control_after_generate` 方案（存在 +2 bug、预递增、仅工作流生效等问题）
+  - 后端维护 `self._next_index` 实例变量，执行后后递增 +1
+  - 通过 `PromptServer.send_sync("josia_mil_inc")` 自定义消息通知前端更新 widget
+  - 支持工作流运行和下游预览单独执行两种触发方式
+- **归零而非循环**：达到最大序号后 `next_index=0`（前端显示 `0 = 已全部输出完毕`）
+  - `output_index=0` 时输出空列表 + 友好提示，不触发下游执行
+  - 修复 JS `parseInt(0) || 1 = 1` bug（改用 `?? 1`，仅 null/undefined 回退）
+- **上游端口变化自动复位**：`onConnectionsChange(type=1, inputName="images")` → 序号复位为 1
+- **万能恢复默认**：重置 `output_index→1`，不清空图库，不切换 `output_mode`
+- **重命名**：输出序号 → 下次输出序号（避免歧义）
+
+### 🐛 Bug 修复
+
+#### 多图加载节点
+- **修复递增 +2 bug**：`control_after_generate` COMBO 机制和底层 widget 都递增，导致每次 +2 → 改用自定义消息机制
+- **修复预递增**：`control_after_generate` 是预递增设计 → 改为后端后递增（先输出当前 idx，再计算 next_index）
+- **修复仅工作流生效**：`control_after_generate` 仅对执行队列中的节点触发 → 改用 `PromptServer` 自定义消息（对工作流和单节点预览均生效）
+- **修复归零失效**：JS `||` 运算符对 `0` 返回 `1` → 改用 `??` 空值合并运算符
+- **修复手动设 0 仍输出图像**：Python 负索引 `all_tensors[-1]` 获取最后一张图 → 增加 `idx < 1` 显式检查
+
+#### 随机种子节点
+- **修复递增/递减首次随机基数**：固定种子分支不记录 `_last_seed`，导致切换 -2/-3 时走随机初始化 → else 分支添加 `self._last_seed = seed`
+- **修复按钮样式异常**（v7.2.1）：自定义 `<a>` 元素按钮导致初始超大、hover 变形、文本可选中、点击延迟生效 → v7.2.2 回退原生 `addWidget("button")`
+
+### 📝 文档更新
+- 更新 `README.md` 随机种子节点说明，对齐 v7.2.2 功能
+- 更新 `README.md` 多图加载节点说明，对齐 v7.2.1 功能
+- 更新 `pyproject.toml` 版本号 1.4 → 1.4.5
+- backup 目录从 `ComfyUI_JosiaNodes/backup/` 移至项目根目录 `ComfyUI custom nodes/backup/`
+
+---
+
 ## [1.4.0] - 2026-06-27
 
 ### ✨ 新增功能
