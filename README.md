@@ -97,6 +97,7 @@ ComfyUI_JosiaNodes/
   - 路径列表拆分：将多行路径字符串拆分为路径列表
   - 配置项拆分：将多行配置文本逐行拆分
 - **特点**：纯 Python 标准库实现，零依赖，兼容所有 ComfyUI 版本
+<img width="2028" height="483" alt="image" src="https://github.com/user-attachments/assets/79904329-2ee8-4ba5-abe3-f4883a6aa808" />
 
 ---
 
@@ -120,6 +121,7 @@ ComfyUI_JosiaNodes/
   - `%003%` → 3位序号从003开始
 - **文件名冲突处理**：同名文件自动追加 _001、_002 等编号
 - **特点**：支持 CSV 格式（自动添加 UTF-8 BOM，Excel 友好）；纯 Python 标准库实现，零依赖
+<img width="2013" height="389" alt="image" src="https://github.com/user-attachments/assets/42cd1ea4-1fb8-4afa-9de1-4590b486881c" />
 
 ---
 
