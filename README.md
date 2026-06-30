@@ -11,6 +11,8 @@ ComfyUI_JosiaNodes/
 ├── node_properties.py             # 全节点常量、尺寸预设、描述文案
 ├── encoder.py                     # 文本 + 多图参考编码节点
 ├── multi_image_loader.py          # 多图批量加载节点（缩放/上传/拖拽/粘贴）
+├── text_list.py                   # 文本列表节点（多行按行分割为列表）
+├── text_save.py                   # 文本保存节点（保存文本到文件）
 ├── image_scaling.py               # 多功能图像缩放裁切节点
 ├── image_comparer.py              # 双图对比预览节点
 ├── flow_valve.py                  # 5 通道流量阀门节点
@@ -24,6 +26,8 @@ ComfyUI_JosiaNodes/
     └── js/
         ├── encoder.js             # 文本编码节点默认尺寸配置
         ├── multi_image_loader.js  # 多图加载前端（图库/拖拽/缩略图/自适应布局）
+        ├── text_list.js           # 文本列表前端
+        ├── text_save.js           # 文本保存前端（文件夹选择器）
         ├── flow_valve.js          # 流量阀门前端美化
         ├── seed.js                # 随机种子前端按钮、快捷操作
         ├── image_comparer.js      # 图像对比滑动 / 按住对比交互
@@ -31,6 +35,23 @@ ComfyUI_JosiaNodes/
         ├── lora_stack.js          # LoRA 堆叠前端交互（滑块、开关、强度调节）
         └── checkpoint_plus.js     # 模型加载节点类型识别与状态栏
 ```
+
+---
+
+## 📑 节点目录
+
+1. [Josia文本编码（JosiaEncoder）](#1-josia文本编码josiaencoder)
+2. [Josia文本列表（JosiaTextList）](#2-josia文本列表josiatextlist)
+3. [Josia文本保存（JosiaTextSave）](#3-josia文本保存josiatextsave)
+4. [Josia多图加载（JosiaMultiImageLoader）](#4-josia多图加载josiamultiimageloader)
+5. [Josia图像缩放（JosiaImageScaling）](#5-josia图像缩放josiaimagescaling)
+6. [Josia图像对比（JosiaImageComparer）](#6-josia图像对比josiaimagecomparer)
+7. [Josia流量阀门（JosiaFlowValve）](#7-josia流量阀门josiaflowvalve)
+8. [Josia随机种子（JosiaSeed）](#8-josia随机种子josiaseed)
+9. [Josia分组控制（JosiaGroupControllerM / JosiaGroupControllerS）](#9-josia分组控制josiagroupcontrollerm--josiagroupcontrollers)
+10. [JosiaLoRA堆叠（JosiaLoraStack）](#10-josialora堆叠josialorastack)
+11. [Josia缓存清理（JosiaCacheCleanup）](#11-josia缓存清理josiacachecleanup)
+12. [Josia模型加载（JosiaCheckpointPlus）](#12-josia模型加载josiacheckpointplus)
 
 ---
 
@@ -62,7 +83,47 @@ ComfyUI_JosiaNodes/
 
 ---
 
-### 2. Josia多图加载（JosiaMultiImageLoader）
+### 2. Josia文本列表（JosiaTextList）
+
+- **分类**：Josia
+- **核心功能**：将多行字符串按换行符分割为字符串列表，每行作为一个独立字符串输出
+- **输入**：文本（多行字符串，支持上游文本节点连接）
+- **输出**：prompt_list（字符串列表）
+- **可选设置**：
+  - 过滤空行（默认开启）：自动去除分割后的空行
+  - 修剪空白（默认开启）：去除每行首尾空格、制表符等空白字符
+- **适用场景**：
+  - 提示词批量处理：将多行提示词逐行拆分为独立条目
+  - 路径列表拆分：将多行路径字符串拆分为路径列表
+  - 配置项拆分：将多行配置文本逐行拆分
+- **特点**：纯 Python 标准库实现，零依赖，兼容所有 ComfyUI 版本
+
+---
+
+### 3. Josia文本保存（JosiaTextSave）
+
+- **分类**：Josia
+- **核心功能**：将文本内容保存到文件，支持通配符解析、文件夹选择、图像文件名复用
+- **输入**：
+  - 文本（多行字符串，支持上游节点连接）
+  - 图像（可选，接入时自动复用原图文件名）
+- **输出**：输出文本（透传输入文本，方便串联）
+- **参数**：
+  - 选择文件夹：点击按钮打开系统文件夹选择器
+  - 保存路径：手动输入或自动填充的目录路径
+  - 文件名：支持通配符（%date%/%time%/序号等）
+  - 文件格式：txt / csv
+- **通配符规则**（成对 %xxx% 解析）：
+  - `%date%` → 2026-06-30
+  - `%time%` → 07:38:41
+  - `%date:yyMMdd%` → 260630
+  - `%003%` → 3位序号从003开始
+- **文件名冲突处理**：同名文件自动追加 _001、_002 等编号
+- **特点**：支持 CSV 格式（自动添加 UTF-8 BOM，Excel 友好）；纯 Python 标准库实现，零依赖
+
+---
+
+### 4. Josia多图加载（JosiaMultiImageLoader）
 - **分类**：Josia
 - **核心功能**：批量加载多张图片，支持选择文件 / 拖拽 / 粘贴，每张图独立等比缩放
 - **输入**：
@@ -132,7 +193,7 @@ ComfyUI_JosiaNodes/
 
 ---
 
-### 5. Josia流量阀门（JosiaFlowValve）
+### 7. Josia流量阀门（JosiaFlowValve）
 - **分类**：Josia
 - **核心功能**：5 路独立通道开关，自由控制数据透传或截断
 - **输入**：通道1~5（任意类型，可选）
@@ -166,7 +227,7 @@ ComfyUI_JosiaNodes/
 
 ---
 
-### 7. Josia分组控制（JosiaGroupControllerM / JosiaGroupControllerS）
+### 9. Josia分组控制（JosiaGroupControllerM / JosiaGroupControllerS）
 - **分类**：Josia
 - **多组控制（Josia多组控制）**：自动扫描所有编组，一键全部跳过/启用，点击组名快速定位，激活"单选模式"可启用互斥激活
 - **单组控制（Josia单组控制）**：下拉选择编组，单个开关精准控制启用/跳过
@@ -179,7 +240,7 @@ ComfyUI_JosiaNodes/
 
 ---
 
-### 8. Josia LoRA 堆叠（JosiaLoraStack）
+### 10. Josia LoRA 堆叠（JosiaLoraStack）
 - **分类**：Josia
 - **核心功能**：多组 LoRA 顺序堆叠，支持 1-10 组独立控制
 - **输入**：模型、CLIP（可选）
@@ -222,7 +283,7 @@ ComfyUI_JosiaNodes/
 
 ---
 
-### 10. Josia模型加载（JosiaCheckpointPlus）
+### 12. Josia模型加载（JosiaCheckpointPlus）
 - **分类**：Josia
 - **核心功能**：高级智能一体化模型加载节点，100% 平替所有原生加载器
 - **输入**：主模型、CLIP模型（可选）、CLIP类型、VAE模型（可选）、UNET保活开关
@@ -258,7 +319,7 @@ ComfyUI_JosiaNodes/
 3. **（如使用 GGUF 模型）** 安装 [ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF) 插件到 `ComfyUI/custom_nodes/`
 4. 确保 `web/js` 文件夹完整，不要移动或删除文件
 5. 重启 ComfyUI
-6. 看到控制台输出 `[JosiaNodes] ✅ JosiaNodes 加载成功，注册节点数：10` 即成功
+6. 看到控制台输出 `[JosiaNodes] ✅ JosiaNodes 加载成功，注册节点数：12` 即成功
 
 ---
 
@@ -279,6 +340,7 @@ ComfyUI_JosiaNodes/
 6. 所有节点均已配置 `DESCRIPTION` 属性，在搜索节点界面和鼠标悬浮时可查看功能简介
 7. **模型加载节点 GGUF 依赖**：加载 GGUF 格式模型需安装 ComfyUI-GGUF 插件；ckpt/safetensors/bin 格式完全独立运行
 8. **多图加载节点**：`image_list` 批次输出在混合不同比例图片时会自动 letterbox（黑边居中），这是 PyTorch tensor batch 的数学限制；如需每张图独立的正确尺寸，请使用 `image_1` ~ `image_N` 单独输出端口
+9. 文本列表和文本保存节点为纯 Python 标准库实现，不依赖前端 JS 文件，即使前端 JS 丢失也可正常工作（仅文件夹选择功能需 JS 支持）
 
 ---
 
