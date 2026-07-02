@@ -97,7 +97,7 @@ ComfyUI_JosiaNodes/
   - 路径列表拆分：将多行路径字符串拆分为路径列表
   - 配置项拆分：将多行配置文本逐行拆分
 - **特点**：纯 Python 标准库实现，零依赖，兼容所有 ComfyUI 版本
-<img width="2028" height="483" alt="image" src="https://github.com/user-attachments/assets/79904329-2ee8-4ba5-abe3-f4883a6aa808" />
+<img width="1403" height="625" alt="image" src="https://github.com/user-attachments/assets/3b146ac0-8a5c-4067-925d-027eaadb731f" />
 
 ---
 
