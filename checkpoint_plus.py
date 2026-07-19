@@ -86,15 +86,22 @@ CLIP_TYPE_OPTIONS = [
 
 def _clip_type_to_enum(type_str: str):
     """运行时将 CLIP 类型字符串转为 comfy.sd.CLIPType 枚举值。
-    旧版ComfyUI不支持的类型会回退到 STABLE_DIFFUSION。"""
+
+    与 ComfyUI 原生 CLIPLoader 保持一致：对类型名做 .upper() 后取枚举
+    （枚举成员名为大写，如 FLUX2 / LUMINA2 / QWEN_IMAGE / STABLE_DIFFUSION），
+    因此下拉框里的小写选项（flux2 / lumina2 / qwen_image …）也能正确命中。
+    旧版 ComfyUI 不支持的类型会回退到 STABLE_DIFFUSION。
+    注意：早期缺少 .upper() 会导致所有小写类型都 AttributeError 回退，
+    表现为“不支持 flux2 / lumina2”等，且实际始终按 stable_diffusion 加载。
+    """
     if type_str == PLACEHOLDER_CLIP_TYPE or type_str == "已自动识别（内置）":
         return None
     CT = comfy.sd.CLIPType
-    try:
-        return getattr(CT, type_str)
-    except AttributeError:
+    member = getattr(CT, type_str.upper(), None)
+    if member is None:
         print(f"[JosiaCheckpointPlus] ⚠️ 当前ComfyUI不支持CLIP类型 '{type_str}'，回退为 stable_diffusion")
         return CT.STABLE_DIFFUSION
+    return member
 
 # ========================== GGUF扩展名注册 ==========================
 
@@ -120,6 +127,25 @@ def _is_gguf_path(path: str) -> bool:
     return isinstance(path, str) and path.lower().endswith(".gguf")
 
 
+def _get_gguf_class(class_name: str):
+    """从 ComfyUI 全局节点注册表获取 ComfyUI-GGUF 插件已注册的加载器类。
+
+    为什么这样集成：
+      ComfyUI-GGUF 插件将其文件平铺在 custom_nodes/ComfyUI-GGUF/ 下，
+      内部并没有可供直接 import 的 comfyui_gguf 子包，因此
+      `from comfyui_gguf.xxx import ...` 这类写法会失败（这也正是之前各种修改
+      都无法加载 GGUF 的根因）。
+      但只要该插件已安装并启用，它注册到 ComfyUI 的 UnetLoaderGGUF /
+      CLIPLoaderGGUF 节点类就存在于全局 nodes.NODE_CLASS_MAPPINGS 中。
+      直接复用这些「经过插件自身验证」的加载逻辑，既稳又无需关心其内部包结构。
+    """
+    try:
+        import nodes as _comfy_nodes
+        return getattr(_comfy_nodes, "NODE_CLASS_MAPPINGS", {}).get(class_name)
+    except Exception:
+        return None
+
+
 def _get_all_checkpoints() -> list:
     try:
         return folder_paths.get_filename_list("checkpoints")
@@ -128,55 +154,92 @@ def _get_all_checkpoints() -> list:
 
 
 def _get_all_unets() -> list:
+    # 常规 diffusion_models 列表（已含 .gguf，因 GGUF 插件把 .gguf 注册进了扩展名）
     base = []
     try:
         base = folder_paths.get_filename_list("diffusion_models")
     except Exception:
         pass
 
+    # GGUF UNET：优先使用 ComfyUI-GGUF 插件注册的 unet_gguf 列表
+    # （其文件名可被 GGUF 加载器直接解析，是最可靠的来源）
     gguf_extra = []
     try:
-        paths = folder_paths.get_folder_paths("diffusion_models")
-        for folder in paths:
-            if not os.path.isdir(folder):
-                continue
-            for root, _, files in os.walk(folder):
-                for f in files:
-                    if f.lower().endswith(".gguf"):
-                        rel = os.path.relpath(os.path.join(root, f), folder)
-                        rel = rel.replace("\\", "/")
-                        if rel not in base:
-                            gguf_extra.append(rel)
+        gguf_extra = list(folder_paths.get_filename_list("unet_gguf"))
+    except Exception:
+        gguf_extra = []
+
+    # 兜底：直接遍历文件夹（兼容插件未注册 / 自定义路径的极端情况）
+    try:
+        paths = list(folder_paths.get_folder_paths("diffusion_models"))
+    except Exception:
+        paths = []
+    try:
+        paths += list(folder_paths.get_folder_paths("unet_gguf"))
     except Exception:
         pass
+    for folder in paths:
+        if not os.path.isdir(folder):
+            continue
+        for root, _, files in os.walk(folder):
+            for f in files:
+                if f.lower().endswith(".gguf"):
+                    rel = os.path.relpath(os.path.join(root, f), folder)
+                    rel = rel.replace("\\", "/")
+                    if rel not in gguf_extra:
+                        gguf_extra.append(rel)
 
-    return base + gguf_extra
+    combined = []
+    seen = set()
+    for f in base + gguf_extra:
+        if f not in seen:
+            seen.add(f)
+            combined.append(f)
+    return combined
 
 
 def _get_all_clips() -> list:
+    # 常规 clip 列表
     base = []
     try:
         base = folder_paths.get_filename_list("clip")
     except Exception:
         pass
 
+    # GGUF CLIP：优先使用 ComfyUI-GGUF 插件注册的 clip_gguf 列表
     gguf_extra = []
     try:
-        paths = folder_paths.get_folder_paths("clip")
-        for folder in paths:
-            if not os.path.isdir(folder):
-                continue
-            for root, _, files in os.walk(folder):
-                for f in files:
-                    if f.lower().endswith(".gguf"):
-                        rel = os.path.relpath(os.path.join(root, f), folder)
-                        rel = rel.replace("\\", "/")
-                        if rel not in base:
-                            gguf_extra.append(rel)
+        gguf_extra = list(folder_paths.get_filename_list("clip_gguf"))
+    except Exception:
+        gguf_extra = []
+
+    # 兜底：直接遍历文件夹（兼容插件未注册的极端情况）
+    try:
+        paths = list(folder_paths.get_folder_paths("clip"))
+    except Exception:
+        paths = []
+    try:
+        paths += list(folder_paths.get_folder_paths("clip_gguf"))
     except Exception:
         pass
+    for folder in paths:
+        if not os.path.isdir(folder):
+            continue
+        for root, _, files in os.walk(folder):
+            for f in files:
+                if f.lower().endswith(".gguf"):
+                    rel = os.path.relpath(os.path.join(root, f), folder)
+                    rel = rel.replace("\\", "/")
+                    if rel not in gguf_extra:
+                        gguf_extra.append(rel)
 
-    return base + gguf_extra
+    combined = []
+    seen = set()
+    for f in base + gguf_extra:
+        if f not in seen:
+            seen.add(f)
+            combined.append(f)
+    return combined
 
 
 def _get_all_vaes() -> list:
@@ -253,7 +316,7 @@ def _get_safetensors_metadata(model_path: str) -> dict | None:
 
 
 def _resolve_model_path(model_name: str) -> str | None:
-    for folder_key in ("checkpoints", "diffusion_models"):
+    for folder_key in ("checkpoints", "diffusion_models", "unet_gguf"):
         try:
             path = folder_paths.get_full_path(folder_key, model_name)
             if path and os.path.exists(path):
@@ -266,7 +329,7 @@ def _resolve_model_path(model_name: str) -> str | None:
 
 
 def _get_folder_source(model_name: str) -> str | None:
-    for folder_key in ("checkpoints", "diffusion_models"):
+    for folder_key in ("checkpoints", "diffusion_models", "unet_gguf"):
         try:
             path = folder_paths.get_full_path(folder_key, model_name)
             if path and os.path.exists(path):
@@ -419,7 +482,10 @@ class JosiaCheckpointPlus:
                     "tooltip": (
                         "支持 ckpt / safetensors / bin / gguf 全格式。\n"
                         "选中后自动识别：AIO三合一 / 独立UNET / GGUF UNET。\n"
-                        "识别后自动联动下方CLIP/VAE选框状态。"
+                        "识别后自动联动下方CLIP/VAE选框状态。\n"
+                        "★ GGUF 模型：本节点直接复用已安装的 ComfyUI-GGUF 插件\n"
+                        "  （UnetLoaderGGUF / CLIPLoaderGGUF）进行加载，无需额外配置；\n"
+                        "  若提示找不到 GGUF 加载器，请先安装并启用 ComfyUI-GGUF 插件。"
                     ),
                 }),
                 "clip_name": (all_clips, {
@@ -627,20 +693,37 @@ class JosiaCheckpointPlus:
                          lock_unet_vram):
         print(f"[JosiaCheckpointPlus] ✅ 识别为GGUF UNET：{model_name}")
 
+        gguf_cls = _get_gguf_class("UnetLoaderGGUF")
+        if gguf_cls is None:
+            raise RuntimeError(
+                f"[JosiaCheckpointPlus] ❌ 未找到 ComfyUI-GGUF 插件的 UnetLoaderGGUF 节点。\n"
+                "本节点的 GGUF UNET 加载依赖 city96 的 ComfyUI-GGUF 插件。\n"
+                "请先安装：\n"
+                "  git clone https://github.com/city96/ComfyUI-GGUF custom_nodes/ComfyUI-GGUF\n"
+                "  pip install gguf\n"
+                "并将 GGUF UNET 放入 models/unet 或 models/diffusion_models。"
+            )
+
+        try:
+            # 直接复用插件自身「经过验证」的加载逻辑（含 GGUFModelPatcher 包装与反量化）
+            # 传入下拉框中的文件名（来自 unet_gguf 列表，GGUF 插件据此自行解析完整路径）
+            unet_loader = gguf_cls()
+            result = unet_loader.load_unet(model_name)
+            model_obj = result[0]
+        except Exception as e:
+            raise RuntimeError(
+                f"[JosiaCheckpointPlus] ❌ GGUF UNET 加载失败：{model_name}\n"
+                f"错误详情：{str(e)}\n"
+                "请确认：1) 已安装并启用 ComfyUI-GGUF 插件；"
+                "2) 模型位于 models/unet 或 models/diffusion_models；"
+                "3) 该 GGUF 文件对应的架构受支持。"
+            ) from e
+
         if clip_name == PLACEHOLDER_CLIP:
             clip_obj = None
             print("[JosiaCheckpointPlus] ⚠️ GGUF UNET未指定CLIP，下游CLIP输出为空。")
         else:
             clip_obj = self._load_clip_optional(clip_name, clip_type)
-
-        try:
-            model_obj = comfy.sd.load_diffusion_model(model_path)
-        except Exception as e:
-            raise RuntimeError(
-                f"[JosiaCheckpointPlus] ❌ GGUF UNET加载失败：{model_name}\n"
-                f"错误详情：{str(e)}\n"
-                "请确认已安装 ComfyUI-GGUF 插件。"
-            ) from e
 
         vae_obj = self._load_vae_optional(vae_name)
 
@@ -653,12 +736,39 @@ class JosiaCheckpointPlus:
         )
         return model_obj, clip_obj, vae_obj, "gguf_unet"
 
+    def _load_gguf_clip(self, clip_name: str, clip_type: str = None):
+        """加载 GGUF 格式的 CLIP（t5 / llama / qwen / gemma3 等文本编码器）。"""
+        gguf_cls = _get_gguf_class("CLIPLoaderGGUF")
+        if gguf_cls is None:
+            raise RuntimeError(
+                "[JosiaCheckpointPlus] ❌ 未找到 ComfyUI-GGUF 插件的 CLIPLoaderGGUF 节点。\n"
+                "GGUF CLIP 加载依赖 city96 的 ComfyUI-GGUF 插件，请先安装该插件。"
+            )
+        # GGUF 加载器按 CLIP 类型字符串（其内部 upper 匹配 CLIPType 枚举）选择架构
+        if clip_type and clip_type != PLACEHOLDER_CLIP_TYPE:
+            type_str = clip_type
+        else:
+            type_str = "stable_diffusion"
+        try:
+            clip_loader = gguf_cls()
+            result = clip_loader.load_clip(clip_name, type=type_str)
+            return result[0]
+        except Exception as e:
+            raise RuntimeError(
+                f"[JosiaCheckpointPlus] ❌ GGUF CLIP 加载失败：{clip_name}\n"
+                f"错误详情：{str(e)}\n"
+                "请确认：1) 已安装 ComfyUI-GGUF；2) CLIP 类型选择正确；"
+                "3) GGUF CLIP 位于 models/clip。"
+            ) from e
+
     # ─────── 辅助：加载 CLIP/VAE ───────
 
     def _load_clip_optional(self, clip_name: str, clip_type: str = None):
-        """加载CLIP，支持指定类型"""
+        """加载CLIP，支持指定类型。GGUF 格式 CLIP 走 GGUF 插件加载器。"""
         if clip_name == PLACEHOLDER_CLIP:
             return None
+        if _is_gguf_path(clip_name):
+            return self._load_gguf_clip(clip_name, clip_type)
         clip_path = self._resolve_clip_path(clip_name)
         if clip_path is None:
             print(f"[JosiaCheckpointPlus] ⚠️ CLIP文件未找到：{clip_name}，输出空CLIP。")

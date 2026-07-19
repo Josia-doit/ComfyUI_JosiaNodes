@@ -1,5 +1,5 @@
 """
-JosiaMultiImageLoader — 多图加载节点 v7.2
+JosiaMultiImageLoader — 多图加载节点 v7.3
 批量加载多张图片，支持路径列表、上传、拖拽、粘贴。
 支持串联：可选 images 输入端口，上游图像插入本节点图像之前合并输出。
 动态输出：根据载入图像数量自动激活对应数量的独立图像端口 + images_out 汇总输出。
@@ -272,6 +272,13 @@ class JosiaMultiImageLoader:
                     "tooltip": MULTI_IMAGE_PARAM_DESCRIPTIONS["image_paths"],
                     "display_name": "图片路径",
                 }),
+                "enable_resize": ("BOOLEAN", {
+                    "default": MULTI_IMAGE_DEFAULT_PARAMS["enable_resize"],
+                    "label_on": "✅ 开启缩放",
+                    "label_off": "❎ 原图直出",
+                    "display_name": "图像缩放",
+                    "tooltip": MULTI_IMAGE_PARAM_DESCRIPTIONS["enable_resize"],
+                }),
                 "resize_mode": ("BOOLEAN", {
                     "default": MULTI_IMAGE_DEFAULT_PARAMS["resize_mode"],
                     "label_on": "🖼️ 按像素缩放",
@@ -331,7 +338,7 @@ class JosiaMultiImageLoader:
             "optional": {
                 "images": ("IMAGE", {
                     "tooltip": "上游图像列表，将插入本节点图像之前合并输出",
-                    "display_name": "上游图像",
+                    "display_name": "image_in",
                 }),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
@@ -342,7 +349,8 @@ class JosiaMultiImageLoader:
 
     def load_images(self, image_paths, resize_mode, megapixels, resolution_steps,
                     edge_direction, edge_value, interpolation,
-                    multiple_of, output_mode, output_index=1, images=None, unique_id=None):
+                    multiple_of, output_mode, enable_resize=True,
+                    output_index=1, images=None, unique_id=None):
         """
         v7.2: 每张图独立等比缩放，无黑边无拉伸。
         output_mode: True=图像列表(按序号单张), False=图像批次(合并)
@@ -370,7 +378,8 @@ class JosiaMultiImageLoader:
         for path in paths:
             try:
                 t = self._load_single_image(path, resize_mode, megapixels, resolution_steps,
-                                             edge_direction, edge_value, interpolation, multi_of)
+                                             edge_direction, edge_value, interpolation, multi_of,
+                                             enable_resize=enable_resize)
                 if t is not None:
                     local_tensors.append(t)
             except Exception as e:
@@ -382,7 +391,8 @@ class JosiaMultiImageLoader:
             for i in range(images.shape[0]):
                 t = ensure_rgb(images[i:i+1])
                 t = self._resize_existing_tensor(t, resize_mode, megapixels, resolution_steps,
-                                                  edge_direction, edge_value, interpolation, multi_of)
+                                                  edge_direction, edge_value, interpolation, multi_of,
+                                                  enable_resize=enable_resize)
                 all_tensors.append(t)
         all_tensors.extend(local_tensors)
 
@@ -403,7 +413,23 @@ class JosiaMultiImageLoader:
         # ═══ 输出 ────────────────────────────────────────
         if not output_mode:
             # ═══ 批次模式（与 v6.9 一致）════
-            batch = assemble_batch_v6(all_tensors)
+            if enable_resize:
+                # 开启缩放：letterbox 对齐到统一画布（原行为）
+                batch = assemble_batch_v6(all_tensors)
+            else:
+                # 关闭缩放（原图直出）：尽量不做任何处理
+                #   - 尺寸一致 → 直接拼接（零处理，输出即原图）
+                #   - 尺寸不一致 → 批次必须统一尺寸，退化为黑边对齐并提示
+                #     （若需完全原图，请改用「图像列表」模式逐张输出）
+                shapes = [(t.shape[1], t.shape[2]) for t in all_tensors]
+                if len(set(shapes)) == 1:
+                    batch = torch.cat(all_tensors, dim=0)
+                else:
+                    print(
+                        "[Josia多图加载] ⚠️ 图像缩放已关闭，但各图尺寸不一致，"
+                        "批次模式无法免处理，已用黑边对齐。如需完全原图请使用「图像列表」模式逐张输出。"
+                    )
+                    batch = assemble_batch_v6(all_tensors)
             first_output = [batch]
         else:
             # ═══ 列表模式 v7.2：按序号单张输出 ═══
@@ -460,8 +486,12 @@ class JosiaMultiImageLoader:
         return tuple(result)
 
     def _resize_existing_tensor(self, tensor, resize_mode, megapixels, resolution_steps,
-                                 edge_direction, edge_value, interpolation, multiple_of):
+                                 edge_direction, edge_value, interpolation, multiple_of,
+                                 enable_resize=True):
         """对已存在的 tensor（上游图像）进行独立等比缩放（支持 N 步渐进）"""
+        if not enable_resize:
+            # 图像缩放关闭：原样透传，不做任何缩放处理
+            return tensor
         h, w = tensor.shape[1], tensor.shape[2]
         tw, th = compute_target_size(w, h, resize_mode, megapixels,
                                       edge_direction, edge_value)
@@ -514,9 +544,13 @@ class JosiaMultiImageLoader:
         return paths
 
     def _load_single_image(self, path, resize_mode, megapixels, resolution_steps,
-                            edge_direction, edge_value, interpolation, multiple_of):
+                            edge_direction, edge_value, interpolation, multiple_of,
+                            enable_resize=True):
         """
-        v6.8: 加载并处理单张图像，独立等比缩放（支持 N 步渐进缩放）。
+        v7.3: 加载单张图像。
+          - enable_resize=True  ：按设置独立等比缩放（原功能，支持 N 步渐进）
+          - enable_resize=False ：完全跳过缩放，图像以原始分辨率、
+            原始像素（与原生 LoadImage 一致：EXIF 方向修正 + 转 RGB）直接返回
         返回独立尺寸的 tensor (1, H, W, 3)，或 None 表示跳过。
         """
         if not os.path.isfile(path):
@@ -533,6 +567,10 @@ class JosiaMultiImageLoader:
         ow, oh = img.size
         if ow <= 0 or oh <= 0:
             return None
+
+        # 图像缩放关闭：原图直出（与原生 LoadImage 输出一致，不做任何缩放）
+        if not enable_resize:
+            return pil2tensor(img)
 
         # v6.8: 每张图独立计算目标尺寸（始终等比）
         tw, th = compute_target_size(ow, oh, resize_mode, megapixels,

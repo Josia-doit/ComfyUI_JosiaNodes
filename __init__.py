@@ -46,6 +46,8 @@ def register_node(module_name, node_alias, display_name):
         print(f"[JosiaNodes] ❌ {display_name} 加载异常：{str(e)}")
 
 # ==================== 批量注册所有节点 ====================
+# 单级分类 Josia：节点菜单由 ComfyUI 默认排序（不再用带编号的子分类，
+# 以免某些版本分类名覆盖导致节点丢失）。顺序即最初版本，保持稳定。
 register_node("encoder", "JosiaEncoder", "Josia文本编码")
 register_node("flow_valve", "JosiaFlowValve", "Josia流量阀门")
 register_node("cache_cleanup", "JosiaCacheCleanup", "Josia缓存清理")
@@ -57,8 +59,8 @@ register_node("group_controller", "JosiaGroupControllerS", "Josia单组控制")
 register_node("lora_stack", "JosiaLoraStack", "JosiaLoRA堆叠")
 register_node("checkpoint_plus", "JosiaCheckpointPlus", "Josia模型加载")
 register_node("multi_image_loader", "JosiaMultiImageLoader", "Josia多图加载")
-register_node("text_list", "JosiaTextList", "Josia 文本列表")
-register_node("text_save", "JosiaTextSave", "Josia 文本保存")
+register_node("text_list", "JosiaTextList", "Josia文本列表")
+register_node("text_save", "JosiaTextSave", "Josia文本保存")
 
 # ==================== 兼容旧版导入 ====================
 __all__ = [

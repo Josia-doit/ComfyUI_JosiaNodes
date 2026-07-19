@@ -4,26 +4,15 @@ Josia_Nodes 所有节点的常量配置
 """
 from PIL import Image
 
+# ===================== 统一分类常量 =====================
+# 所有 Josia 节点共用的分类名。multi_image_loader / image_scaling 在文件顶部
+# 从此处导入该常量；若删除会导致这两个模块 import 失败、节点静默消失。
+NODE_CATEGORY = "Josia"
+
 # ===================== 缓存清理节点配置 =====================
-NODE_CLASS_NAME = "JosiaCacheCleanup"
-NODE_DISPLAY_NAME_CACHE = "Josia缓存清理"
-NODE_CATEGORY = "Josia"  # 所有节点统一分类
-
-DEFAULT_SETTINGS = {
-    "clean_vram": True,
-    "clean_file": True,
-    "clean_process": True,
-    "system_procs": {
-        "system", "svchost", "explorer",
-        "winlogon", "csrss", "lsass"
-    }
-}
-
-PARAM_DESCRIPTIONS = {
-    "clean_vram": "释放推理产生的临时显存缓存（不卸载模型）",
-    "clean_file": "释放Windows系统文件缓存，提升系统流畅度",
-    "clean_process": "释放非系统进程空闲内存，降低内存占用"
-}
+# v2 起缓存清理节点改为文件内自包含（见 cache_cleanup.py），
+# 不再依赖本文件的常量，故此处旧配置（clean_vram/file/process、
+# system_procs 等）已移除。
 
 # ===================== 图像缩放节点配置 =====================
 NODE_DISPLAY_NAME_SCALING = "Josia图像缩放"  # 图像缩放节点中文名
@@ -253,6 +242,7 @@ MULTI_IMAGE_MULTIPLE_OF_OPTIONS = ["0", "8", "16", "32"]
 
 # 数值参数默认值
 MULTI_IMAGE_DEFAULT_PARAMS = {
+    "enable_resize": True,          # BOOLEAN: True=开启缩放, False=原图直出(跳过所有缩放处理)
     "resize_mode": True,            # BOOLEAN: True=按像素缩放, False=按边长缩放
     "megapixels": 0.0,              # 0=不缩放（原图直出），>0=按总像素等比缩放
     "resolution_steps": 1,           # 缩放步数（分几步渐进缩放到目标，默认1=一步到位）
@@ -276,6 +266,7 @@ MULTI_IMAGE_PARAM_DESCRIPTIONS = {
     "multiple_of": "尺寸对齐倍数（默认16适配VAE），0=不对齐。每张图独立对齐。",
     "output_mode": "开关：📦 图像批次 = 所有图像合并为一个 batch（混合比例时 letterbox 黑边）；📋 图像列表 = 按序号逐张输出，下游逐张执行（无黑边）。⚠️ 图像列表模式不支持上游列表串联——如需串联，请将上游节点设为批次模式。",
     "output_index": "列表模式：下次输出的图像序号（1=第1张，从上游图像开始计数）。上游在前、本节点在后。达到总数后自动归零（序号显示0=已全部输出完毕），需点击「恢复默认」重置为1后再运行。批次模式下此参数灰化不可编辑。⚠️ 上游为列表时可能跳过上游图像，请将上游设为批次模式。连接或断开上游端口时序号自动复位为1。",
+    "enable_resize": "图像缩放总开关：✅ 开启 = 按下方设置对每张图进行等比缩放（原功能不变）；❎ 原图直出 = 完全跳过缩放，图像以原始分辨率、原始像素（与原生 LoadImage 一致：EXIF 方向修正 + 转 RGB）直接透传到下游，不做任何等比/黑边/格式处理。关闭后下方「缩放模式 / 百万像素 / 缩放步数 / 边长方向 / 边长值 / 缩放算法 / 对齐倍数」全部灰化失效。",
 }
 
 # ===================== 文本列表节点配置 =====================
@@ -317,4 +308,4 @@ TEXT_SAVE_DESCRIPTION = """💾 Josia 文本保存
 【文件名冲突处理】
   同名文件自动追加 _001、_002 等编号"""
 
-MULTI_IMAGE_LOADER_DESCRIPTION = "Josia 多图加载 v7.2.1 — 批量加载多张图片，支持上传/拖拽/粘贴。每张图独立等比缩放（无黑边无拉伸），支持 N 步渐进缩放。图像列表模式按序号逐张输出（后端后递增+1，归零不循环），上游端口变化自动复位序号，恢复默认万能修复（不清空图库、不切换模式），全中文参数名。修复：归零显示0（不循环）、手动设0输出空列表+友好提示、??替代||修复JS falsy bug。"
+MULTI_IMAGE_LOADER_DESCRIPTION = "Josia 多图加载 v7.3 — 批量加载多张图片，支持上传/拖拽/粘贴。新增「图像缩放」总开关：开启时每张图独立等比缩放（无黑边无拉伸）、支持 N 步渐进缩放；关闭时完全跳过缩放，图像以原始分辨率、原始像素（与原生 LoadImage 一致）直接透传到下游。图像列表模式按序号逐张输出（后端后递增+1，归零不循环），上游端口变化自动复位序号，恢复默认万能修复（不清空图库、不切换模式），全中文参数名。"

@@ -37,7 +37,7 @@ class JosiaImageScaling:
 ❗ 不设置任何尺寸时，图像原封不动透传；无图像输入时可提供宽高数值用于文生图"""
 
     DESCRIPTION = IMAGE_SCALING_DESCRIPTION
-    CATEGORY = NODE_CATEGORY  # 节点分类（与其他Josia节点统一）
+    CATEGORY = NODE_CATEGORY
     FUNCTION = "process_image"  # 核心执行函数名
     RETURN_TYPES = ("IMAGE", "MASK", "INT", "INT")  # 输出类型
     RETURN_NAMES = ("图像", "遮罩", "宽度", "高度")  # 输出端口名称

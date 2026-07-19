@@ -1,9 +1,9 @@
 """
-Josia 文本保存节点 v1.6.0
+Josia文本保存节点 v1.6.0
 功能：将文本内容保存到文件，支持通配符解析、文件夹选择、图像文件名复用
 本地文件名：text_save.py
 节点英文标识：JosiaTextSave
-节点中文显示名：Josia 文本保存
+节点中文显示名：Josia文本保存
 依赖：无（纯Python标准库）
 """
 
@@ -348,4 +348,4 @@ class JosiaTextSave:
 
 
 NODE_CLASS_MAPPINGS["JosiaTextSave"] = JosiaTextSave
-NODE_DISPLAY_NAME_MAPPINGS["JosiaTextSave"] = "Josia 文本保存"
+NODE_DISPLAY_NAME_MAPPINGS["JosiaTextSave"] = "Josia文本保存"

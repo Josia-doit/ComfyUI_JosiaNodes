@@ -19,7 +19,7 @@ ComfyUI_JosiaNodes/
 ├── group_controller.py            # 分组控制节点（多组 + 单组）
 ├── lora_stack.py                  # LoRA 堆叠节点（多组顺序应用）
 ├── seed.py                        # 随机种子管理节点
-├── cache_cleanup.py               # 显存 / 内存 / 系统缓存清理节点
+├── cache_cleanup.py               # 无用显存 / 内存清理节点（保持模型常驻，不卸载）
 ├── checkpoint_plus.py             # 高级智能一体化模型加载节点
 │
 └── web/
@@ -195,12 +195,15 @@ ComfyUI_JosiaNodes/
 
 ### 4. Josia图像对比（JosiaImageComparer）
 - **分类**：Josia
-- **核心功能**：双图实时对比预览，支持两种交互模式
+- **核心功能**：双图实时对比预览，支持两种交互模式；并输出 A/B 左右无缝拼接图
 - **输入**：image_a、image_b（均为可选）
+- **输出**：拼接图像（IMAGE）——把图像A与图像B沿宽度方向左右无缝拼接成一张图
+  - 两图高度不一致时，自动把 B 等比缩放（lanczos）到与 A 同高再拼接，避免错位 / 黑边
+  - 只接一张图则原样输出；都不接输出空
 - **模式**：
   - Slide 模式：鼠标滑动显示竖直分割线，左 A 右 B
   - Click 模式：按住显示 B 图，松开显示 A 图
-- **特点**：继承官方 PreviewImage、自动保存、前端渲染流畅、支持拉大节点舒适对比
+- **特点**：继承官方 PreviewImage、自动保存、前端渲染流畅、支持拉大节点舒适对比；画布对比层与拼接输出口互不干扰
 <img width="875" height="776" alt="image" src="https://github.com/user-attachments/assets/b751189a-acae-4643-97a1-9fba48375b22" />
 
 ---
@@ -280,16 +283,16 @@ ComfyUI_JosiaNodes/
 
 ### 9. Josia缓存清理（JosiaCacheCleanup）
 - **分类**：Josia
-- **核心功能**：轻量安全释放显存/内存/系统缓存，不卸载模型
+- **核心功能**：在保持模型缓存状态下，轻量清理无用的显存 / 内存，不卸载模型
 - **输入**：任意类型数据（可选，透传用）
 - **输出**：透传的输入数据（原样返回）
 - **清理项**：
-  - 显存缓存（全平台，保留模型不卸载）
-  - Windows 系统文件缓存
-  - Windows 非系统进程空闲内存
+  - **清理无用缓存**（默认开）：`gc.collect()` + `comfy.model_management.soft_empty_cache()`（等价于 `torch.cuda.empty_cache()`），只释放空闲显存、不卸载被引用的模型
+  - **深度回收**（默认关）：额外二次 `empty_cache` + gc，用于内存碎片化严重时进一步回收
+- **设计初衷**：节省显存让重复运行更快，同时保持模型常驻、避免重新加载
 - **特点**：
   - 任意数据透传，串联不中断工作流
-  - 自动识别系统，非 Windows 自动安全降级（仅清显存）
+  - 不卸载模型、不清理系统文件缓存 / 进程工作集，安全无副作用
   - 实时日志输出，耗时统计
 <img width="588" height="378" alt="image" src="https://github.com/user-attachments/assets/fee19c3a-ff28-4d69-852b-8ea974046ba5" />
 
@@ -305,7 +308,7 @@ ComfyUI_JosiaNodes/
   - **独立 UNET**：仅含 UNET，可自由选配外部 CLIP 与 VAE
   - **GGUF UNET**：量化模型，可搭配任意格式 CLIP（GGUF 或非 GGUF 均可）
 - **CLIP类型选择**：
-  - 1:1 复刻原生 CLIPLoader 全部 24 种类型（sdxl / flux / sd3 / wan / LTXV 等）
+  - 1:1 复刻原生 CLIPLoader 全部 24 种类型（sdxl / flux / flux2 / sd3 / lumina2 / wan / LTXV 等），全部可正常启用（已修复 flux2 / lumina2 等类型报错问题）
   - AIO 模式自动适配 CLIP 类型，独立 UNET/GGUF 模式需手动选择
 - **UNET保活**（默认开启）：
   - 防止 ComfyUI 意外卸载 UNET 模型，复用工作流时跳过重新加载
@@ -347,7 +350,7 @@ ComfyUI_JosiaNodes/
 ## ⚠️ 重要说明
 1. 文本编码节点的 VAE 端口为可选输入，未接入时图生图模式自动降级为空 Latent
 3. 图像缩放节点内置分辨率上限保护（400万像素），避免显存溢出
-4. 缓存清理节点在 Windows 上优化更明显，其他系统仅清理显存
+4. 缓存清理节点只清理无用显存/内存（不卸载模型、不清理系统文件缓存），全平台行为一致，安全无副作用
 5. 分组控制、图像对比、流量阀门、种子节点、模型加载节点、多图加载节点均依赖前端 JS 文件，不可删除
 6. 所有节点均已配置 `DESCRIPTION` 属性，在搜索节点界面和鼠标悬浮时可查看功能简介
 7. **模型加载节点 GGUF 依赖**：加载 GGUF 格式模型需安装 ComfyUI-GGUF 插件；ckpt/safetensors/bin 格式完全独立运行

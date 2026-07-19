@@ -7,6 +7,52 @@
 
 ---
 
+## [1.5.5] - 2026-07-19
+
+### ✨ 新增功能
+
+#### 图像对比节点（JosiaImageComparer）
+- **新增输出口「拼接图像」**：将原「透传单张图像」改为把图像A与图像B左右无缝拼接成一张图输出。
+  - 两图高度不一致时，自动把 B 用 lanczos 等比缩放到与 A 同高再拼接，避免上下错位 / 黑边。
+  - batch 数不同时取较小者对齐；只接一张则原样输出；都不接输出空（不再崩溃）。
+- **画布对比层（A/B 滑动 / 按住对比）恢复**：后端按原生 `ImageCompare` 约定，把 `a_images`/`b_images` 直接放在 `ui` 根下（不包 `output` 层）；前端 `onExecuted` 改为深搜取数 + null 防御，彻底解决对比层消失问题。
+
+### 🐛 Bug 修复
+
+#### 模型加载节点（JosiaCheckpointPlus）
+- **修复 CLIP 类型报错（flux2 / lumina2 等）**：根因为 `_clip_type_to_enum` 用 `getattr(CT, type)` 小写枚举名，而 `comfy.sd.CLIPType` 成员全大写，导致永远回退 `STABLE_DIFFUSION`。改为 `getattr(CT, type.upper())` 对齐原生 `CLIPLoader`，现全部 24 种 CLIP 类型（含 flux2 / lumina2）均正常启用。
+
+#### 图像对比节点（JosiaImageComparer）
+- **修复下游节点接收输出报 `NoneType` 崩溃**：补充 `RETURN_TYPES=("IMAGE",)`，输出口正确透传拼接图像（之前继承 `PreviewImage` 无 IMAGE 输出，接到下游会传 None 而崩）。
+
+#### 多图加载节点（JosiaMultiImageLoader）
+- **修复节点消失问题**：此前误删 `node_properties.py` 的 `NODE_CATEGORY` 共享常量，导致 `multi_image_loader.py` / `image_scaling.py` 因 import 失败被 ComfyUI 静默跳过。恢复常量并统一 `CATEGORY="Josia"`，全部节点恢复正常。
+
+### ♻️ 重构 / 优化
+
+#### 模型加载节点（JosiaCheckpointPlus）
+- **取消自研显存调度（块交换）功能**：新版 ComfyUI（0.28.1）已内置更先进的 DynamicVRAM 调度，移除 block 级搬运接入（代码文件 `block_swap_engine.py` 保留作参考，不再被引用）。保留「UNET 保活」开关。
+
+#### 缓存清理节点（JosiaCacheCleanup）
+- **重写实现（v2）回归设计初衷**：在保持模型缓存状态下清理无用显存 / 内存，不卸载模型。
+  - 仅做 `gc.collect()` + `comfy.model_management.soft_empty_cache()`（等价于 `torch.cuda.empty_cache()`，只释放空闲显存、不卸载被引用模型）。
+  - 不再卸载模型、不再清理 Windows 系统文件缓存 / 进程工作集。
+  - 新增「深度回收」开关（默认关，额外二次 `empty_cache` + gc）。
+
+#### 多图加载节点（JosiaMultiImageLoader）
+- **前端灰化优化**：关闭图像缩放时，只灰化当前实际显示的缩放参数（像素模式只灰化像素相关、边长模式只灰化边长相关），不再强制显示并灰化另一模式的参数。
+- **上游图像端口 display_name 改为英文 `image_in`**（内部参数名 `images` 不变）。
+
+#### 分类与节点顺序
+- 恢复单级分类 `Josia`（不再用带编号子分类，避免某些版本分类名覆盖导致节点丢失），节点菜单由 ComfyUI 默认排序。
+
+### 📝 文档更新
+- 更新 `README.md`：图像对比节点新增拼接输出说明、缓存清理节点对齐 v2 行为、模型加载节点补充 CLIP 类型修复说明。
+- 更新 `CHANGELOG.md`，记录 v1.5.5 版本变更。
+- 更新 `pyproject.toml` 版本号 1.5.3 → 1.5.5。
+
+---
+
 ## [1.5.3] - 2026-07-02
 
 ### ✨ 新增功能

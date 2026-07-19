@@ -1,5 +1,5 @@
 /**
- * JosiaMultiImageLoader 前端 v7.2
+ * JosiaMultiImageLoader 前端 v7.3
  *
  * v7.2 改进（完全重做递增机制 — 抛弃 control_after_generate）:
  * - ★ 后端维护 self._next_index，通过 PromptServer 自定义消息 "josia_mil_inc" 通知前端
@@ -170,6 +170,9 @@ async function initNode(node) {
     const edgeValueW     = node.widgets.find(w => w.name === "edge_value");
     const outputModeW    = node.widgets.find(w => w.name === "output_mode");
     const outputIdxW     = node.widgets.find(w => w.name === "output_index");
+    const enableResizeW  = node.widgets.find(w => w.name === "enable_resize");
+    const interpolationW = node.widgets.find(w => w.name === "interpolation");
+    const multipleOfW   = node.widgets.find(w => w.name === "multiple_of");
 
     // ── widget 显隐辅助 ──
     function setWidgetVisible(w, visible) {
@@ -220,11 +223,61 @@ async function initNode(node) {
         } catch(e) { /* 静默 */ }
     }
 
+    // ★ v7.3: 图像缩放开关灰化逻辑
+    // enable_resize=关(❎原图直出) → 所有缩放相关控件灰化（禁用但保持可见，直观展示已失效）
+    // enable_resize=开(✅开启缩放) → 取消灰化，恢复正常交互
+    function setWidgetGreyed(w, greyed) {
+        if (!w) return;
+        try {
+            w.disabled = greyed;
+            if (w.inputEl) {
+                w.inputEl.disabled = greyed;
+                w.inputEl.style.opacity = greyed ? "0.4" : "1";
+            }
+            const rowEl = w.inputEl && (
+                w.inputEl.closest(".comfy-widget-row") ||
+                w.inputEl.closest(".widget-row")
+            );
+            if (rowEl) {
+                rowEl.style.opacity = greyed ? "0.4" : "1";
+                rowEl.style.pointerEvents = greyed ? "none" : "auto";
+            }
+        } catch(e) { /* 静默 */ }
+    }
+
+    // 图像缩放开关 → 联动所有缩放相关控件 + resize_mode 子切换
+    function syncResizeEnable() {
+        if (!enableResizeW) return;
+        const enabled = !!enableResizeW.value;
+        const resizeWidgets = [
+            resizeModeW, megapixelsW, resStepsW,
+            edgeDirectionW, edgeValueW, interpolationW, multipleOfW,
+        ];
+        if (enabled) {
+            // 开启缩放：取消灰化，并按 resize_mode 正常切换子参数显隐
+            resizeWidgets.forEach(w => setWidgetGreyed(w, false));
+            syncWidgetVisibility();
+        } else {
+            // 关闭缩放：先按 resize_mode 恢复「当前应显示的子参数」显隐，
+            // 仅灰化【当前可见】的缩放控件（不强制显示被隐藏的另一模式参数）。
+            // 例：像素模式关闭 → 只灰化百万像素/缩放步数/缩放算法/对齐倍数，
+            //     边长方向/边长值保持隐藏；边长模式关闭则反之。
+            syncWidgetVisibility();   // 仅刷新显隐，不改变灰化状态
+            resizeWidgets.forEach(w => {
+                if (w && !w.hidden) {
+                    setWidgetGreyed(w, true);    // 当前显示的 → 灰化
+                } else if (w) {
+                    setWidgetGreyed(w, false);  // 当前隐藏的 → 保持隐藏、不灰化
+                }
+            });
+        }
+    }
+
     if (resizeModeW) {
         const origCallback = resizeModeW.callback || (()=>{});
         resizeModeW.callback = function(v) {
             origCallback(v);
-            syncWidgetVisibility();
+            syncResizeEnable();
             node.setDirtyCanvas(true, true);
         };
     }
@@ -235,6 +288,16 @@ async function initNode(node) {
         outputModeW.callback = function(v) {
             origModeCallback(v);
             syncOutputIndexEditable();
+            node.setDirtyCanvas(true, true);
+        };
+    }
+
+    // ★ v7.3: enable_resize callback — 开关缩放时灰化/恢复所有缩放相关控件
+    if (enableResizeW) {
+        const origResizeEnableCb = enableResizeW.callback || (()=>{});
+        enableResizeW.callback = function(v) {
+            origResizeEnableCb(v);
+            syncResizeEnable();
             node.setDirtyCanvas(true, true);
         };
     }
@@ -690,7 +753,7 @@ async function initNode(node) {
             }
         }
         // ★ 重置后端实例变量（通过 PromptServer 消息同步 next_index=1）
-        syncWidgetVisibility();
+        syncResizeEnable();
         syncOutputIndexEditable();
         node.setDirtyCanvas(true, true);
         console.log("[Josia多图加载] ✅ 已恢复默认（参数重置，图库保留，输出模式不变）");
@@ -1031,7 +1094,7 @@ async function initNode(node) {
     requestAnimationFrame(() => {
         setWidgetVisible(pathsW, false);
         // ★ v7.0: outputModeW 为原生 BOOLEAN 开关（可见）
-        syncWidgetVisibility();
+        syncResizeEnable();
         syncOutputIndexEditable();            // v7.2: 初始化灰化状态（简化版）
         // ★ v7.2: 不再搜索 control_after_generate COMBO widget（已废弃该机制）
         if (node.syncLayoutToNode) node.syncLayoutToNode();

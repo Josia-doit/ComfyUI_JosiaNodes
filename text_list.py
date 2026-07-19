@@ -1,9 +1,9 @@
 """
-Josia 文本列表节点 v2.1.0
+Josia文本列表节点 v2.1.0
 功能：将多行字符串按分隔符分割为字符串列表，支持空行过滤、空白修剪、去重、正则过滤
 本地文件名：text_list.py
 节点英文标识：JosiaTextList
-节点中文显示名：Josia 文本列表
+节点中文显示名：Josia文本列表
 依赖：无（纯Python标准库）
 """
 import re
@@ -167,5 +167,5 @@ NODE_CLASS_MAPPINGS = {
     "JosiaTextList": JosiaTextList
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "JosiaTextList": "Josia 文本列表"
+    "JosiaTextList": "Josia文本列表"
 }

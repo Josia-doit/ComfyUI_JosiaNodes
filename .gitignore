@@ -29,3 +29,6 @@ desktop.ini
 input/
 output/
 temp/
+
+# Agent / 工具本地记忆（仅本地保留，不推送 GitHub）
+.workbuddy/

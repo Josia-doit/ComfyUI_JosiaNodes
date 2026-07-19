@@ -101,18 +101,41 @@ class JosiaImageComparerNode {
 
     // 节点执行完成后加载图像
     onExecuted(output) {
+        // 防御：ComfyUI 在重绘/进度/空执行等事件下可能以 null/undefined 调用本方法。
+        // 若在此处直接访问 output.a_images 会抛 TypeError，且会清空已加载的对比图，
+        // 导致节点内的滑动/点击对比层消失。此处先判空，空调用直接跳过。
+        if (!output) return;
+
+        // 深搜：在 output 及其嵌套子对象中查找含 a_images / b_images 的字典。
+        // 不再假设数据固定在 output / output.ui / output.output 某一层，
+        // 兼容不同 ComfyUI 版本把 ui 数据放在任意层级的差异。
+        let data = null;
+        const visited = new WeakSet();
+        const search = (obj, depth) => {
+            if (data || !obj || typeof obj !== "object" || depth > 4) return;
+            if (visited.has(obj)) return;
+            visited.add(obj);
+            if (obj.a_images || obj.b_images) { data = obj; return; }
+            for (const k of Object.keys(obj)) {
+                const v = obj[k];
+                if (v && typeof v === "object") search(v, depth + 1);
+            }
+        };
+        search(output, 0);
+        if (!data) return;
+
         this.imgs = [];
         // 加载图像A
-        if (output.a_images?.[0]) {
+        if (data.a_images?.[0]) {
             const imgA = new Image();
-            imgA.src = imageDataToUrl(output.a_images[0]);
+            imgA.src = imageDataToUrl(data.a_images[0]);
             imgA.onload = () => this.node.setDirtyCanvas(true, false);
             this.imgs[0] = imgA;
         }
         // 加载图像B
-        if (output.b_images?.[0]) {
+        if (data.b_images?.[0]) {
             const imgB = new Image();
-            imgB.src = imageDataToUrl(output.b_images[0]);
+            imgB.src = imageDataToUrl(data.b_images[0]);
             imgB.onload = () => this.node.setDirtyCanvas(true, false);
             this.imgs[1] = imgB;
         }
@@ -213,6 +236,8 @@ app.registerExtension({
         // 重写节点执行完成方法
         const originalOnExecuted = nodeType.prototype.onExecuted;
         nodeType.prototype.onExecuted = function (output) {
+            // 防御空调用，避免下游 josiaComparer.onExecuted 收到 null 而崩溃
+            if (output == null) return;
             originalOnExecuted?.call(this, output);
             if (this.josiaComparer) this.josiaComparer.onExecuted(output);
         };
