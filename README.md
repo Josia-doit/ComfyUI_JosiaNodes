@@ -1,5 +1,8 @@
 # Josia ComfyUI 自定义节点集
 一套功能完整、轻量稳定、高度兼容最新版 ComfyUI 的实用节点集。专为解决老旧节点包兼容性差、体积臃肿、运行卡顿问题而设计，把高频刚需功能浓缩为一套轻量化扩展，让 ComfyUI 工作流更简洁、更顺畅。
+
+> 📺 **我的 B 站主页（教程 / 演示 / 更新动态）**：[Josia 的 B 站空间](https://space.bilibili.com/3706973113551694) — 节点使用讲解、效果演示视频持续更新，欢迎关注支持！
+
 <img width="2228" height="1158" alt="image" src="https://github.com/user-attachments/assets/2e9e0946-c160-4edb-9c58-df5461456473" />
 
 ---
