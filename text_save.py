@@ -1,5 +1,5 @@
 """
-Josia文本保存节点 v1.6.0
+Josia文本保存节点 v1.7.1
 功能：将文本内容保存到文件，支持通配符解析、文件夹选择、图像文件名复用
 本地文件名：text_save.py
 节点英文标识：JosiaTextSave
@@ -165,9 +165,9 @@ class JosiaTextSave:
 
 【使用方法】
   1. 连接或输入文本内容（支持多行）
-  2. 点击「选择文件夹」按钮或手动输入路径
+  2. 点击「选择输出目录」按钮或手动输入路径
   3. 输入文件名（支持通配符）
-  4. 选择文件格式（txt 或 csv）
+  4. 选择保存格式（txt 或 csv）
 
 【通配符规则】（成对 %xxx% 解析）
   %date%           → 2026-06-30
@@ -207,7 +207,7 @@ class JosiaTextSave:
                 }),
                 "file_extension": (["txt", "csv"], {
                     "default": "txt",
-                    "display_name": "文件格式",
+                    "display_name": "保存格式",
                     "tooltip": "txt = 纯文本；csv = 每行一条CSV记录",
                 }),
             },
@@ -246,18 +246,19 @@ class JosiaTextSave:
             print(f"[JosiaTextSave] ❌ 无法创建目录 {resolved_path}：{str(e)}")
             return ("",)
 
-        # 命名模式1：接入图像
-        if image is not None:
-            original_name = self._trace_image_filename(prompt, unique_id)
-            if original_name:
-                base_name = sanitize_filename(os.path.splitext(original_name)[0])
-                filepath = os.path.join(resolved_path, f"{base_name}.{file_extension}")
-                if os.path.exists(filepath):
-                    idx = 1
-                    while os.path.exists(filepath):
-                        filepath = os.path.join(resolved_path, f"{base_name}_{str(idx).zfill(3)}.{file_extension}")
-                        idx += 1
-                return self._write_file(text, filepath, file_extension)
+        # 命名模式1：接入图像时复用原图文件名
+        original_name = None
+        if not original_name and image is not None:
+            original_name = self._get_image_filename(image) or self._trace_image_filename(prompt, unique_id)
+        if original_name:
+            base_name = sanitize_filename(os.path.splitext(str(original_name))[0])
+            filepath = os.path.join(resolved_path, f"{base_name}.{file_extension}")
+            if os.path.exists(filepath):
+                idx = 1
+                while os.path.exists(filepath):
+                    filepath = os.path.join(resolved_path, f"{base_name}_{str(idx).zfill(3)}.{file_extension}")
+                    idx += 1
+            return self._write_file(text, filepath, file_extension)
 
         # 命名模式2：通配符
         base_name = file_name
@@ -325,6 +326,16 @@ class JosiaTextSave:
             return self._find_load_image(prompt, str(image_input[0]))
         except Exception:
             return None
+
+    def _get_image_filename(self, image):
+        """优先从图像 tensor 的 filename 属性读取（多图加载等节点会打上实际文件名）"""
+        if image is None:
+            return None
+        fn = getattr(image, "filename", None)
+        if not fn and hasattr(image, "dim") and callable(getattr(image, "dim", None)) \
+                and image.dim() == 4 and image.shape[0] == 1:
+            fn = getattr(image[0], "filename", None)
+        return fn if fn else None
 
     def _find_load_image(self, prompt, node_id, visited=None):
         if visited is None:

@@ -1,6 +1,6 @@
 /**
- * JosiaTextSave 前端扩展 v1.18
- * 功能：选择文件夹、打开输出目录、图像输入联动
+ * JosiaTextSave 前端扩展 v1.20
+ * 功能：选择输出目录、打开输出目录、图像输入联动
  * 本地文件名：text_save.js
  * 匹配后端节点标识：JosiaTextSave
  */
@@ -27,8 +27,8 @@ app.registerExtension({
             onNodeCreated?.apply(this, arguments);
             const node = this;
 
-            // ── 选择文件夹按钮（移到 output_path 上方）──
-            const folderBtn = node.addWidget("button", "选择文件夹", "", async () => {
+            // ── 选择输出目录按钮（原「选择文件夹」，置于文本内容之后）──
+            const folderBtn = node.addWidget("button", "选择输出目录", "", async () => {
                 try {
                     const resp = await api.fetchApi("/josia_text_save/pick_folder", { method: "POST" });
                     const data = await resp.json();
@@ -44,8 +44,11 @@ app.registerExtension({
                     console.error("[JosiaTextSave] 文件夹选择失败:", e);
                 }
             }, { tooltip: "打开系统文件夹选择对话框" });
+            // 关键：按钮不参与序列化（保存/加载两端都跳过 serialize===false），
+            // 这样无论放在节点顶部还是底部，都不会挤动下面字段的 widgets_values 对齐顺序
+            folderBtn.serialize = false;
 
-            // ── 打开输出目录按钮（移到最底部）──
+            // ── 打开输出目录按钮（置于保存格式之后）──
             const openBtn = node.addWidget("button", "打开输出目录", "", async () => {
                 const outputPathW = node.widgets.find(w => w.name === "output_path");
                 const path = outputPathW ? outputPathW.value : "";
@@ -62,28 +65,21 @@ app.registerExtension({
                     console.error("[JosiaTextSave] 打开文件夹失败:", e);
                 }
             }, { tooltip: "在文件资源管理器中打开当前输出路径" });
+            openBtn.serialize = false;
 
-            // ── 重新排序 widgets ──
-            requestAnimationFrame(() => {
-                const w = node.widgets;
+            // ── 重新排布 widget 顺序（同步执行，避免异步时机导致保存/加载错位）──
+            // 目标顺序：文本内容 → [选择输出目录按钮] → 输出路径 → 文件名 → 保存格式 → [打开输出目录按钮]
+            // 两个按钮均 serialize=false，保存/加载两端对称跳过，插入到中部也不会挤动其它字段对齐
+            const w = node.widgets;
+            const _remove = (x) => { const i = w.indexOf(x); if (i !== -1) w.splice(i, 1); };
+            _remove(folderBtn);
+            _remove(openBtn);
 
-                // 移动 folderBtn 到 output_path 上方
-                const fi = w.findIndex(x => x === folderBtn);
-                if (fi !== -1) {
-                    w.splice(fi, 1);
-                    const pi = w.findIndex(x => x.name === "output_path");
-                    w.splice(pi, 0, folderBtn);
-                }
-
-                // 移动 openBtn 到最底部
-                const oi = w.findIndex(x => x === openBtn);
-                if (oi !== -1 && oi < w.length - 1) {
-                    w.splice(oi, 1);
-                    w.push(openBtn);
-                }
-
-                node.setDirtyCanvas(true, true);
-            });
+            const _idx = (name) => w.findIndex(x => x.name === name);
+            const iText = _idx("text");
+            if (iText !== -1) w.splice(iText + 1, 0, folderBtn);   // 选择输出目录按钮紧跟文本内容
+            const iExt = _idx("file_extension");
+            if (iExt !== -1) w.splice(iExt + 1, 0, openBtn);       // 打开输出目录按钮紧跟保存格式
 
             // ── 图像输入联动 ──
             const fileNameW = node.widgets.find(w => w.name === "file_name");

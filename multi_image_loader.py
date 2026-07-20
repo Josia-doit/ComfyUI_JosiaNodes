@@ -1,29 +1,22 @@
 """
-JosiaMultiImageLoader — 多图加载节点 v7.3
+JosiaMultiImageLoader — 多图加载节点 v7.6
 批量加载多张图片，支持路径列表、上传、拖拽、粘贴。
 支持串联：可选 images 输入端口，上游图像插入本节点图像之前合并输出。
 动态输出：根据载入图像数量自动激活对应数量的独立图像端口 + images_out 汇总输出。
 
-v7.2 改进（完全重做递增机制 — 抛弃 control_after_generate）:
-- ★ 标签重命名：输出列表→图像列表, 输出批次→图像批次
-- ★ total_count INT 输出端口：组合池大小（上游+本地），前端用于精确递增上界
-- ★ PromptServer 自定义消息 "josia_mil_inc" 通知前端更新 widget（后递增+1）
-- ★ ★ api.addEventListener 接收 CustomEvent，数据在 event.detail 里（不是 raw dict！）
-- ★ 后端 self._next_index 追踪：执行后递增，达到总数归零（next_index=0）
-- ★ output_index=0 表示已全部输出完毕，输出空列表，提示恢复默认后再运行
-- ★ 上游端口连接/断开 → 序号自动复位为1（前端 onConnectionsChange）
-- ★ 恢复默认按钮：重置参数（output_index→1），不清空图库，不切换输出模式
-- ★ display_name: 输出序号→下次输出序号（避免歧义）
-- ★ 移除 _prev_upstream_count 追踪和 ValueError 崩溃
-- ★ 移除 control_after_generate="increment"（种子递增机制完全不适用）
-- ★ 每次只递增 +1（解决 +2 bug）
-- ★ 支持工作流运行和下游预览单独执行（自定义消息不限返回格式）
+v7.5 改进（列表模式改用 ComfyUI 原生 list 展开，彻底删除序号递增机制）:
+- ★ 列表模式不再用「序号递增」（v7.0~v7.4 的 widget 值驱动 / IS_CHANGED / set_index 消息 /
+      前端 onExecuted 回声 / 归零友好报错 全部废弃）。
+- ★ 利用 ComfyUI 原生机制：images_out 返回 [t1, t2, ..., tN]（list），
+      OUTPUT_IS_LIST=True 让下游（如 llama.cpp 反推）自动逐张执行 N 次 ——
+      这就是「像提示词列表那样按数量自动跑多次」在图像上的等价实现。
+- ★ 一次排队 = 全部图像自动打完标，无需手动批次按钮、无需序号、无需下游单独循环。
+- ★ 批次模式（输出合并 batch）保持原行为，llama.cpp 一次性反推全部（用分隔符合并输出）。
 
 【上游兼容性】
   ✅ 批次上游（如另一个多图加载的批次模式）：拆分为多张，与本地合并为组合池
   ✅ 单图上游（如 LoadImage 节点）：作为1张上游加入组合池
-  ❌ 列表模式上游：不支持（ComfyUI 无迭代上下文，tensor 不可区分）
-     建议：需要串联时，将上游节点设为批次模式
+  ✅ 列表模式上游：组合池整体作为 list 展开（逐张输出全部）
 
 v7.1: control_after_generate 种子递增尝试（已废弃）
 v7.0: 输出序号控制 + 原生开关 + 自动递增
@@ -60,7 +53,6 @@ INTERP_MAP = {
     "area": Image.Resampling.BOX,
     "nearest-exact": Image.Resampling.NEAREST,
 }
-
 
 # ─── 辅助函数（参考原生 node_helpers.pillow） ──────────────
 def safe_pil_open(path):
@@ -255,11 +247,12 @@ class JosiaMultiImageLoader:
     OUTPUT_NODE = True
 
     MAX_OUTPUTS = 50
-    RETURN_TYPES = ("IMAGE",) * (1 + MAX_OUTPUTS) + ("INT",)
+    RETURN_TYPES = ("IMAGE",) + ("IMAGE",) * MAX_OUTPUTS + ("INT",)
     RETURN_NAMES = ("images_out",) + tuple(f"image_{i}" for i in range(1, MAX_OUTPUTS + 1)) + ("total_count",)
-    # ★ v6.9: 第一个端口始终为 list 类型 — 返回 [batch] 时下游收到整个 batch，
-    #   返回 [t1, t2, ...] 时下游逐张执行。实现 batch/list 运行时切换。
-    # 末尾新增 total_count INT 端口（OUTPUT_IS_LIST=False）
+    # ★ v7.6: 第一个端口 images_out 始终为 list 类型（OUTPUT_IS_LIST=True）—
+    #   列表模式返回 [t1, t2, ..., tN] 时，ComfyUI 自动展开，下游（如 llama.cpp 反推）逐张执行 N 次；
+    #   批次模式返回 [batch_tensor]（list 长度1），下游收到 1 个 batch。
+    #   （图片命名由每个 tensor 的 .filename 属性承载，文本保存接入 image 端口即可按图命名，无需额外文件名端口）
     OUTPUT_IS_LIST = (True,) + (False,) * MAX_OUTPUTS + (False,)
 
     @classmethod
@@ -328,12 +321,6 @@ class JosiaMultiImageLoader:
                     "display_name": "多图输出模式",
                     "tooltip": MULTI_IMAGE_PARAM_DESCRIPTIONS["output_mode"],
                 }),
-                "output_index": ("INT", {
-                    "default": MULTI_IMAGE_DEFAULT_PARAMS["output_index"],
-                    "min": 0, "max": 9999, "step": 1,
-                    "display_name": "下次输出序号",
-                    "tooltip": MULTI_IMAGE_PARAM_DESCRIPTIONS["output_index"],
-                }),
             },
             "optional": {
                 "images": ("IMAGE", {
@@ -341,40 +328,34 @@ class JosiaMultiImageLoader:
                     "display_name": "image_in",
                 }),
             },
-            "hidden": {"unique_id": "UNIQUE_ID"},
         }
-
-    def __init__(self):
-        self._next_index = 1  # v7.2: 执行后自动递增到的下一个序号（1-based）
 
     def load_images(self, image_paths, resize_mode, megapixels, resolution_steps,
                     edge_direction, edge_value, interpolation,
                     multiple_of, output_mode, enable_resize=True,
-                    output_index=1, images=None, unique_id=None):
+                    images=None):
         """
-        v7.2: 每张图独立等比缩放，无黑边无拉伸。
-        output_mode: True=图像列表(按序号单张), False=图像批次(合并)
-        output_index: 列表模式下的下次输出序号（1-based），上游图像在前、本地在后。
-            - output_index=0: 已全部输出完毕，输出空列表（下游不执行），需恢复默认后重新运行
-            - 1 ≤ output_index ≤ total: 正常输出该序号指向的图像
-            - 执行后自动递增+1，达到总数后归零（next_index=0）
+        v7.5: 每张图独立等比缩放，无黑边无拉伸。
+        output_mode: True=图像列表(整列展开), False=图像批次(合并)
+        ★ 列表模式不再使用「序号递增」机制（v7.2~v7.4 的 widget/IS_CHANGED/set_index/前端回声/归零报错
+          全部废弃）。改为利用 ComfyUI 原生 list 展开：images_out 返回 [t1,t2,...,tN]，
+          OUTPUT_IS_LIST=True 让下游（如 llama.cpp 反推）自动逐张执行 N 次，无需手动批次按钮、无需序号。
         total_count: 组合池大小（上游+本地），用于前端显示。
         第一个端口 images_out 始终返回 list（OUTPUT_IS_LIST=True）：
-          - 批次模式: [batch_tensor] → 下游收到 1 个 batch
-          - 列表模式: [tensor_at_index] → 下游收到 1 张图，逐张执行
+          - 批次模式: [batch_tensor] → 下游收到 1 个 batch（llama.cpp 一次性反推全部，用分隔符输出）
+          - 列表模式: [t1, t2, ..., tN] → 下游自动展开，逐张执行 N 次（每张干净字幕，无分隔符）
 
-        ★ v7.2: 上游变化不报错，自动根据实际情况调整序号
-        ★ v7.2: 通过 PromptServer 发送 josia_mil_inc 消息通知前端递增
         【上游兼容性】
-          ✅ 批次上游：拆分为多张，与本地合并为组合池，output_index 跨全池计数
+          ✅ 批次上游：拆分为多张，与本地合并为组合池
           ✅ 单图上游（LoadImage）：作为1张上游加入池首
-          ❌ 列表模式上游：不支持（ComfyUI 无迭代上下文）
+          ✅ 列表模式上游：组合池整体作为 list 展开（逐张输出全部）
         """
         paths = self._resolve_paths(image_paths.strip())
         multi_of = int(multiple_of)
 
         # 加载并处理本地图像（每张独立等比缩放）
         local_tensors = []
+        local_paths = []  # ★ v7.4: 同步记录实际成功加载的路径（与 local_tensors 一一对应）
         for path in paths:
             try:
                 t = self._load_single_image(path, resize_mode, megapixels, resolution_steps,
@@ -382,6 +363,7 @@ class JosiaMultiImageLoader:
                                              enable_resize=enable_resize)
                 if t is not None:
                     local_tensors.append(t)
+                    local_paths.append(path)
             except Exception as e:
                 print(f"[Josia多图加载] 无法加载 {path}: {e}")
 
@@ -395,20 +377,30 @@ class JosiaMultiImageLoader:
                                                   enable_resize=enable_resize)
                 all_tensors.append(t)
         all_tensors.extend(local_tensors)
+        current_upstream = 0 if images is None else images.shape[0]
+
+        # ★ v7.4: 携带文件名 —— 给每个输出 tensor 打 filename 属性（取实际加载路径 basename，
+        #   顺序精确，已过滤不存在/加载失败的文件）。本地图像 j>=current_upstream 对应 local_paths[local_i]；
+        #   上游图像保留其自带 filename（若上游加载器已设置）。
+        for j, t in enumerate(all_tensors):
+            if j < current_upstream:
+                continue  # 上游图像：保留原有 filename（如有）
+            local_i = j - current_upstream
+            if 0 <= local_i < len(local_paths):
+                try:
+                    t.filename = os.path.splitext(os.path.basename(local_paths[local_i]))[0]
+                except Exception:
+                    pass
 
         total = len(all_tensors)
-        current_upstream = 0 if images is None else images.shape[0]
         empty = torch.zeros(1, 64, 64, 3)
 
         if total == 0:
-            # 无图像：输出空 → 序号归 1
-            self._next_index = 1
-            return ([empty],) + (empty,) * JosiaMultiImageLoader.MAX_OUTPUTS + (0,)
-
-        # ★ v7.2: 序号处理（不再自动归一，0=已全部输出完毕）
-        idx = int(output_index)
-        # idx=0 表示已全部输出完毕，输出空列表（下游不执行）
-        # idx < 0 理论上不应出现，但仍归一到 1
+            # 无图像：友好报错中断（替代返回空列表，避免下游对空列表 IndexError）
+            raise Exception(
+                "[Josia多图加载] 未载入任何图像，也没有上游图像输入。\n"
+                "请先在图库中添加图像，或连接上游图像输出后再运行。"
+            )
 
         # ═══ 输出 ────────────────────────────────────────
         if not output_mode:
@@ -431,19 +423,17 @@ class JosiaMultiImageLoader:
                     )
                     batch = assemble_batch_v6(all_tensors)
             first_output = [batch]
+            # 批次模式：把首张图文件名挂到 batch 上（供文本保存「图像」端口复用原图名）
+            if all_tensors and getattr(all_tensors[0], "filename", None):
+                try:
+                    batch.filename = all_tensors[0].filename
+                except Exception:
+                    pass
         else:
-            # ═══ 列表模式 v7.2：按序号单张输出 ═══
-            if idx < 1:
-                # 序号=0：已全部输出完毕 → 输出空列表（下游不执行）
-                print(f"[Josia多图加载] ⚠️ 本轮图像列表输出完毕（共{total}张），请恢复默认后再运行")
-                first_output = []
-            elif idx > total:
-                # 序号越界 → 输出空列表（下游不执行）+ 归零
-                print(f"[Josia多图加载] ⚠️ 输出序号{idx}超出总数{total}，本轮图像列表输出完毕，请恢复默认后再运行")
-                first_output = []
-            else:
-                selected = all_tensors[idx - 1]
-                first_output = [selected]
+            # ═══ 列表模式 v7.5：整列展开（利用 ComfyUI 原生 list 展开）═══
+            # images_out 直接返回全部 N 张（list），OUTPUT_IS_LIST=True 让下游自动逐张执行 N 次。
+            # 无需序号递增、无需手动批次按钮、无需 IS_CHANGED/消息/前端回声。
+            first_output = all_tensors
 
         # ── 单独输出 image_N ──
         result = [first_output]
@@ -456,33 +446,8 @@ class JosiaMultiImageLoader:
         # ★ v7.2: total_count INT 输出
         result.append(total)
 
-        # ★ v7.2: 后递增 — 计算下一个序号（执行后递增 +1）
-        if idx < 1 or idx > total:
-            # 已全部输出完毕或越界 → 归零（next_index=0，前端显示0）
-            self._next_index = 0
-            print(f"[Josia多图加载] ℹ️ 序号已归零（idx={idx}, total={total}），下次输出序号=0（已全部输出完毕）")
-        else:
-            # 正常：当前序号 +1，达到总数后归零（不循环）
-            self._next_index = idx + 1
-            if self._next_index > total:
-                self._next_index = 0
-                print(f"[Josia多图加载] ℹ️ 序号已归零（idx={idx}, total={total}），下次输出序号=0（已全部输出完毕）")
-            else:
-                print(f"[Josia多图加载] ℹ️ 序号递增：{idx} → {self._next_index}（共{total}张）")
-
-        # ★ v7.2: 通过 PromptServer 发送递增消息到前端
-        # 使用自定义消息（不限返回格式，工作流运行和单节点预览都生效）
-        try:
-            PromptServer.instance.send_sync("josia_mil_inc", {
-                "node_id": str(unique_id),
-                "next_index": self._next_index,
-                "total": total,
-                "upstream_count": current_upstream,
-            })
-            print(f"[Josia多图加载] ✅ 已发送 josia_mil_inc 消息：node_id={unique_id}, next_index={self._next_index}, total={total}")
-        except Exception as e:
-            print(f"[Josia多图加载] ⚠️ 发送 josia_mil_inc 消息失败：{e}")
-
+        # v7.5: 标准返回（无 ui 回传、无序号状态）。逐张展开由 OUTPUT_IS_LIST 驱动，
+        # 一次排队 = 全部图像自动打完标，彻底摆脱手动批次按钮与序号递增机制。
         return tuple(result)
 
     def _resize_existing_tensor(self, tensor, resize_mode, megapixels, resolution_steps,

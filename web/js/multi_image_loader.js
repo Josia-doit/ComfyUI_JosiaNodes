@@ -1,18 +1,11 @@
 /**
- * JosiaMultiImageLoader 前端 v7.3
+ * JosiaMultiImageLoader 前端 v7.5
  *
- * v7.2 改进（完全重做递增机制 — 抛弃 control_after_generate）:
- * - ★ 后端维护 self._next_index，通过 PromptServer 自定义消息 "josia_mil_inc" 通知前端
- * - ★ 监听 josia_mil_inc 消息 → 更新 output_index widget（后递增+1）
- * - ★ ★ api.addEventListener 接收 CustomEvent，数据在 event.detail 里（不是 raw dict！）
- * - ★ 支持工作流运行和下游预览单独执行（自定义消息不限返回格式）
- * - ★ 达到最大值归零（next_index=0，显示0=已全部输出完毕），不循环
- * - ★ 序号=0 时输出空列表，下游不执行，提示用户恢复默认后再运行
- * - ★ 上游端口连接/断开 → 序号自动复位为1（onConnectionsChange）
- * - ★ 恢复默认按钮：重置参数（output_index→1），不清空图库，不切换输出模式
- * - ★ display_name: 输出序号→下次输出序号（避免歧义）
- * - ★ 移除所有 control_after_generate COMBO 搜索/隐藏代码
- * - ★ 移除 afterQueued 备用方案
+ * v7.5 改进（列表模式改用 ComfyUI 原生 list 展开，删除所有序号相关 UI）:
+ * - ★ 删除 output_index 控件、onExecuted 序号回声、sendSetIndex 消息、上游复位序号逻辑
+ * - ★ 列表模式由后端返回整列 [t1..tN] + OUTPUT_IS_LIST=True 驱动下游自动逐张执行 N 次，
+ *     前端无需任何序号状态/回写，彻底摆脱手动批次按钮与序号递增
+ * - ★ 恢复默认仅重置参数（不动图库、不改输出模式），不再涉及序号
  *
  * v7.1: control_after_generate 种子递增尝试（已废弃）
  * v7.0: 输出序号 + 原生开关 + 自动递增
@@ -169,7 +162,6 @@ async function initNode(node) {
     const edgeDirectionW = node.widgets.find(w => w.name === "edge_direction");
     const edgeValueW     = node.widgets.find(w => w.name === "edge_value");
     const outputModeW    = node.widgets.find(w => w.name === "output_mode");
-    const outputIdxW     = node.widgets.find(w => w.name === "output_index");
     const enableResizeW  = node.widgets.find(w => w.name === "enable_resize");
     const interpolationW = node.widgets.find(w => w.name === "interpolation");
     const multipleOfW   = node.widgets.find(w => w.name === "multiple_of");
@@ -196,31 +188,6 @@ async function initNode(node) {
         // 按边长缩放参数
         setWidgetVisible(edgeDirectionW, !isPixel);
         setWidgetVisible(edgeValueW, !isPixel);
-        // v7.0: output_index 灰化 — 批次模式不可编辑
-        syncOutputIndexEditable();
-    }
-
-    // ★ v7.2: output_index 灰化逻辑（简化版 — 不再操作 COMBO widget）
-    // 批次模式：灰化 output_index（不可编辑，序号不递增）
-    // 列表模式：可编辑 output_index（后端执行后自动递增）
-    function syncOutputIndexEditable() {
-        if (!outputIdxW || !outputModeW) return;
-        const isList = !!outputModeW.value;
-        try {
-            outputIdxW.disabled = !isList;
-            const rowEl = outputIdxW.inputEl && (
-                outputIdxW.inputEl.closest(".comfy-widget-row") ||
-                outputIdxW.inputEl.closest(".widget-row")
-            );
-            if (rowEl) {
-                rowEl.style.opacity = isList ? "1" : "0.4";
-                rowEl.style.pointerEvents = isList ? "auto" : "none";
-            }
-            if (outputIdxW.inputEl) {
-                outputIdxW.inputEl.disabled = !isList;
-                outputIdxW.inputEl.style.opacity = isList ? "1" : "0.4";
-            }
-        } catch(e) { /* 静默 */ }
     }
 
     // ★ v7.3: 图像缩放开关灰化逻辑
@@ -282,12 +249,11 @@ async function initNode(node) {
         };
     }
 
-    // ★ v7.0: output_mode callback — 切换列表/批次时更新 output_index 灰化状态
+    // ★ v7.0: output_mode callback — 切换列表/批次
     if (outputModeW) {
         const origModeCallback = outputModeW.callback || (()=>{});
         outputModeW.callback = function(v) {
             origModeCallback(v);
-            syncOutputIndexEditable();
             node.setDirtyCanvas(true, true);
         };
     }
@@ -742,8 +708,7 @@ async function initNode(node) {
             edge_value: 0,
             interpolation: "lanczos",
             multiple_of: "16",
-            // ★ v7.2: 不重置 output_mode！保持用户选择的图像列表/图像批次状态
-            output_index: 1,          // ★ v7.2: 重置序号为 1（万能恢复）
+            // ★ v7.5: 不重置 output_mode！保持用户选择的图像列表/图像批次状态
         };
         for (const w of node.widgets) {
             if (w.name === "output_mode") continue; // ★ 不重置输出模式
@@ -752,9 +717,7 @@ async function initNode(node) {
                 if (w.callback) w.callback(w.value);
             }
         }
-        // ★ 重置后端实例变量（通过 PromptServer 消息同步 next_index=1）
         syncResizeEnable();
-        syncOutputIndexEditable();
         node.setDirtyCanvas(true, true);
         console.log("[Josia多图加载] ✅ 已恢复默认（参数重置，图库保留，输出模式不变）");
     }
@@ -786,72 +749,10 @@ async function initNode(node) {
     // 工具栏（v7.0: 删除 btnOutput，回到4按钮+计数，单行不换行）
     toolbar.append(btnUpload, btnResort, btnClear, btnReset, lblCount);
 
-    // ★ v7.2: PromptServer josia_mil_inc 消息监听 — 后端执行后通知前端更新序号
-    // 后端通过 PromptServer.send_sync 发送 {node_id, next_index, total, upstream_count}
-    // 前端监听并更新 output_index widget 值为 next_index（后递增 +1）
-    // 此机制支持工作流运行和下游预览单独执行（自定义消息不限返回格式）
-    let _lastTotal = 0;
-    let _lastUpstreamCount = -1;
-    const _milIncListener = (event) => {
-        // ★ ComfyUI api.addEventListener 接收 CustomEvent，数据在 event.detail 里
-        const data = event.detail;
-        if (String(data.node_id) !== String(node.id)) {
-            console.log(`[Josia多图加载] [调试] 收到其他节点的 josia_mil_inc 消息: node_id=${data.node_id}, 本节点id=${node.id}`);
-            return;
-        }
-        console.log(`[Josia多图加载] ✅ 收到本节点的 josia_mil_inc 消息: next_index=${data.next_index}, total=${data.total}`);
-        
-        // 只在列表模式下更新序号（批次模式不递增）
-        if (!outputModeW || !outputModeW.value) {
-            console.log(`[Josia多图加载] [调试] 当前为批次模式，不更新序号`);
-            return;
-        }
-        if (!outputIdxW) {
-            console.log(`[Josia多图加载] ⚠️ outputIdxW 不存在，无法更新序号`);
-            return;
-        }
-
-        _lastTotal = parseInt(data.total) ?? 0;
-        _lastUpstreamCount = parseInt(data.upstream_count) ?? 0;
-        // ★ 修复：不能用 || 1（0 || 1 = 1），必须用 ??（仅 null/undefined 时才回退）
-        const nextIndex = parseInt(data.next_index) ?? 1;
-
-        // 更新 widget 值 + 触发 callback 让 ComfyUI 同步到 graph
-        outputIdxW.value = nextIndex;
-        if (outputIdxW.callback) outputIdxW.callback(nextIndex);
-        node.setDirtyCanvas(true, true);
-        console.log(`[Josia多图加载] ✅ output_index 已更新为 ${nextIndex}`);
-    };
-    api.addEventListener("josia_mil_inc", _milIncListener);
-
-    // ★ v7.2: 节点移除时清理监听器
+    // ★ v7.5: 节点移除清理（无自定义监听器需移除）
     const origOnRemoved = node.onRemoved;
     node.onRemoved = function() {
-        api.removeEventListener("josia_mil_inc", _milIncListener);
         if (origOnRemoved) origOnRemoved.apply(this, arguments);
-    };
-
-    // ★ v7.2: 上游端口连接变化 → 序号自动复位为1
-    // 无论是连接还是断开上游"images"输入端口，都重置 output_index 为1
-    const origOnConnectionsChange = node.onConnectionsChange;
-    node.onConnectionsChange = function(type, slotIndex, isConnected, linkInfo, slotInfo) {
-        if (origOnConnectionsChange) origOnConnectionsChange.apply(this, arguments);
-        // type === 1 表示输入端口变化
-        if (type === 1 && node.inputs && node.inputs[slotIndex]) {
-            const inputName = node.inputs[slotIndex].name;
-            if (inputName === "images") {
-                // 上游端口变化（连接/断开）→ 序号复位为1
-                if (outputIdxW) {
-                    const prevValue = parseInt(outputIdxW.value) || 0;
-                    if (prevValue !== 1) {
-                        outputIdxW.value = 1;
-                        if (outputIdxW.callback) outputIdxW.callback(1);
-                        node.setDirtyCanvas(true, true);
-                        console.log(`[Josia多图加载] 上游端口"${inputName}"${isConnected ? "已连接" : "已断开"}，序号复位为1`);
-                    }
-                }
-            }
-        }
     };
 
     // 事件绑定（v6.7: 统一使用 handleFiles）
@@ -1095,7 +996,6 @@ async function initNode(node) {
         setWidgetVisible(pathsW, false);
         // ★ v7.0: outputModeW 为原生 BOOLEAN 开关（可见）
         syncResizeEnable();
-        syncOutputIndexEditable();            // v7.2: 初始化灰化状态（简化版）
         // ★ v7.2: 不再搜索 control_after_generate COMBO widget（已废弃该机制）
         if (node.syncLayoutToNode) node.syncLayoutToNode();
         try { refreshImageList(); } catch(e) { renderGallery(); }

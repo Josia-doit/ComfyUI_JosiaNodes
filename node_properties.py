@@ -251,7 +251,6 @@ MULTI_IMAGE_DEFAULT_PARAMS = {
     "interpolation": "lanczos",
     "multiple_of": "16",
     "output_mode": False,           # BOOLEAN: False=输出批次(batch), True=输出列表(list)
-    "output_index": 1,              # INT: 列表模式下次输出序号（1=第1张，0=已全部输出完毕需恢复默认）
 }
 
 # 各参数中文提示（用于 INPUT_TYPES tooltip）
@@ -264,8 +263,7 @@ MULTI_IMAGE_PARAM_DESCRIPTIONS = {
     "edge_value": "边长目标像素值，0=不缩放。仅在「按边长缩放」模式下生效。",
     "interpolation": "缩放插值算法：lanczos高质量/nearest最近邻/bilinear双线性/bicubic双三次/area区域/nearest-exact精确最近邻",
     "multiple_of": "尺寸对齐倍数（默认16适配VAE），0=不对齐。每张图独立对齐。",
-    "output_mode": "开关：📦 图像批次 = 所有图像合并为一个 batch（混合比例时 letterbox 黑边）；📋 图像列表 = 按序号逐张输出，下游逐张执行（无黑边）。⚠️ 图像列表模式不支持上游列表串联——如需串联，请将上游节点设为批次模式。",
-    "output_index": "列表模式：下次输出的图像序号（1=第1张，从上游图像开始计数）。上游在前、本节点在后。达到总数后自动归零（序号显示0=已全部输出完毕），需点击「恢复默认」重置为1后再运行。批次模式下此参数灰化不可编辑。⚠️ 上游为列表时可能跳过上游图像，请将上游设为批次模式。连接或断开上游端口时序号自动复位为1。",
+    "output_mode": "开关：📦 图像批次 = 所有图像合并为一个 batch（混合比例时 letterbox 黑边）；📋 图像列表 = 整列展开，下游（如 llama.cpp 反推）自动逐张执行 N 次（一次排队 = 全部图像打完标）。",
     "enable_resize": "图像缩放总开关：✅ 开启 = 按下方设置对每张图进行等比缩放（原功能不变）；❎ 原图直出 = 完全跳过缩放，图像以原始分辨率、原始像素（与原生 LoadImage 一致：EXIF 方向修正 + 转 RGB）直接透传到下游，不做任何等比/黑边/格式处理。关闭后下方「缩放模式 / 百万像素 / 缩放步数 / 边长方向 / 边长值 / 缩放算法 / 对齐倍数」全部灰化失效。",
 }
 

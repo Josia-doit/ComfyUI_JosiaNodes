@@ -1,5 +1,5 @@
 """
-Josia文本列表节点 v2.1.0
+Josia文本列表节点 v2.2.0
 功能：将多行字符串按分隔符分割为字符串列表，支持空行过滤、空白修剪、去重、正则过滤
 本地文件名：text_list.py
 节点英文标识：JosiaTextList
@@ -33,7 +33,7 @@ class JosiaTextList:
 【可选设置】
   过滤空行 — 开启后自动去除空行
   修剪空白 — 开启后去除每行首尾空格、制表符等空白字符
-  分隔符 — 自定义分割字符（支持 \\n \\t 逗号 分号等）
+  分隔符 — 自定义分割字符（支持 \\n \\t 逗号 分号等）；留空则不分割，整段作为单条输出
   去重过滤 — 自动去除重复行
   正则过滤 — 输入正则表达式只保留匹配的行
   显示模式 — 列表模式（每行一个框）/ 完整文本（合并显示）"""
@@ -68,7 +68,7 @@ class JosiaTextList:
                 "delimiter": ("STRING", {
                     "default": "\\n",
                     "display_name": "分隔符",
-                    "tooltip": "自定义分隔符，支持 \\n(换行) \\t(制表) 逗号(,) 分号(;) 等",
+                    "tooltip": "自定义分隔符，支持 \\n(换行) \\t(制表) 逗号(,) 分号(;) 等；留空则不分割，整段作为单条输出（默认 \\n 按行拆分）",
                 }),
                 "dedup": ("BOOLEAN", {
                     "default": False,
@@ -104,6 +104,9 @@ class JosiaTextList:
 
         if not text:
             lines = [""]
+        elif not actual_delim:
+            # 分隔符为空：不分割，整段文本作为单条输出（用于纯显示任意文本）
+            lines = [text]
         else:
             lines = text.split(actual_delim)
 
