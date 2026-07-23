@@ -1,5 +1,10 @@
 """
-Josia CheckpointPlus - 高级智能模型加载节点 v2.9.7
+Josia CheckpointPlus - 高级智能模型加载节点 v2.9.8
+v2.9.8 变更：
+  - CLIP类型下拉补全并修正：对齐官方 CLIPLoader / DualCLIPLoader 最新类型，
+    新增 cosmos / hidream / boogu / krea2 / hunyuan_video / hunyuan_video_15 /
+    kandinsky5 / kandinsky5_image / newbie；修正 ace（原 ACE_Clip 拼写错会静默
+    回退 stable_diffusion）、pixeldit（原 pixeledit 拼写错会静默回退 SD）两项失效选项。
 v2.9.7 变更：
   - 彻底移除「分时显存优化」功能（定时卸载CLIP/VAE导致出图降速至201s）
     该功能已无存在价值，后续可用独立节点实现显存调度
@@ -56,14 +61,24 @@ PLACEHOLDER_CLIP      = "🧠 请选择模型…"
 PLACEHOLDER_VAE       = "🎨 请选择模型…"
 PLACEHOLDER_CLIP_TYPE = "🏷️ 请选择类型…"
 
-# ── CLIP 类型选项（1:1 复刻原生 CLIPLoader 列表） ──
+# ── CLIP 类型选项（对齐官方 CLIPLoader / DualCLIPLoader 下拉，并修正失效项） ──
+# 说明：
+#  • 原列表顺序保持不变（避免破坏已保存工作流的 combo 索引对齐）。
+#  • `ace` 修正原 `ACE_Clip`（.upper()→ACE_CLIP 无法命中枚举 ACE，会静默回退 SD）；
+#    `pixeldit` 修正原 `pixeledit`（.upper()→PIXELEDIT 无法命中枚举 PIXELDIT，同样回退 SD）。
+#  • 末尾追加官方已支持但原列表缺失的新模型 CLIP 类型：
+#    cosmos / hidream / boogu / krea2（来自官方 CLIPLoader 列表），
+#    hunyuan_video / hunyuan_video_15 / kandinsky5 / kandinsky5_image / newbie
+#    （来自官方 DualCLIPLoader 列表与 CLIPType 枚举，一体化单 CLIP 加载同样适用）。
+#  • `_clip_type_to_enum` 用 `getattr(comfy.sd.CLIPType, type_str.upper(), STABLE_DIFFUSION)`，
+#    与官方 CLIPLoader.load_clip 逻辑一致，故下拉项能精确命中枚举即稳定可用。
 CLIP_TYPE_OPTIONS = [
     PLACEHOLDER_CLIP_TYPE,
-    "sdxl",
+    "sdxl",              # 便利：一体化节点接单 CLIP 文件（官方 DualCLIPLoader 提供）
     "stable_diffusion",
     "lumina2",
     "qwen_image",
-    "flux",
+    "flux",              # 便利：接单 CLIP 文件（FLUX 枚举）
     "flux2",
     "sd3",
     "stable_cascade",
@@ -71,10 +86,10 @@ CLIP_TYPE_OPTIONS = [
     "wan",
     "hunyuan_image",
     "pixart",
-    "LTXV",
+    "LTXV",              # 保留原大小写（.upper() 已能命中枚举 LTXV）
     "chroma",
-    "ACE_Clip",
-    "pixeledit",
+    "ace",               # 修正：原 "ACE_Clip" 拼写错，会静默回退 stable_diffusion
+    "pixeldit",          # 修正：原 "pixeledit" 拼写错，会静默回退 stable_diffusion
     "ideogram4",
     "longcat_image",
     "lens",
@@ -82,6 +97,16 @@ CLIP_TYPE_OPTIONS = [
     "omnigen2",
     "cogvideox",
     "stable_audio",
+    # ── 新增：对齐官方 CLIPLoader / DualCLIPLoader 的最新 CLIP 类型 ──
+    "cosmos",
+    "hidream",
+    "boogu",
+    "krea2",
+    "hunyuan_video",
+    "hunyuan_video_15",
+    "kandinsky5",
+    "kandinsky5_image",
+    "newbie",
 ]
 
 def _clip_type_to_enum(type_str: str):

@@ -7,6 +7,24 @@
 
 ---
 
+## [1.5.9] - 2026-07-23
+
+### ✨ 新增功能
+
+#### 模型加载节点（JosiaCheckpointPlus）
+- **补全最新 CLIP 类型，1:1 对齐官方 CLIPLoader / DualCLIPLoader 下拉列表**：新增 `krea2`、`hidream`、`cosmos`、`boogu`（官方单 CLIPLoader 列表）以及 `hunyuan_video`、`hunyuan_video_15`、`kandinsky5`、`kandinsky5_image`、`newbie`（官方双 CLIPLoader / CLIPType 枚举）。现可像官方加载节点一样选择最新模型配套的 CLIP 类型（如 krea2）。
+
+### 🐛 Bug 修复
+
+#### 模型加载节点（JosiaCheckpointPlus）
+- **修复两个 CLIP 类型选项静默失效**：`ACE_Clip`、`pixeledit` 两项因 `.upper()` 后（`ACE_CLIP` / `PIXELEDIT`）与 `comfy.sd.CLIPType` 枚举成员名（`ACE` / `PIXELDIT`）不匹配，实际永远回退 `STABLE_DIFFUSION`，等于选项作废。修正为 `ace` / `pixeldit` 后恢复正常启用。
+
+### 📝 文档更新
+- 更新 `CHANGELOG.md`，记录 v1.5.9 版本变更。
+- 更新 `pyproject.toml` 版本号 1.5.8 → 1.5.9。
+
+---
+
 ## [1.5.8] - 2026-07-20
 
 ### ✨ 新增功能
