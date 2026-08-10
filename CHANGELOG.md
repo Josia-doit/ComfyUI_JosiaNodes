@@ -7,6 +7,28 @@
 
 ---
 
+## [1.6.0] - 2026-08-10
+
+### ✨ 新增功能
+
+#### 模型加载节点（JosiaCheckpointPlus）
+- **双 VAE 支持（视频 VAE + 音频 VAE）**：新增「VAE2模型」下拉，视频模型可同时加载视频 VAE 与音频 VAE 并分别输出（VAE / VAE2 两个端口），适配 LTX / MMAudio / SA3 / MINIMAX H3 等双 VAE 视频模型。VAE 加载逻辑增强，自动兼容官方各音频 VAE 前缀（`audio_vae.` / `vocoder.` 自动做官方同款前缀替换后加载）；VAE2 下拉同时列出 `models/vae` 与 `models/checkpoints`（官方音频 VAE 多置于 checkpoints）。
+- **CLIP 类型补全至最新官方全集**：新增 `joyimage` / `mage` / `minimax`（MINIMAX H3 等最新开源模型对应的 CLIP 架构），与官方 `CLIPLoader` / `DualCLIPLoader` 完全对齐（覆盖官方两节点全部类型）。
+
+### 🐛 Bug 修复
+
+#### 模型加载节点（JosiaCheckpointPlus）
+- **修复 VAE2 端口接不上 VAE 解码器**：原 `RETURN_TYPES` 第 4 项误写为 `"VAE2"`（ComfyUI 无此类型），导致端口颜色异常且无法与 VAE 类节点连线。现类型改回 `"VAE"`（与标准 VAE 解码器兼容），仅显示名保留 `"VAE2"`。
+
+#### 图像对比节点（JosiaImageComparer）
+- **修复 RGBA 与 RGB 混接崩溃**：拼接前自动对齐通道数（3→4 补不透明 alpha、1→N 灰度复制、缺通道用 1.0 兜底），解决新版 ComfyUI `LoadImage` 默认 3 通道后，与 4 通道图（带透明通道 / VaeDecode）混接报 `Sizes must match except in dimension 2` 的问题。仅接 A 或仅接 B 时合理降级。
+
+### 📝 文档更新
+- 更新 `CHANGELOG.md`，记录 v1.6.0 版本变更。
+- 更新 `pyproject.toml` 版本号 1.5.9 → 1.6.0。
+
+---
+
 ## [1.5.9] - 2026-07-23
 
 ### ✨ 新增功能
@@ -52,7 +74,7 @@
 
 ### 📝 文档更新
 - 更新 `README.md`：多图加载节点补充 `images_out` 原生 list 展开说明、修正输出端口名（`image_list` → `images_out`）；文本列表节点补充空分隔符说明；文本保存节点同步按钮/参数改名与重启稳定性说明。
-- 更新 `CHANGELOG.md`，记录 v1.5.8 版本变更。
+- 更新 `CHANGELOG.md`，记录 v1.6.0 版本变更。
 - 更新 `pyproject.toml` 版本号 1.5.5 → 1.5.8。
 
 ---

@@ -1,5 +1,27 @@
 """
-Josia CheckpointPlus - 高级智能模型加载节点 v2.9.8
+Josia CheckpointPlus - 高级智能模型加载节点 v2.9.11
+v2.9.11 变更：
+  - 修复「VAE2」端口接不上 VAE 解码器的问题：原 RETURN_TYPES 第 4 项写成了
+    "VAE2"，而 ComfyUI 没有该类型，导致端口颜色异常且无法与 VAE 类节点连线。
+    现第 4 项类型改回 "VAE"（与标准 VAE 解码器兼容），仅显示名保留 "VAE2"
+    （RETURN_NAMES），端口颜色与可连接性恢复正常。
+  - VAE2 下拉默认项由「🎵 请选择VAE…」改为与其他选项一致的「请选择模型…」，
+    保持占位文案统一。
+v2.9.10 变更：
+  - 新增「VAE2模型」选择项（音频/视频双 VAE）：支持视频模型同时加载
+    视频 VAE + 音频 VAE 并分别输出（VAE / VAE2 两个端口）。
+    VAE 加载逻辑增强：兼容官方各音频 VAE（LTX / MMAudio / SA3 / MINIMAX H3 等），
+    对带 audio_vae./vocoder. 前缀的音频 VAE 自动做官方同款前缀替换后加载。
+    VAE2 下拉同时列出 models/vae 与 models/checkpoints（官方音频 VAE 多置于 checkpoints）。
+  - UNET保活（lock_unet_vram）经复核：新版 ComfyUI 自带的模型驻留管理已能在
+    首次使用后保持 UNET 常驻，本开关主要价值是「加载即预热到 GPU、复用零延迟」，
+    不会造成旧版「分时显存优化」那种出图降速，属可选增益而非拖累；显存吃紧的
+    多模型工作流可关闭以释放余量。行为不变，仅更新说明文案。
+v2.9.9 变更：
+  - CLIP类型下拉补全至与最新官方 CLIPLoader / DualCLIPLoader 完全对齐：
+    新增 joyimage / mage / minimax（MINIMAX H3 等最新开源模型对应的 CLIP 架构）。
+    现下拉已覆盖官方两节点的全部类型（含 sdxl/flux/hunyuan_video 等一体化单 CLIP 便利项），
+    _clip_type_to_enum 用 .upper() 精确命中 comfy.sd.CLIPType 枚举（JOYIMAGE/MAGE/MINIMAX 均已确认存在）。
 v2.9.8 变更：
   - CLIP类型下拉补全并修正：对齐官方 CLIPLoader / DualCLIPLoader 最新类型，
     新增 cosmos / hidream / boogu / krea2 / hunyuan_video / hunyuan_video_15 /
@@ -60,16 +82,19 @@ PLACEHOLDER_MODEL     = "🖼️ 请选择模型…"
 PLACEHOLDER_CLIP      = "🧠 请选择模型…"
 PLACEHOLDER_VAE       = "🎨 请选择模型…"
 PLACEHOLDER_CLIP_TYPE = "🏷️ 请选择类型…"
+PLACEHOLDER_VAE2      = "请选择模型..."
 
 # ── CLIP 类型选项（对齐官方 CLIPLoader / DualCLIPLoader 下拉，并修正失效项） ──
 # 说明：
 #  • 原列表顺序保持不变（避免破坏已保存工作流的 combo 索引对齐）。
 #  • `ace` 修正原 `ACE_Clip`（.upper()→ACE_CLIP 无法命中枚举 ACE，会静默回退 SD）；
 #    `pixeldit` 修正原 `pixeledit`（.upper()→PIXELEDIT 无法命中枚举 PIXELDIT，同样回退 SD）。
-#  • 末尾追加官方已支持但原列表缺失的新模型 CLIP 类型：
+#  • 末尾追加官方已支持但原列表缺失的新模型 CLIP 类型（v2.9.8）：
 #    cosmos / hidream / boogu / krea2（来自官方 CLIPLoader 列表），
 #    hunyuan_video / hunyuan_video_15 / kandinsky5 / kandinsky5_image / newbie
 #    （来自官方 DualCLIPLoader 列表与 CLIPType 枚举，一体化单 CLIP 加载同样适用）。
+#  • v2.9.9 继续补全官方 CLIPLoader 最新列表：joyimage（Qwen3-VL 8B）/ mage / minimax
+#    （MINIMAX H3 的 Qwen3-VL-32B 多模态 CLIP）；枚举成员 JOYIMAGE/MAGE/MINIMAX 已确认存在。
 #  • `_clip_type_to_enum` 用 `getattr(comfy.sd.CLIPType, type_str.upper(), STABLE_DIFFUSION)`，
 #    与官方 CLIPLoader.load_clip 逻辑一致，故下拉项能精确命中枚举即稳定可用。
 CLIP_TYPE_OPTIONS = [
@@ -107,6 +132,10 @@ CLIP_TYPE_OPTIONS = [
     "kandinsky5",
     "kandinsky5_image",
     "newbie",
+    # ── v2.9.9 新增：对齐官方最新 CLIPLoader 列表（MINIMAX H3 等最新开源模型）──
+    "joyimage",         # Qwen3-VL 8B 编辑类 CLIP（CLIPType.JOYIMAGE）
+    "mage",             # CLIPType.MAGE
+    "minimax",          # MINIMAX H3：Qwen3-VL-32B 多模态 CLIP（CLIPType.MINIMAX）
 ]
 
 def _clip_type_to_enum(type_str: str):
@@ -273,6 +302,20 @@ def _get_all_vaes() -> list:
     except Exception:
         return []
 
+def _get_all_vaes_extended() -> list:
+    """VAE2 下拉列表：models/vae + models/checkpoints（官方音频 VAE 多置于 checkpoints）。"""
+    combined = []
+    seen = set()
+    for key in ("vae", "checkpoints"):
+        try:
+            for f in folder_paths.get_filename_list(key):
+                if f not in seen:
+                    seen.add(f)
+                    combined.append(f)
+        except Exception:
+            pass
+    return combined
+
 
 def _get_combined_model_list() -> list:
     """合并 checkpoint + unet 列表"""
@@ -386,7 +429,7 @@ def _parse_gguf_quant(filename: str) -> str | None:
     return None
 
 
-def detect_model_type_public(model_name: str, clip_name: str = None, vae_name: str = None) -> dict:
+def detect_model_type_public(model_name: str, clip_name: str = None, vae_name: str = None, vae2_name: str = None) -> dict:
     """
     公共模型类型检测函数。
     返回: { model_type, file_size_mb, clip_size_mb, vae_size_mb, gguf_quant, folder_source }
@@ -409,6 +452,22 @@ def detect_model_type_public(model_name: str, clip_name: str = None, vae_name: s
         vae_size = _get_file_size_for_folder(vae_name, "vae")
         if vae_size is not None:
             result["vae_size_mb"] = vae_size
+
+    if vae2_name and vae2_name not in (PLACEHOLDER_VAE2, PLACEHOLDER_VAE, ""):
+        v2_path = None
+        for fk in ("vae", "checkpoints"):
+            try:
+                p = folder_paths.get_full_path(fk, vae2_name)
+                if p and os.path.exists(p):
+                    v2_path = p
+                    break
+            except Exception:
+                pass
+        if v2_path:
+            try:
+                result["vae2_size_mb"] = round(os.path.getsize(v2_path) / (1024 * 1024), 1)
+            except Exception:
+                pass
 
     if not model_name or model_name == PLACEHOLDER_MODEL:
         result["model_type"] = "unknown"
@@ -463,7 +522,8 @@ def _register_api_routes():
                 model_name = data.get("model_name", "")
                 clip_name  = data.get("clip_name", None)
                 vae_name   = data.get("vae_name", None)
-                result = detect_model_type_public(model_name, clip_name, vae_name)
+                vae2_name  = data.get("vae2_name", None)
+                result = detect_model_type_public(model_name, clip_name, vae_name, vae2_name)
                 return web.json_response(result)
             except Exception as e:
                 return web.json_response({
@@ -489,8 +549,8 @@ class JosiaCheckpointPlus:
     FUNCTION = "load_model"
     # 不再设置OUTPUT_NODE=True —— 无下游连接时不执行，避免无意义加载。
 
-    RETURN_TYPES = ("MODEL", "CLIP", "VAE")
-    RETURN_NAMES = ("MODEL", "CLIP", "VAE")
+    RETURN_TYPES = ("MODEL", "CLIP", "VAE", "VAE")
+    RETURN_NAMES = ("MODEL", "CLIP", "VAE", "VAE2")
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -498,6 +558,7 @@ class JosiaCheckpointPlus:
         model_list = [PLACEHOLDER_MODEL] + model_list_raw if model_list_raw else [PLACEHOLDER_MODEL]
         all_clips = [PLACEHOLDER_CLIP] + _get_all_clips()
         all_vaes  = [PLACEHOLDER_VAE] + _get_all_vaes()
+        all_vaes2 = [PLACEHOLDER_VAE2] + _get_all_vaes_extended()
 
         return {
             "required": {
@@ -543,24 +604,36 @@ class JosiaCheckpointPlus:
                         "选「请选择模型…」可由下游节点直接接入外部VAE。"
                     ),
                 }),
+                "vae2_name": (all_vaes2, {
+                    "display_name": "VAE2模型",
+                    "default": PLACEHOLDER_VAE2,
+                    "tooltip": (
+                        "第二 VAE（常用于视频模型的音频 VAE：LTX / MMAudio / SA3 / MINIMAX H3 等）。\n"
+                        "• 节点会同时输出 VAE 与 VAE2 两个端口，下游按需接入。\n"
+                        "• AIO 视频模型：内置视频 VAE 走 VAE 端口，音频 VAE 走此处。\n"
+                        "• 兼容官方音频 VAE（带 audio_vae./vocoder. 前缀者自动转换）。\n"
+                        "• 下拉同时列出 models/vae 与 models/checkpoints。"
+                    ),
+                }),
                 "lock_unet_vram": ("BOOLEAN", {
                     "default": True,
                     "label_on": "✅ UNET保活",
                     "label_off": "❎ 允许UNET卸载",
                     "display_name": "UNET保活",
                     "tooltip": (
-                        "【开启（推荐）】防止 ComfyUI 意外卸载 UNET 模型\n"
-                        "• 不强制占用物理 VRAM，允许 ComfyUI 智能调度\n"
-                        "• 修改提示词或下游节点时，UNET 保留在内存中\n"
-                        "• 复用工作流时跳过 UNET 重新加载，速度更快\n\n"
-                        "【关闭】允许 ComfyUI 在显存压力时正常卸载 UNET"
+                        "【开启（推荐）】UNET 保活：加载即预热到 GPU，复用工作流零延迟。\n"
+                        "• 新版 ComfyUI 本身也会在首次使用后保持 UNET 常驻，本开关主要\n"
+                        "  价值是“提前预热 + 多轮复用不重新加载”，不会造成旧版“分时显存\n"
+                        "  优化”那种出图降速，属可选增益而非拖累。\n"
+                        "• 不强制占满 VRAM，ComfyUI 仍按显存压力智能调度。\n"
+                        "• 显存吃紧且工作流内含多个重型模型时，可关闭以释放余量。"
                     ),
                 }),
             },
         }
 
     def load_model(self, main_model, clip_name, clip_type, vae_name,
-                   lock_unet_vram):
+                   vae2_name, lock_unet_vram):
         """核心执行逻辑"""
 
         # ═════ 早报错检查：所有文件IO之前完成 ═════
@@ -598,21 +671,21 @@ class JosiaCheckpointPlus:
         # ═════ 分支加载 ═════
         if is_gguf:
             gguf_quant = _parse_gguf_quant(os.path.basename(main_model))
-            model_obj, clip_obj, vae_obj, model_type = self._load_gguf_unet(
+            model_obj, clip_obj, vae_obj, vae2_obj, model_type = self._load_gguf_unet(
                 main_model, main_path, clip_name, clip_type, vae_name,
-                lock_unet_vram
+                vae2_name, lock_unet_vram
             )
         else:
             model_category = self._detect_category_from_file(main_path)
             if model_category == "aio":
-                model_obj, clip_obj, vae_obj, model_type = self._load_aio_checkpoint(
+                model_obj, clip_obj, vae_obj, vae2_obj, model_type = self._load_aio_checkpoint(
                     main_model, main_path, lock_unet_vram,
-                    clip_type
+                    clip_type, vae2_name
                 )
             else:
-                model_obj, clip_obj, vae_obj, model_type = self._load_standalone_unet(
+                model_obj, clip_obj, vae_obj, vae2_obj, model_type = self._load_standalone_unet(
                     main_model, main_path, clip_name, vae_name,
-                    lock_unet_vram, clip_type
+                    vae2_name, lock_unet_vram, clip_type
                 )
             gguf_quant = None
 
@@ -623,6 +696,11 @@ class JosiaCheckpointPlus:
             clip_size_mb = _get_file_size_for_folder(clip_name, "clip")
         if vae_obj is not None and vae_name and vae_name != PLACEHOLDER_VAE:
             vae_size_mb = _get_file_size_for_folder(vae_name, "vae")
+        vae2_size_mb = None
+        if vae2_obj is not None and vae2_name and vae2_name != PLACEHOLDER_VAE2:
+            v2_path = self._resolve_vae_path(vae2_name)
+            if v2_path:
+                vae2_size_mb = round(os.path.getsize(v2_path) / (1024 * 1024), 1)
 
         ui_state = {
             "model_type": [model_type],
@@ -631,10 +709,11 @@ class JosiaCheckpointPlus:
             "file_size_mb": [file_size_mb],
             "clip_size_mb": [clip_size_mb],
             "vae_size_mb": [vae_size_mb],
+            "vae2_size_mb": [vae2_size_mb],
             "gguf_quant": [gguf_quant],
             "clip_type": [clip_type],
         }
-        return {"ui": ui_state, "result": (model_obj, clip_obj, vae_obj)}
+        return {"ui": ui_state, "result": (model_obj, clip_obj, vae_obj, vae2_obj)}
 
     def _precheck_aio(self, model_name: str) -> bool:
         """快速预判是否为AIO模型（不加载完整文件）"""
@@ -654,7 +733,8 @@ class JosiaCheckpointPlus:
 
     def _load_aio_checkpoint(self, model_name, model_path,
                               lock_unet_vram,
-                              clip_type="stable_diffusion"):
+                              clip_type="stable_diffusion",
+                              vae2_name=PLACEHOLDER_VAE2):
         print(f"[JosiaCheckpointPlus] ✅ 识别为 AIO Checkpoint：{model_name}")
         try:
             out = comfy.sd.load_checkpoint_guess_config(
@@ -670,20 +750,22 @@ class JosiaCheckpointPlus:
             ) from e
 
         model_obj, clip_obj, vae_obj = out[0], out[1], out[2]
+        vae2_obj = self._load_vae_optional(vae2_name)
 
         if lock_unet_vram and model_obj is not None:
             self._pin_unet(model_obj)
 
         print(
             f"[JosiaCheckpointPlus] ✅ AIO加载完成 | "
+            f"VAE2={vae2_name if vae2_name != PLACEHOLDER_VAE2 else '无'} | "
             f"UNET锁定={'开' if lock_unet_vram else '关'}"
         )
-        return model_obj, clip_obj, vae_obj, "aio"
+        return model_obj, clip_obj, vae_obj, vae2_obj, "aio"
 
     # ─────── 加载分支 2：独立普通 UNET ───────
 
     def _load_standalone_unet(self, model_name, model_path, clip_name, vae_name,
-                               lock_unet_vram, clip_type="stable_diffusion"):
+                               vae2_name, lock_unet_vram, clip_type="stable_diffusion"):
         print(f"[JosiaCheckpointPlus] ✅ 识别为独立UNET：{model_name}")
         try:
             model_obj = comfy.sd.load_diffusion_model(model_path)
@@ -702,20 +784,21 @@ class JosiaCheckpointPlus:
 
         clip_obj = self._load_clip_optional(clip_name, clip_type)
         vae_obj  = self._load_vae_optional(vae_name)
+        vae2_obj = self._load_vae_optional(vae2_name)
 
         if lock_unet_vram and model_obj is not None:
             self._pin_unet(model_obj)
 
         print(
             f"[JosiaCheckpointPlus] ✅ 独立UNET加载完成 | "
-            f"CLIP={clip_name} | VAE={vae_name}"
+            f"CLIP={clip_name} | VAE={vae_name} | VAE2={vae2_name if vae2_name != PLACEHOLDER_VAE2 else '无'}"
         )
-        return model_obj, clip_obj, vae_obj, "unet"
+        return model_obj, clip_obj, vae_obj, vae2_obj, "unet"
 
     # ─────── 加载分支 3：GGUF UNET ───────
 
     def _load_gguf_unet(self, model_name, model_path, clip_name, clip_type, vae_name,
-                         lock_unet_vram):
+                         vae2_name, lock_unet_vram):
         print(f"[JosiaCheckpointPlus] ✅ 识别为GGUF UNET：{model_name}")
 
         gguf_cls = _get_gguf_class("UnetLoaderGGUF")
@@ -751,15 +834,16 @@ class JosiaCheckpointPlus:
             clip_obj = self._load_clip_optional(clip_name, clip_type)
 
         vae_obj = self._load_vae_optional(vae_name)
+        vae2_obj = self._load_vae_optional(vae2_name)
 
         if lock_unet_vram and model_obj is not None:
             self._pin_unet(model_obj)
 
         print(
             f"[JosiaCheckpointPlus] ✅ GGUF UNET加载完成 | "
-            f"CLIP={clip_name} | VAE={vae_name}"
+            f"CLIP={clip_name} | VAE={vae_name} | VAE2={vae2_name if vae2_name != PLACEHOLDER_VAE2 else '无'}"
         )
-        return model_obj, clip_obj, vae_obj, "gguf_unet"
+        return model_obj, clip_obj, vae_obj, vae2_obj, "gguf_unet"
 
     def _load_gguf_clip(self, clip_name: str, clip_type: str = None):
         """加载 GGUF 格式的 CLIP（t5 / llama / qwen / gemma3 等文本编码器）。"""
@@ -830,19 +914,49 @@ class JosiaCheckpointPlus:
             return None
 
     def _load_vae_optional(self, vae_name: str):
-        if vae_name == PLACEHOLDER_VAE:
+        if vae_name in (PLACEHOLDER_VAE, PLACEHOLDER_VAE2):
             return None
         vae_path = self._resolve_vae_path(vae_name)
         if vae_path is None:
             print(f"[JosiaCheckpointPlus] ⚠️ VAE文件未找到：{vae_name}，输出空VAE。")
             return None
         try:
-            vae_sd  = comfy.utils.load_torch_file(vae_path)
-            vae_obj = comfy.sd.VAE(sd=vae_sd)
+            vae_sd, vae_metadata = comfy.utils.load_torch_file(vae_path, return_metadata=True)
+            vae_obj = self._build_vae(vae_sd, vae_metadata)
             return vae_obj
         except Exception as e:
             print(f"[JosiaCheckpointPlus] ❌ VAE加载失败：{vae_name} | {str(e)}")
             return None
+
+    def _build_vae(self, vae_sd, vae_metadata=None):
+        """构造 VAE，兼容普通图像/视频 VAE 与音频 VAE（LTX / MMAudio / SA3 / MINIMAX 等）。
+
+        官方 comfy.sd.VAE 已能按 state_dict 自动识别绝大多数架构；
+        但部分音频 VAE（如 LTX 音频 VAE）权 key 带 audio_vae./vocoder. 前缀，
+        直接构造会“No VAE weights detected”。此处对齐官方 LTXVAudioVAELoader，
+        先做前缀替换（audio_vae.→autoencoder.，vocoder.→vocoder.）再重试。
+        """
+        # 1) 直接构造：覆盖标准图像/视频 VAE 及大部分音频 VAE
+        try:
+            vae = comfy.sd.VAE(sd=vae_sd, metadata=vae_metadata)
+            vae.throw_exception_if_invalid()
+            return vae
+        except Exception:
+            pass
+        # 2) 音频 VAE：键前缀替换后重试（官方 LTXVAudioVAELoader 同款逻辑）
+        try:
+            sd2 = comfy.utils.state_dict_prefix_replace(
+                vae_sd,
+                {"audio_vae.": "autoencoder.", "vocoder.": "vocoder."},
+                filter_keys=True,
+            )
+            if sd2:
+                vae = comfy.sd.VAE(sd=sd2, metadata=vae_metadata)
+                vae.throw_exception_if_invalid()
+                return vae
+        except Exception:
+            pass
+        raise RuntimeError("No VAE weights detected")
 
     def _resolve_clip_path(self, clip_name: str):
         try:
@@ -856,12 +970,14 @@ class JosiaCheckpointPlus:
         return None
 
     def _resolve_vae_path(self, vae_name: str):
-        try:
-            path = folder_paths.get_full_path("vae", vae_name)
-            if path and os.path.exists(path):
-                return path
-        except Exception:
-            pass
+        # 同时支持 models/vae 与 models/checkpoints（官方音频 VAE 多置于 checkpoints）
+        for folder_key in ("vae", "checkpoints"):
+            try:
+                path = folder_paths.get_full_path(folder_key, vae_name)
+                if path and os.path.exists(path):
+                    return path
+            except Exception:
+                pass
         if os.path.isabs(vae_name) and os.path.exists(vae_name):
             return vae_name
         return None

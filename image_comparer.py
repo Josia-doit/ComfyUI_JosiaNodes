@@ -42,17 +42,62 @@ class JosiaImageComparer(PreviewImage):  # 类名改为JosiaImageComparer（匹�
         }
 
     @staticmethod
+    def _align_channels(img_a, img_b):
+        """
+        将两张图对齐到相同的通道数，使它们能沿宽度拼接。
+        IMAGE 张量格式 [B,H,W,C]，值域 0-1。ComfyUI 新版 LoadImage 默认输出 3 通道(RGB)，
+        而部分来源(旧图/VaeDecode/带透明通道的图)可能是 4 通道(RGBA)；通道数不一致时
+        torch.cat 会报「Sizes of tensors must match except in dimension 2」。
+        - 取两者通道数的较大值 target_c 作为目标。
+        - 通道较少的一张补齐到 target_c：
+            * 1->3 / 1->4：灰度复制到各通道（4 通道时再令 alpha=1.0）
+            * 3->4：附加不透明 alpha（alpha=1.0）
+            * 其它：缺失通道用 1.0 填充
+        - 通道较多的一张保持不变。
+        """
+        ca = img_a.shape[-1]
+        cb = img_b.shape[-1]
+        if ca == cb:
+            return img_a, img_b
+        target_c = max(ca, cb)
+
+        def _to_target(img, c):
+            if c == target_c:
+                return img
+            device, dtype = img.device, img.dtype
+            if c == 1:
+                # 灰度复制到 target_c 个通道（RGB/RGBA 下均为灰度）
+                img = img.repeat(1, 1, 1, target_c)
+                if target_c == 4:
+                    img[..., 3] = 1.0
+                return img
+            if c == 3 and target_c == 4:
+                # RGB 补不透明 alpha，变成 RGBA
+                alpha = torch.ones(*img.shape[:-1], 1, device=device, dtype=dtype)
+                return torch.cat([img, alpha], dim=-1)
+            # 兜底：用 1.0 补足缺失通道
+            pad = torch.ones(*img.shape[:-1], target_c - c, device=device, dtype=dtype)
+            return torch.cat([img, pad], dim=-1)
+
+        print(f"[JosiaImageComparer] 通道数不一致(A={ca}, B={cb})，已自动对齐为 {target_c} 通道", flush=True)
+        return _to_target(img_a, ca), _to_target(img_b, cb)
+
+    @staticmethod
     def _concat_horizontal(img_a, img_b):
         """
         将两张 IMAGE 张量沿宽度方向左右无缝拼接。
         - IMAGE 张量格式为 [B, H, W, C]，值域 0-1 float。
         - 若两图高度不一致，则把 B 缩放到与 A 相同高度（保持宽高比）后再拼接，避免错位。
         - 若两图 batch 数不同，取较小者对齐。
+        - 若两图通道数不一致(RGBA vs RGB 等)，自动对齐到相同通道数，避免 torch.cat 报错。
         """
         # 对齐 batch 数量
         n = min(img_a.shape[0], img_b.shape[0])
         a = img_a[:n]
         b = img_b[:n]
+
+        # 对齐通道数（RGBA / RGB 等不一致时统一，否则拼接报错）
+        a, b = JosiaImageComparer._align_channels(a, b)
 
         h_a = a.shape[1]
         h_b = b.shape[1]

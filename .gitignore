@@ -32,3 +32,6 @@ temp/
 
 # Agent / 工具本地记忆（仅本地保留，不推送 GitHub）
 .workbuddy/
+
+# 本地备份（每次同步 E→F 前的快照，仅本地保留，不推送 GitHub）
+backup/

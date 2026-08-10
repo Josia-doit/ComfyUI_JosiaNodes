@@ -1,7 +1,7 @@
 # Josia ComfyUI 自定义节点集
 一套功能完整、轻量稳定、高度兼容最新版 ComfyUI 的实用节点集。专为解决老旧节点包兼容性差、体积臃肿、运行卡顿问题而设计，把高频刚需功能浓缩为一套轻量化扩展，让 ComfyUI 工作流更简洁、更顺畅。
 
-> 📺 **我的 B 站主页（教程 / 演示 / 更新动态）**：[Josia 的 B 站空间](https://space.bilibili.com/3706973113551694) — 节点使用讲解、效果演示视频持续更新，欢迎关注支持！
+> 我是 **吉客AI（JeekAI）**，在 B 站分享低配显卡玩转各类 AI 玩法与 ComfyUI 教程；这套 **Josia 节点**是我实战中沉淀的提效工具。📺 [我的 B 站空间](https://space.bilibili.com/3706973113551694)
 
 <img width="2228" height="1158" alt="image" src="https://github.com/user-attachments/assets/2e9e0946-c160-4edb-9c58-df5461456473" />
 
@@ -206,6 +206,7 @@ ComfyUI_JosiaNodes/
 - **输入**：image_a、image_b（均为可选）
 - **输出**：拼接图像（IMAGE）——把图像A与图像B沿宽度方向左右无缝拼接成一张图
   - 两图高度不一致时，自动把 B 等比缩放（lanczos）到与 A 同高再拼接，避免错位 / 黑边
+  - 通道数自动对齐：RGBA（4通道）与 RGB（3通道）混接时自动补不透明 alpha，解决新版 ComfyUI LoadImage 默认 3 通道导致的拼接崩溃
   - 只接一张图则原样输出；都不接输出空
 - **模式**：
   - Slide 模式：鼠标滑动显示竖直分割线，左 A 右 B
@@ -308,15 +309,19 @@ ComfyUI_JosiaNodes/
 ### 12. Josia模型加载（JosiaCheckpointPlus）
 - **分类**：Josia
 - **核心功能**：高级智能一体化模型加载节点，100% 平替所有原生加载器
-- **输入**：主模型、CLIP模型（可选）、CLIP类型、VAE模型（可选）、UNET保活开关
-- **输出**：MODEL / CLIP / VAE
+- **输入**：主模型、CLIP模型（可选）、CLIP类型、VAE模型（可选）、VAE2模型（可选）、UNET保活开关
+- **输出**：MODEL / CLIP / VAE / VAE2
 - **自动识别模式**：
   - **AIO Checkpoint**：模型内含 UNET+CLIP+VAE，自动复用内置组件，自动禁用外部 CLIP/VAE 选框
   - **独立 UNET**：仅含 UNET，可自由选配外部 CLIP 与 VAE
   - **GGUF UNET**：量化模型，可搭配任意格式 CLIP（GGUF 或非 GGUF 均可）
 - **CLIP类型选择**：
-  - 1:1 复刻原生 CLIPLoader 全部 24 种类型（sdxl / flux / flux2 / sd3 / lumina2 / wan / LTXV 等），全部可正常启用（已修复 flux2 / lumina2 等类型报错问题）
+  - 1:1 完整复刻官方 CLIPLoader / DualCLIPLoader 全部类型（sdxl / flux / flux2 / sd3 / lumina2 / wan / LTXV / minimax / joyimage / mage 等），覆盖 MINIMAX H3 等最新开源模型，全部可正常启用
   - AIO 模式自动适配 CLIP 类型，独立 UNET/GGUF 模式需手动选择
+- **双 VAE 支持（视频 VAE + 音频 VAE）**：
+  - 新增「VAE2模型」选框，视频模型可同时加载视频 VAE 与音频 VAE，分别由 VAE / VAE2 两个端口输出
+  - 适配 LTX / MMAudio / SA3 / MINIMAX H3 等双 VAE 视频模型；音频 VAE 自动兼容官方各权重前缀（`audio_vae.` / `vocoder.`），无需手动改名
+  - VAE2 下拉同时列出 `models/vae` 与 `models/checkpoints`（官方音频 VAE 多置于 checkpoints）
 - **UNET保活**（默认开启）：
   - 防止 ComfyUI 意外卸载 UNET 模型，复用工作流时跳过重新加载
   - 不强制占用物理显存，允许 ComfyUI 智能调度

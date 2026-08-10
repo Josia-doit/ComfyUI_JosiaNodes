@@ -70,6 +70,7 @@ const PLACEHOLDER_MODEL     = "🖼️ 请选择模型…";
 const PLACEHOLDER_CLIP      = "🧠 请选择模型…";
 const PLACEHOLDER_VAE       = "🎨 请选择模型…";
 const PLACEHOLDER_CLIP_TYPE = "🏷️ 请选择类型…";
+const PLACEHOLDER_VAE2      = "请选择模型...";
 
 // ─── 工具 ───
 function isGGUF(name) { return typeof name === "string" && name.toLowerCase().endsWith(".gguf"); }
@@ -98,7 +99,7 @@ function formatSize(mb) {
 
 // ─── API调用：精确识别模型类型 ───
 let _fetchController = null;
-async function fetchModelType(modelName, clipName, vaeName) {
+async function fetchModelType(modelName, clipName, vaeName, vae2Name) {
     if (_fetchController) { _fetchController.abort(); }
     _fetchController = new AbortController();
     const ctrl = _fetchController;
@@ -107,6 +108,7 @@ async function fetchModelType(modelName, clipName, vaeName) {
         const body = { model_name: modelName };
         if (clipName && clipName !== PLACEHOLDER_CLIP) body.clip_name = clipName;
         if (vaeName && vaeName !== PLACEHOLDER_VAE) body.vae_name = vaeName;
+        if (vae2Name && vae2Name !== PLACEHOLDER_VAE2) body.vae2_name = vae2Name;
         const resp = await fetch("/josia/detect_model_type", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -311,6 +313,7 @@ function drawIdentifiedState(ctx, bx, by, bw, bh, info, node) {
     const fileSizeMB  = info.fileSizeMB || 0;
     const clipSizeMB  = info.clipSizeMB || 0;
     const vaeSizeMB   = info.vaeSizeMB || 0;
+    const vae2SizeMB  = info.vae2SizeMB || 0;
     const ggufQuant   = info.ggufQuant || null;
     const lockUnet    = info.lockUnet ?? true;
 
@@ -367,6 +370,7 @@ function drawIdentifiedState(ctx, bx, by, bw, bh, info, node) {
         else if (mt !== MT.AIO) parts.push("CLIP -");
         if (vaeSizeMB > 0) parts.push(`VAE ${formatSize(vaeSizeMB)}`);
         else if (mt !== MT.AIO) parts.push("VAE -");
+        if (vae2SizeMB > 0) parts.push(`VAE2 ${formatSize(vae2SizeMB)}`);
         sizeStr = parts.join("  |  ");
     }
 
@@ -461,6 +465,7 @@ async function onModelSelected(node, modelName) {
 
     const clipName = findWidget(node, "clip_name")?.value || "";
     const vaeName  = findWidget(node, "vae_name")?.value || "";
+    const vae2Name = findWidget(node, "vae2_name")?.value || "";
 
     // 1. 文件夹启发式：立即反馈
     const heuristic = folderHeuristic(modelName);
@@ -473,7 +478,7 @@ async function onModelSelected(node, modelName) {
             ggufQuant,
         });
         applyModelTypeLinkage(node, MT.GGUF_UNET);
-        fetchModelType(modelName, clipName, vaeName).then(result => {
+        fetchModelType(modelName, clipName, vaeName, vae2Name).then(result => {
             if (result?.model_type === "gguf_unet") {
                 setNodePhase(node, PHASE.IDENTIFIED, {
                     modelType: MT.GGUF_UNET,
@@ -497,7 +502,7 @@ async function onModelSelected(node, modelName) {
     }
 
     // 3. 异步调API精确识别
-    const result = await fetchModelType(modelName, clipName, vaeName);
+    const result = await fetchModelType(modelName, clipName, vaeName, vae2Name);
     if (!result) {
         if (heuristic !== MT.UNKNOWN) {
             setNodePhase(node, PHASE.IDENTIFIED, {
@@ -583,7 +588,7 @@ function watchSwitchWidgets(node) {
 
 // ─── 监听 CLIP/VAE 下拉变化 → 刷新尺寸 ───
 function watchClipVaeWidgets(node) {
-    for (const name of ["clip_name", "vae_name"]) {
+    for (const name of ["clip_name", "vae_name", "vae2_name"]) {
         const w = findWidget(node, name);
         if (!w || w._josiaClipVaeWatched) continue;
         w._josiaClipVaeWatched = true;
@@ -601,12 +606,14 @@ async function refreshAllSizes(node) {
     const modelW = findWidget(node, "main_model");
     const clipW  = findWidget(node, "clip_name");
     const vaeW   = findWidget(node, "vae_name");
+    const vae2W  = findWidget(node, "vae2_name");
     const modelVal = modelW?.value;
     if (!modelVal || modelVal === PLACEHOLDER_MODEL) return;
 
     const clipVal = clipW?.value || "";
     const vaeVal  = vaeW?.value || "";
-    const result = await fetchModelType(modelVal, clipVal, vaeVal);
+    const vae2Val = vae2W?.value || "";
+    const result = await fetchModelType(modelVal, clipVal, vaeVal, vae2Val);
     if (!result) return;
 
     const mt = node._stateInfo?.modelType || mapApiType(result.model_type);
@@ -617,6 +624,7 @@ async function refreshAllSizes(node) {
         fileSizeMB: result.file_size_mb || 0,
         clipSizeMB: result.clip_size_mb || 0,
         vaeSizeMB: result.vae_size_mb || 0,
+        vae2SizeMB: result.vae2_size_mb || 0,
         ggufQuant: result.gguf_quant || node._stateInfo?.ggufQuant || null,
     });
 }
@@ -791,6 +799,7 @@ app.registerExtension({
                     fileSizeMB: message?.file_size_mb?.[0] || 0,
                     clipSizeMB: message?.clip_size_mb?.[0] || 0,
                     vaeSizeMB: message?.vae_size_mb?.[0] || 0,
+                    vae2SizeMB: message?.vae2_size_mb?.[0] || 0,
                     ggufQuant: message?.gguf_quant?.[0] || null,
                 });
 
@@ -807,6 +816,7 @@ app.registerExtension({
                     fileSizeMB: message?.file_size_mb?.[0] || 0,
                     clipSizeMB: message?.clip_size_mb?.[0] || 0,
                     vaeSizeMB: message?.vae_size_mb?.[0] || 0,
+                    vae2SizeMB: message?.vae2_size_mb?.[0] || 0,
                 });
             }
         };
