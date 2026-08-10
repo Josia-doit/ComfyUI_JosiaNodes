@@ -1,6 +1,12 @@
 /**
- * Josia CheckpointPlus — 前端智能联动 v2.9.7
+ * Josia CheckpointPlus — 前端智能联动 v2.9.12
  *
+ * v2.9.12 变更：
+ *  1. VAE 命名归一化：信息窗尺寸标签「VAE」→「VAE1」，与端口名 VAE1/VAE2 一致；
+ *     同时显示 VAE1 与 VAE2 两个尺寸（原仅单个 VAE）。
+ *  2. 修复重开/加载工作流后尺寸不显示：initNode / onConfigure 在已选中模型时
+ *     主动调用 refreshAllSizes 向服务端拉取 UNET/CLIP/VAE1/VAE2 尺寸，做到实时显示，
+ *     不再需要手动改一次 UNET 才刷新。
  * v2.9.7 变更：
  *  1. 彻底移除分时显存优化(timed_vram)功能
  *  2. 状态栏"保活"标签扩展为"UNET保活"
@@ -368,8 +374,8 @@ function drawIdentifiedState(ctx, bx, by, bw, bh, info, node) {
         if (fileSizeMB > 0) parts.push(`UNET ${formatSize(fileSizeMB)}`);
         if (clipSizeMB > 0) parts.push(`CLIP ${formatSize(clipSizeMB)}`);
         else if (mt !== MT.AIO) parts.push("CLIP -");
-        if (vaeSizeMB > 0) parts.push(`VAE ${formatSize(vaeSizeMB)}`);
-        else if (mt !== MT.AIO) parts.push("VAE -");
+        if (vaeSizeMB > 0) parts.push(`VAE1 ${formatSize(vaeSizeMB)}`);
+        else if (mt !== MT.AIO) parts.push("VAE1 -");
         if (vae2SizeMB > 0) parts.push(`VAE2 ${formatSize(vae2SizeMB)}`);
         sizeStr = parts.join("  |  ");
     }
@@ -660,33 +666,26 @@ function initNode(node) {
 
     // 恢复状态
     const modelW = findWidget(node, "main_model");
-    const savedType = node._confirmedModelType;
-    const modelVal  = modelW?.value;
+    const modelVal = modelW?.value;
 
-    if ((modelVal === PLACEHOLDER_MODEL || !modelVal) && !savedType) {
+    if (!modelVal || modelVal === PLACEHOLDER_MODEL) {
         setNodePhase(node, PHASE.IDLE);
-    } else if (savedType) {
-        setNodePhase(node, PHASE.IDENTIFIED, {
-            ...(node._stateInfo || {}),
-            modelType: savedType,
-            fileName: (modelVal || "").split("/").pop() || "",
-        });
-        applyModelTypeLinkage(node, savedType);
-    } else if (modelVal) {
-        // 尝试从保存的 properties恢复
-        const propsType = node.properties?.model_type;
-        if (propsType && propsType !== MT.UNKNOWN) {
-            node._confirmedModelType = propsType;
+    } else {
+        // 立即用已保存的类型/文件名显示，避免空白
+        const savedType = node._confirmedModelType || node.properties?.model_type;
+        if (savedType && savedType !== MT.UNKNOWN) {
             setNodePhase(node, PHASE.IDENTIFIED, {
                 ...(node._stateInfo || {}),
-                modelType: propsType,
+                modelType: savedType,
                 fileName: (modelVal || "").split("/").pop() || "",
             });
-            applyModelTypeLinkage(node, propsType);
+            applyModelTypeLinkage(node, savedType);
         } else {
-            // 异步识别
-            onModelSelected(node, modelVal);
+            setNodePhase(node, PHASE.IDENTIFYING);
         }
+        // 关键修复：重开/加载工作流后，主动拉取各模型尺寸（VAE1/VAE2/CLIP/UNET），
+        // 解决“类型显示正常、但尺寸空白、须改一次UNET才刷新”的问题
+        refreshAllSizes(node);
     }
 
     enforceMinSize(node);
@@ -768,6 +767,8 @@ app.registerExtension({
                         fileName: (modelW?.value || "").split("/").pop() || "",
                     });
                 }
+                // 关键修复：加载后主动拉取尺寸，避免尺寸空白
+                refreshAllSizes(this);
             }, 80);
         };
 

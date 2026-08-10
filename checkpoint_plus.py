@@ -1,5 +1,18 @@
 """
-Josia CheckpointPlus - 高级智能模型加载节点 v2.9.11
+Josia CheckpointPlus - 高级智能模型加载节点 v2.9.12
+v2.9.12 变更：
+  - 归一化 VAE 命名，与“双 VAE”语义一致：
+    • 下拉「VAE模型」→「VAE模型1」；「VAE2模型」→「VAE模型2」。
+    • 输出端口第 3 个由「VAE」改为「VAE1」（第 4 个仍为「VAE2」）。
+      （RETURN_TYPES 类型仍为 ("MODEL","CLIP","VAE","VAE")，仅显示名改为
+       VAE1/VAE2，不影响与原生 VAE 解码器的连接兼容性。）
+  - 信息窗口尺寸显示修复：
+    • 根因：重开 / 加载工作流时，onConfigure / onAdded 仅恢复了 model_type
+      与文件名，未重新向服务端拉取尺寸，导致“类型显示正常、但 UNET/CLIP/
+      VAE 尺寸空白”，必须手动改一次 UNET 触发刷新才显示。
+    • 现加载 / 重建节点时，主动向 /josia/detect_model_type 异步拉取
+      UNET / CLIP / VAE1 / VAE2 尺寸并刷新信息窗，做到实时显示。
+    • 信息窗同时展示 VAE1 与 VAE2 两个尺寸（原仅显示单个 VAE）。
 v2.9.11 变更：
   - 修复「VAE2」端口接不上 VAE 解码器的问题：原 RETURN_TYPES 第 4 项写成了
     "VAE2"，而 ComfyUI 没有该类型，导致端口颜色异常且无法与 VAE 类节点连线。
@@ -550,7 +563,7 @@ class JosiaCheckpointPlus:
     # 不再设置OUTPUT_NODE=True —— 无下游连接时不执行，避免无意义加载。
 
     RETURN_TYPES = ("MODEL", "CLIP", "VAE", "VAE")
-    RETURN_NAMES = ("MODEL", "CLIP", "VAE", "VAE2")
+    RETURN_NAMES = ("MODEL", "CLIP", "VAE1", "VAE2")
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -596,7 +609,7 @@ class JosiaCheckpointPlus:
                     ),
                 }),
                 "vae_name": (all_vaes, {
-                    "display_name": "VAE模型",
+                    "display_name": "VAE模型1",
                     "default": PLACEHOLDER_VAE,
                     "tooltip": (
                         "• AIO模型：自动禁用，复用模型内置VAE\n"
@@ -605,11 +618,11 @@ class JosiaCheckpointPlus:
                     ),
                 }),
                 "vae2_name": (all_vaes2, {
-                    "display_name": "VAE2模型",
+                    "display_name": "VAE模型2",
                     "default": PLACEHOLDER_VAE2,
                     "tooltip": (
                         "第二 VAE（常用于视频模型的音频 VAE：LTX / MMAudio / SA3 / MINIMAX H3 等）。\n"
-                        "• 节点会同时输出 VAE 与 VAE2 两个端口，下游按需接入。\n"
+                        "• 节点会同时输出 VAE1 与 VAE2 两个端口，下游按需接入。\n"
                         "• AIO 视频模型：内置视频 VAE 走 VAE 端口，音频 VAE 走此处。\n"
                         "• 兼容官方音频 VAE（带 audio_vae./vocoder. 前缀者自动转换）。\n"
                         "• 下拉同时列出 models/vae 与 models/checkpoints。"
