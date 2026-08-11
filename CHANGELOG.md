@@ -7,6 +7,22 @@
 
 ---
 
+## [1.6.4] - 2026-08-11
+
+### 🐛 修复
+- **ComfyUI 节点库推送被卡死（图标无关）**：上一版把 `pyproject.toml` 的 `[project] name` 从 `comfyui-josianodes` 改为 `ComfyUI_JosiaNodes`，导致 ComfyUI 注册表按 `{PublisherId}/{name}` 计算出 **新节点 ID** `josia/ComfyUI_JosiaNodes`，
+  但 GitHub 仓库 URL 已被旧 ID `josia/comfyui-josianodes` 占用，发布返回 500
+  `duplicate: node with same repo already exists`。
+  
+  **根因**：误把 PyPI/仓库命名规范套到了 ComfyUI 注册表上。ComfyUI 节点 ID 故意采用小写连字符格式（与 GitHub 仓库名解耦），
+  仓库展示名仍可为 `ComfyUI_JosiaNodes`，与 Registry node ID 无关。修正方式：`name` 回滚为 `comfyui-josianodes`。
+
+### ℹ️ 说明
+- `1.6.3` Tag 已被本次失败占用且未成功推送，注册表实际仍指向 `1.6.2`。本次 `1.6.4` 会同步把注册表刷新为最新。
+- 图标 `icon.png`（256×256 / 81.7KB）与节点库 `PublisherId` 其它字段不变，**图标和元数据从一开始就是合规的**，无需调整。
+
+---
+
 ## [1.6.3] - 2026-08-11
 
 ### 🔧 修复 / 规范
