@@ -333,7 +333,7 @@ ComfyUI_JosiaNodes/
   - 非 GGUF 模型（ckpt / safetensors / bin）**完全独立运行**，无需任何额外插件
 - **状态栏信息**：
   - 实时显示模型类型标签（AIO / UNET / GGUF 量化等级）
-  - 显示模型文件名、UNET / CLIP / VAE 尺寸
+  - 显示模型文件名、UNET / CLIP / VAE1 / VAE2 尺寸（节点默认宽度已加宽，四项尺寸完整显示不省略）
   - 显示 UNET保活开关状态
 - **特点**：100% 平替原生 CheckpointLoader / UNETLoader / CLIPLoader / VAELoader，一个节点搞定全部加载需求
 <img width="1270" height="802" alt="image" src="https://github.com/user-attachments/assets/795bd2db-6a17-44a6-9228-fbb8306c765c" />

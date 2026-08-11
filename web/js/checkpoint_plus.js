@@ -1,7 +1,7 @@
 /**
- * Josia CheckpointPlus — 前端智能联动 v2.9.12
+ * Josia CheckpointPlus — 前端智能联动 v2.9.13
  *
- * v2.9.12 变更：
+ * v2.9.13 变更：
  *  1. VAE 命名归一化：信息窗尺寸标签「VAE」→「VAE1」，与端口名 VAE1/VAE2 一致；
  *     同时显示 VAE1 与 VAE2 两个尺寸（原仅单个 VAE）。
  *  2. 修复重开/加载工作流后尺寸不显示：initNode / onConfigure 在已选中模型时
@@ -38,7 +38,7 @@ import { app } from "../../scripts/app.js";
 const NODE_NAME  = "JosiaCheckpointPlus";
 
 // ─── 布局常量 ───
-const DEFAULT_NODE_WIDTH = 480;
+const DEFAULT_NODE_WIDTH = 540;
 const STATUS_BAR_H       = 52;
 const STATUS_BAR_MARGIN   = 8;
 
@@ -380,7 +380,7 @@ function drawIdentifiedState(ctx, bx, by, bw, bh, info, node) {
         sizeStr = parts.join("  |  ");
     }
 
-    const maxSizeW = bw * 0.55;
+    const maxSizeW = bw * 0.72;
     ctx.fillStyle = "#999";
     let dispSize = sizeStr;
     if (ctx.measureText(dispSize).width > maxSizeW) {
