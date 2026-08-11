@@ -1,6 +1,6 @@
 """
-Josia CheckpointPlus - 高级智能模型加载节点 v2.9.13
-v2.9.13 变更：
+Josia CheckpointPlus - 高级智能模型加载节点 v2.9.14
+v2.9.14 变更：
   - 归一化 VAE 命名，与“双 VAE”语义一致：
     • 下拉「VAE模型」→「VAE模型1」；「VAE2模型」→「VAE模型2」。
     • 输出端口第 3 个由「VAE」改为「VAE1」（第 4 个仍为「VAE2」）。

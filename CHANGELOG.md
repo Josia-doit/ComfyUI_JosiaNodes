@@ -7,6 +7,15 @@
 
 ---
 
+## [1.6.3] - 2026-08-11
+
+### 🔧 修复 / 规范
+
+- **pyproject `name` 对齐仓库名**：`[project] name` 由 `comfyui-josianodes` 改为 `ComfyUI_JosiaNodes`（与 GitHub 仓库名一致），修复推送到 ComfyUI 节点库后无法被识别 / 更新的问题。
+- **节点图标压缩并接入**：`icon.png` 由 2048×2048 / 3.38MB 压缩至 256×256 / 81.7KB，并在 `[tool.comfy] Icon` 引用其网络地址 `https://raw.githubusercontent.com/Josia-doit/ComfyUI_JosiaNodes/main/icon.png`（尺寸满足注册表 ≤ 800×400px 限制）。
+
+---
+
 ## [1.6.2] - 2026-08-11
 
 ### 🔧 优化 / 规范
