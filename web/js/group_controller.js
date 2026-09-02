@@ -28,6 +28,193 @@ const NODE_NAME_S  = "JosiaGroupControllerS";  // 单组控制：Python类名/�
 const NODE_TYPE_S  = "Josia单组控制";          // 单组控制：中文显示名
 const NODE_BADGE_S = "JosiaGroupControllerS";  // 单组控制：徽章标识（已注释绘制）
 
+const NODE_NAME_G  = "JosiaGroupControllerG";  // 分组控制：Python类名/注册名
+const NODE_TYPE_G  = "Josia分组控制";          // 分组控制：中文显示名
+const NODE_BADGE_G = "JosiaGroupControllerG";  // 分组控制：徽章标识
+
+// ─────────────────────────────────────────────
+// 分组控制节点：布局常量（与多组/单组风格一致）
+// ─────────────────────────────────────────────
+const G_PAD        = 10;        // 内边距
+const G_HEADER_H   = 36;        // 顶部控制条高度
+const G_ROW_H      = 34;        // 已选编组行高
+const G_ROW_GAP    = 4;         // 行间距
+const G_DD_H       = 28;        // 待选下拉框高度
+const G_BTN_W      = 64;        // 开关按钮宽度
+const G_BTN_H      = 22;        // 开关按钮高度
+const G_MIN_ROWS   = 1;         // 最少编组槽位
+const G_MAX_ROWS   = 20;        // 最多编组槽位
+const G_MIN_W      = 300;       // 节点最小宽度
+const G_SM_BTN     = 24;        // 顶部 − / + 小按钮尺寸
+const G_RECOMP     = 300;       // 重新计算节流(ms)
+
+// 将任意颜色字符串解析为 [r,g,b]（兼容 #rgb / #rrggbb / rgb() / rgba()）
+function parseColor(c) {
+  if (!c) return null;
+  c = String(c).trim();
+  if (/^#[0-9a-fA-F]{3}$/.test(c)) {
+    return [parseInt(c[1] + c[1], 16), parseInt(c[2] + c[2], 16), parseInt(c[3] + c[3], 16)];
+  }
+  if (/^#[0-9a-fA-F]{6}$/.test(c)) {
+    return [parseInt(c.slice(1, 3), 16), parseInt(c.slice(3, 5), 16), parseInt(c.slice(5, 7), 16)];
+  }
+  const m = c.match(/rgba?\(([^)]+)\)/i);
+  if (m) {
+    const p = m[1].split(/[,\s/]+/).filter(Boolean).map(Number);
+    if (p.length >= 3) return [p[0], p[1], p[2]];
+  }
+  return null;
+}
+
+// ComfyUI 编组默认调色板（精确中文名，与 ComfyUI 颜色菜单翻译一致）
+const COMFY_GROUP_COLORS = {
+  "#a82a2a": "红色", "#902808": "棕色",
+  "#3fa870": "绿色", "#2a4b7a": "蓝色", "#3f3fbf": "蓝色",
+  "#a8991a": "黄色", "#cf7a1a": "黄色",
+  "#7a52c7": "紫色", "#c71a8f": "粉色", "#1a9acf": "青色",
+  "#444": "黑色", "#9a9a9a": "灰色", "#cfcfcf": "浅灰色", "#335": "深蓝灰", "#335566": "蓝灰色"
+};
+
+// 根据颜色 RGB 推导实际中文颜色名（避免出现"自定义色"）
+function colorName(c) {
+  const rgb = typeof c === "string" ? parseColor(c) : (Array.isArray(c) ? c : null);
+  if (!rgb) return "未设色";
+  const key = (typeof c === "string" ? c : "").toLowerCase();
+  if (COMFY_GROUP_COLORS[key]) return COMFY_GROUP_COLORS[key];
+  const [r, g, b] = rgb;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  const light = (max + min) / 2, delta = max - min;
+  if (delta < 20 && light > 210) return "白色";
+  if (delta < 20 && light < 45)  return "黑色";
+  if (delta < 30) return light > 140 ? "浅灰色" : "灰色";
+  let h = 0;
+  if (delta !== 0) {
+    if (max === r)      h = ((g - b) / delta) % 6;
+    else if (max === g) h = (b - r) / delta + 2;
+    else                h = (r - g) / delta + 4;
+    h *= 60; if (h < 0) h += 360;
+  }
+  const sat = max === 0 ? 0 : delta / max;
+  if (sat < 0.15) return light > 140 ? "浅灰色" : "灰色";
+  if (h < 15 || h >= 345) return "红色";
+  if (h < 45)  return "黄色";
+  if (h < 70)  return "黄色";
+  if (h < 165) return (light > 175 || (sat < 0.5 && light > 150)) ? "淡绿色" : "绿色";
+  if (h < 200) return "青色";
+  if (h < 260) {
+    // 蓝 / 淡蓝：按实测反馈，较浅/低饱和的蓝标记为「蓝色」、较深的标记为「淡蓝色」
+    if (light > 170 || sat < 0.42) return "蓝色";
+    return "淡蓝色";
+  }
+  if (h < 345) return "紫色";   // 紫色统一归为"紫色"，避免误判为"粉色"
+  return "红色";
+}
+// 取编组内节点数（兼容不同 ComfyUI 版本）
+function getGroupNodeCount(group) {
+  if (!group) return 0;
+  return getGroupNodes(group).length;
+}
+
+// ─────────────────────────────────────────────
+// 编组唯一标识（用 group.id，而非 title——多个编组可同名）
+// ─────────────────────────────────────────────
+function groupIdOf(g) {
+  return "GID:" + (g.id != null ? g.id : (g.title ?? ""));
+}
+function resolveGroupByKey(key) {
+  if (!key) return null;
+  const groups = getAllGroups();
+  for (const g of groups) if (groupIdOf(g) === key) return g;
+  for (const g of groups) if ((g.title ?? "") === key) return g; // 兼容旧版 title 主键
+  return null;
+}
+// 旧版本用 title 作主键，迁移为 id 主键
+function migrateSlots(node) {
+  const slots = node.properties?.gSlots ?? [null];
+  let changed = false;
+  const out = slots.map((s) => {
+    if (s == null) return null;
+    if (typeof s === "string" && s.startsWith("GID:")) return s;
+    const g = getAllGroups().find((gg) => (gg.title ?? "") === s);
+    if (g) { changed = true; return groupIdOf(g); }
+    return s;
+  });
+  return changed ? out : null;
+}
+
+// 节点局部坐标 → 屏幕坐标（用于自定义下拉定位）
+function nodeLocalToScreen(node, lx, ly) {
+  try {
+    const ds = app.canvas.ds;
+    const cv = app.canvas.canvas ?? app.canvas.background_canvas;
+    const crect = cv?.getBoundingClientRect?.();
+    const ox = crect?.left ?? 0, oy = crect?.top ?? 0;
+    const gx = node.pos[0] + lx, gy = node.pos[1] + ly;
+    return [ox + (gx - ds.offset[0]) * ds.scale, oy + (gy - ds.offset[1]) * ds.scale];
+  } catch (_) {
+    return [0, 0];
+  }
+}
+
+// ── 自定义下拉菜单（保证色块稳定渲染，不依赖 ContextMenu 内部实现）──
+// 取真实光标屏幕坐标（最稳妥的下拉锚点，规避 graph→screen 变换的偏移/反向问题）
+function _eventClientPos(e) {
+  if (e && typeof e.clientX === "number") return [e.clientX, e.clientY];
+  return null;
+}
+let _josiaDD = null;
+function _josiaDDOutside(e) { if (_josiaDD && !_josiaDD.el.contains(e.target)) _josiaDDClose(); }
+function _josiaDDKey(e) { if (e.key === "Escape") _josiaDDClose(); }
+function _josiaDDClose() {
+  if (!_josiaDD) return;
+  _josiaDD.el.remove();
+  _josiaDD = null;
+  document.removeEventListener("pointerdown", _josiaDDOutside, true);
+  document.removeEventListener("keydown", _josiaDDKey);
+}
+function openJosiaDropdown(ax, ay, items) {
+  _josiaDDClose();
+  const el = document.createElement("div");
+  el.style.cssText = "position:fixed;z-index:100000;min-width:190px;background:#1e1e1e;color:#e6e6e6;border:1px solid #444;border-radius:6px;padding:4px;box-shadow:0 6px 20px rgba(0,0,0,.55);font:12px sans-serif;max-height:340px;overflow:auto;";
+  for (const it of items) {
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:4px;cursor:pointer;white-space:nowrap;";
+    if (it.disabled) { row.style.opacity = "0.5"; row.style.cursor = "default"; }
+    if (it.color) {
+      const sw = document.createElement("span");
+      sw.style.cssText = "width:12px;height:12px;border-radius:3px;background:" + it.color + ";flex:0 0 auto;";
+      row.appendChild(sw);
+    }
+    const lab = document.createElement("span");
+    lab.textContent = it.label;
+    row.appendChild(lab);
+    if (it.count != null) {
+      const cnt = document.createElement("span");
+      cnt.style.cssText = "margin-left:auto;color:#999;font-size:11px;";
+      cnt.textContent = String(it.count);
+      row.appendChild(cnt);
+    }
+    if (!it.disabled) {
+      row.addEventListener("mouseenter", () => { row.style.background = "rgba(255,255,255,0.08)"; });
+      row.addEventListener("mouseleave", () => { row.style.background = "transparent"; });
+      row.addEventListener("click", () => { _josiaDDClose(); it.callback && it.callback(); });
+    }
+    el.appendChild(row);
+  }
+  document.body.appendChild(el);
+  const vw = window.innerWidth, vh = window.innerHeight;
+  const r = el.getBoundingClientRect();
+  let px = ax, py = ay;
+  if (px + r.width > vw - 8) px = Math.max(8, vw - r.width - 8);
+  if (py + r.height > vh - 8) py = Math.max(8, vh - r.height - 8);
+  el.style.left = px + "px"; el.style.top = py + "px";
+  _josiaDD = { el };
+  setTimeout(() => {
+    document.addEventListener("pointerdown", _josiaDDOutside, true);
+    document.addEventListener("keydown", _josiaDDKey);
+  }, 0);
+}
+
 // ─────────────────────────────────────────────
 // 布局常量（共享）
 // ─────────────────────────────────────────────
@@ -126,31 +313,9 @@ function getAllGroups() {
  * 重新计算编组内的节点（兼容不同ComfyUI版本）
  * @param {object} group - 编组实例
  */
+// 重新计算编组内成员（新前端：调用原生 recomputeInsideNodes）
 function recomputeGroupNodes(group) {
-  const graph = group.graph ?? app.graph;
-  if (!graph) return;
-  const grpBounds = group._bounding;
-  if (!grpBounds) return;
-  const [gx, gy, gw, gh] = grpBounds;
-  const allNodes = graph.nodes ?? graph._nodes ?? [];
-
-  if (group._children instanceof Set) {
-    group._children.clear();
-    if (!Array.isArray(group.nodes)) group.nodes = [];
-    group.nodes.length = 0;
-    for (const node of allNodes) {
-      let bounds;
-      try { bounds = node.getBounding?.(); } catch (_) { continue; }
-      if (!bounds) continue;
-      const cx = bounds[0] + bounds[2] * 0.5;
-      const cy = bounds[1] + bounds[3] * 0.5;
-      if (cx >= gx && cx < gx + gw && cy >= gy && cy < gy + gh) {
-        group._children.add(node);
-        group.nodes.push(node);
-      }
-    }
-    return;
-  }
+  if (!group) return;
   try { group.recomputeInsideNodes?.(); } catch (_) {}
 }
 
@@ -160,6 +325,7 @@ function recomputeGroupNodes(group) {
  * @returns {Array} 节点列表
  */
 function getGroupNodes(group) {
+  if (!group) return [];
   if (group._children instanceof Set) {
     return Array.from(group._children).filter(
       (c) => c != null && typeof c === "object" && "mode" in c
@@ -842,6 +1008,389 @@ function _showGroupMenu(node, e) {
 }
 
 // ─────────────────────────────────────────────
+// 分组控制节点：实例状态初始化
+// ─────────────────────────────────────────────
+function ensureStateG(node) {
+  if (node._gbcG) return;
+  node._gbcG = true;
+  if (!node.properties) node.properties = {};
+  if (!Array.isArray(node.properties.gSlots)) node.properties.gSlots = [null]; // [title | null]
+  if (typeof node.properties.gMutex !== "boolean") node.properties.gMutex = false;
+  if (typeof node.properties.gColor !== "string") node.properties.gColor = "";
+  node._gHit  = { count: null, minus: null, plus: null, color: null, mutex: null };
+  node._gRows = [];
+  node._lastRecomputeMs = node._lastRecomputeMs ?? 0;
+  node.serialize_widgets = false;
+  node.isVirtualNode    = true;
+}
+
+// 计算分组控制节点高度
+function computeHeightG(node) {
+  const slots = node.properties?.gSlots ?? [null];
+  let h = G_PAD + G_HEADER_H + G_ROW_GAP;
+  for (const s of slots) h += (s == null ? G_DD_H : G_ROW_H) + G_ROW_GAP;
+  h += G_PAD;
+  return h;
+}
+
+function inRect(mx, my, r) {
+  return mx >= r.x && mx <= r.x + r.w && my >= r.y && my <= r.y + r.h;
+}
+
+// ─────────────────────────────────────────────
+// 分组控制节点：绘制
+// ─────────────────────────────────────────────
+function drawGroupNode(node, ctx) {
+  if (node.flags?.collapsed) return;
+
+  const now    = Date.now();
+  const groups = getAllGroups();
+  let slots  = node.properties?.gSlots ?? [null];
+  const _mig = migrateSlots(node);
+  if (_mig) { node.properties.gSlots = _mig; slots = _mig; }
+
+  // 同步已删除的编组：颜色筛选后删组 → 对应下拉框移除；全删 → 恢复初始（无筛选 + 一个空下拉框）
+  {
+    let pruned = false;
+    const keep = [];
+    for (const k of slots) {
+      if (k == null) { keep.push(null); continue; }
+      if (resolveGroupByKey(k)) keep.push(k);
+      else pruned = true;
+    }
+    if (pruned) {
+      const live = keep.filter((k) => k != null);
+      if (node.properties.gColor && live.length === 0) {
+        node.properties.gColor = "";
+        node.properties.gSlots = [null];
+        slots = [null];
+      } else {
+        node.properties.gSlots = keep.length ? keep : [null];
+        slots = node.properties.gSlots;
+      }
+    }
+  }
+
+  // 节流重新计算已选编组
+  if (now - (node._lastRecomputeMs ?? 0) >= G_RECOMP) {
+    node._lastRecomputeMs = now;
+    for (const g of groups) {
+      if (slots.includes(g.title ?? "")) recomputeGroupNodes(g);
+    }
+  }
+
+  const W = node.size[0];
+  const neededH = computeHeightG(node);
+  if (Math.abs(node.size[1] - neededH) > 1) node.size[1] = neededH;
+
+  node._gHit  = { count: null, minus: null, plus: null, color: null, mutex: null };
+  node._gRows = [];
+
+  let y = G_PAD;
+
+  // ── 顶部控制条 ──
+  const mutexW = 70;
+  ctx.save();
+  ctx.fillStyle = "#aaa"; ctx.font = "12px sans-serif";
+  ctx.textAlign = "left"; ctx.textBaseline = "middle";
+  ctx.fillText("数量 " + slots.filter((s) => s != null).length, G_PAD, y + G_HEADER_H / 2);
+  ctx.restore();
+
+  const smBtnY = y + (G_HEADER_H - G_SM_BTN) / 2;
+  const minusX = G_PAD + 56;
+  node._gHit.minus = { x: minusX, y: smBtnY, w: G_SM_BTN, h: G_SM_BTN };
+  _drawSmallBtn(ctx, minusX, smBtnY, G_SM_BTN, G_SM_BTN, "−", "#33383f", slots.length > G_MIN_ROWS);
+
+  const plusX = minusX + G_SM_BTN + 4;
+  node._gHit.plus = { x: plusX, y: smBtnY, w: G_SM_BTN, h: G_SM_BTN };
+  _drawSmallBtn(ctx, plusX, smBtnY, G_SM_BTN, G_SM_BTN, "+", "#33383f", slots.length < G_MAX_ROWS);
+
+  const colorX = plusX + G_SM_BTN + 10;
+  const colorW = Math.max(40, W - G_PAD - mutexW - 6 - colorX);
+  const gColor = node.properties?.gColor ?? "";
+  const hasFilter = (node.properties?.gSlots ?? []).some((s) => s);
+  const colorLabel = gColor ? colorName(gColor) : (hasFilter ? "无色" : "颜色筛选");
+  node._gHit.color = { x: colorX, y: smBtnY, w: colorW, h: G_SM_BTN + 4 };
+  _drawColorMatchBtn(ctx, colorX, smBtnY, colorW, G_SM_BTN + 4, gColor, colorLabel);
+
+  const mutexX = W - G_PAD - mutexW;
+  node._gHit.mutex = { x: mutexX, y: smBtnY, w: mutexW, h: G_SM_BTN + 4 };
+  const mutexOn = node.properties?.gMutex ?? false;
+  ctx.save();
+  ctx.fillStyle = mutexOn ? "#1a73e8" : "rgba(255,255,255,0.06)";
+  ctx.strokeStyle = mutexOn ? "rgba(255,255,255,0.3)" : "rgba(255,255,255,0.15)";
+  ctx.lineWidth = 1;
+  ctx.beginPath(); drawRoundRect(ctx, mutexX, smBtnY, mutexW, G_SM_BTN + 4, 5);
+  ctx.fill();
+  if (!mutexOn) ctx.stroke();
+  ctx.fillStyle = mutexOn ? "#fff" : "#888";
+  ctx.font = "bold 11px sans-serif";
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillText("单选模式", mutexX + mutexW / 2, smBtnY + (G_SM_BTN + 4) / 2);
+  ctx.restore();
+
+  y += G_HEADER_H + G_ROW_GAP;
+
+  // 分隔线
+  ctx.save();
+  ctx.strokeStyle = "rgba(255,255,255,0.1)"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(G_PAD, y - 2); ctx.lineTo(W - G_PAD, y - 2); ctx.stroke();
+  ctx.restore();
+
+  // ── 编组行 ──
+  for (let i = 0; i < slots.length; i++) {
+    const key = slots[i];
+    if (key == null) {
+      const dX = G_PAD, dY = y, dW = W - G_PAD * 2, dH = G_DD_H;
+      node._gRows.push({ kind: "dd", i, x: dX, y: dY, w: dW, h: dH });
+      _drawPendingDropdown(ctx, dX, dY, dW, dH);
+      y += G_DD_H + G_ROW_GAP;
+    } else {
+      const group    = resolveGroupByKey(key);
+      const gNodes   = group ? getGroupNodes(group) : [];
+      const bypassed = gNodes.length > 0 && gNodes.every((n) => n.mode === BYPASS_MODE);
+      const mixed    = !bypassed && gNodes.some((n) => n.mode === BYPASS_MODE);
+      node._gRows.push({ kind: "row", i, y, bypassed, mixed, key });
+      _drawOptRow(ctx, group, y, bypassed, mixed, gNodes.length, W, i);
+      y += G_ROW_H + G_ROW_GAP;
+    }
+  }
+}
+
+function _drawSmallBtn(ctx, x, y, w, h, label, bg, enabled) {
+  ctx.save();
+  ctx.globalAlpha = enabled ? 1 : 0.4;
+  ctx.fillStyle = bg;
+  ctx.beginPath(); drawRoundRect(ctx, x, y, w, h, 4); ctx.fill();
+  ctx.fillStyle = "#eee"; ctx.font = "bold 16px sans-serif";
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillText(label, x + w / 2, y + h / 2);
+  ctx.restore();
+}
+
+function _drawColorMatchBtn(ctx, x, y, w, h, gColor, label) {
+  ctx.save();
+  ctx.fillStyle = "rgba(255,255,255,0.06)";
+  ctx.strokeStyle = "rgba(255,255,255,0.18)"; ctx.lineWidth = 1;
+  ctx.beginPath(); drawRoundRect(ctx, x, y, w, h, 5); ctx.fill(); ctx.stroke();
+  let tx = x + 8;
+  if (gColor) {
+    ctx.fillStyle = gColor;
+    ctx.beginPath(); drawRoundRect(ctx, tx, y + (h - 14) / 2, 8, 14, 2); ctx.fill();
+    tx += 16;
+  }
+  const text = label ?? (gColor ? colorName(gColor) : "颜色筛选");
+  ctx.fillStyle = gColor ? "#ddd" : "#888";
+  ctx.font = "12px sans-serif"; ctx.textAlign = "left"; ctx.textBaseline = "middle";
+  ctx.fillText(text, tx, y + h / 2);
+  ctx.restore();
+}
+
+function _drawPendingDropdown(ctx, x, y, w, h) {
+  ctx.save();
+  ctx.fillStyle = "rgba(255,255,255,0.06)";
+  ctx.strokeStyle = "rgba(255,255,255,0.18)"; ctx.lineWidth = 1;
+  ctx.beginPath(); drawRoundRect(ctx, x, y, w, h, 5); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = "#888"; ctx.font = "11px sans-serif";
+  ctx.textAlign = "left"; ctx.textBaseline = "middle";
+  ctx.fillText("▼", x + 8, y + h / 2);
+  ctx.fillStyle = "#555"; ctx.font = "12px sans-serif";
+  ctx.fillText("选择编组…", x + 24, y + h / 2);
+  ctx.restore();
+}
+
+function _drawOptRow(ctx, group, y, bypassed, mixed, nodeCount, W) {
+  ctx.save();
+  ctx.fillStyle = bypassed ? "rgba(122,21,21,0.18)" : "rgba(255,255,255,0.04)";
+  ctx.beginPath(); drawRoundRect(ctx, G_PAD, y + 1, W - G_PAD * 2, G_ROW_H - 2, 4); ctx.fill();
+  let textStartX = G_PAD + 8;
+  if (group?.color) {
+    ctx.fillStyle = group.color;
+    ctx.beginPath(); drawRoundRect(ctx, G_PAD + 5, y + (G_ROW_H - 16) / 2, 6, 16, 3); ctx.fill();
+    textStartX += 14;
+  }
+  const btnX = W - G_PAD - G_BTN_W - 4;
+  const btnY = y + (G_ROW_H - G_BTN_H) / 2;
+  ctx.fillStyle = bypassed ? "#7a1515" : (mixed ? "#7a4c15" : "#155c30");
+  ctx.beginPath(); drawRoundRect(ctx, btnX, btnY, G_BTN_W, G_BTN_H, 11); ctx.fill();
+  ctx.fillStyle = "rgba(255,255,255,0.9)"; ctx.font = "bold 10px sans-serif";
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillText(bypassed ? "已跳过" : (mixed ? "部分跳过" : "已启用"), btnX + G_BTN_W / 2, btnY + G_BTN_H / 2);
+  const cntX = btnX - 28;
+  ctx.fillStyle = "rgba(255,255,255,0.1)";
+  ctx.beginPath(); drawRoundRect(ctx, cntX, btnY, 24, G_BTN_H, 4); ctx.fill();
+  ctx.fillStyle = "#999"; ctx.font = "10px sans-serif";
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillText(String(nodeCount), cntX + 12, btnY + G_BTN_H / 2);
+  const maxTitleW = cntX - textStartX - 6;
+  ctx.fillStyle = bypassed ? "#777" : "#ddd"; ctx.font = "13px sans-serif";
+  ctx.textAlign = "left"; ctx.textBaseline = "middle";
+  ctx.fillText(truncateText(ctx, group?.title || "未命名编组", maxTitleW), textStartX, y + G_ROW_H / 2);
+  ctx.restore();
+}
+
+// ─────────────────────────────────────────────
+// 分组控制节点：鼠标事件
+// ─────────────────────────────────────────────
+function handleMouseDownG(node, e, localPos) {
+  if (!localPos) return false;
+  const [mx, my] = localPos;
+  const W = node.size[0];
+  const slots = node.properties?.gSlots ?? [null];
+
+  const h = node._gHit;
+  if (h.minus && inRect(mx, my, h.minus) && slots.length > G_MIN_ROWS) {
+    // 手动增减组数量时，若当前处于颜色筛选状态则先取消筛选回到默认
+    if (node.properties?.gColor) { node.properties.gColor = ""; node.properties.gSlots = [null]; }
+    else { node.properties.gSlots = slots.slice(0, -1); }
+    node._lastRecomputeMs = 0; app.graph?.setDirtyCanvas?.(true, false); return true;
+  }
+  if (h.plus && inRect(mx, my, h.plus) && slots.length < G_MAX_ROWS) {
+    if (node.properties?.gColor) { node.properties.gColor = ""; node.properties.gSlots = [null, null]; }
+    else { node.properties.gSlots = [...slots, null]; }
+    node._lastRecomputeMs = 0; app.graph?.setDirtyCanvas?.(true, false); return true;
+  }
+  if (h.color && inRect(mx, my, h.color)) {
+    _showColorMenu(node, e); return true;
+  }
+  if (h.mutex && inRect(mx, my, h.mutex)) {
+    const newMutex = !(node.properties?.gMutex ?? false);
+    node.properties.gMutex = newMutex;
+    if (newMutex) {
+      const firstTitle = slots.find((s) => s != null);
+      applyMutexG(node, firstTitle);
+    }
+    node._lastRecomputeMs = 0; app.graph?.setDirtyCanvas?.(true, false); return true;
+  }
+
+  for (const row of node._gRows) {
+    if (my < row.y || my > row.y + (row.kind === "dd" ? G_DD_H : G_ROW_H)) continue;
+    if (row.kind === "dd") {
+      _showOptionalGroupMenu(node, row.i, e); return true;
+    }
+    const btnX = W - G_PAD - G_BTN_W - 4;
+    const btnY = row.y + (G_ROW_H - G_BTN_H) / 2;
+    if (mx >= btnX && mx <= btnX + G_BTN_W && my >= btnY && my <= btnY + G_BTN_H) {
+      _toggleOptGroup(node, row.key); return true;
+    }
+    if (mx < btnX - 30) {
+      _showOptionalGroupMenu(node, row.i, e); return true;
+    }
+  }
+  return false;
+}
+
+function _toggleOptGroup(node, key) {
+  const group = resolveGroupByKey(key);
+  if (!group) return;
+  recomputeGroupNodes(group);
+  const nodes    = getGroupNodes(group);
+  const bypassed = nodes.length > 0 && nodes.every((n) => n.mode === BYPASS_MODE);
+  const willEnable = bypassed;
+  if (node.properties?.gMutex && willEnable) {
+    applyMutexG(node, key);
+  } else {
+    setGroupBypass(group, !willEnable);
+  }
+  node._lastRecomputeMs = 0;
+}
+
+function applyMutexG(node, keepKey) {
+  const slots = node.properties?.gSlots ?? [];
+  for (const k of slots) {
+    if (k == null) continue;
+    const g = resolveGroupByKey(k);
+    if (!g) continue;
+    recomputeGroupNodes(g);
+    setGroupBypass(g, k !== keepKey);
+  }
+}
+
+// ─────────────────────────────────────────────
+// 分组控制节点：下拉菜单（颜色筛选 / 编组选择）—— 自定义下拉，稳定显示色块
+// ─────────────────────────────────────────────
+function _showColorMenu(node, e) {
+  const groups = getAllGroups();
+  const colorCount = {};
+  const colorSet = [];
+  let noColor = 0;
+  for (const g of groups) {
+    if (!g.color) { noColor++; continue; }
+    colorCount[g.color] = (colorCount[g.color] || 0) + 1;
+    if (!colorSet.includes(g.color)) colorSet.push(g.color);
+  }
+  // 按原生编组颜色顺序排序（无色、红、棕、绿、蓝、淡蓝、青、紫、黄、黑），其余置后
+  const NATIVE_ORDER = ["#a82a2a","#902808","#3fa870","#2a4b7a","#3f3fbf","#1a9acf","#7a52c7","#a8991a","#cf7a1a","#444"];
+  colorSet.sort((a, b) => {
+    const ia = NATIVE_ORDER.indexOf(a), ib = NATIVE_ORDER.indexOf(b);
+    if (ia === -1 && ib === -1) return 0;
+    if (ia === -1) return 1;
+    if (ib === -1) return -1;
+    return ia - ib;
+  });
+  const items = [{ label: "✕ 取消筛选", callback: () => _clearColorFilter(node) }];
+  if (noColor > 0) {
+    items.push({ label: "无色 (" + noColor + ")", color: null, callback: () => _applyColorFilter(node, "") });
+  }
+  for (const c of colorSet) {
+    items.push({ label: colorName(c), color: c, count: colorCount[c] || 0, callback: () => _applyColorFilter(node, c) });
+  }
+  const h = node._gHit?.color;
+  const anchor = _eventClientPos(e) || nodeLocalToScreen(node, h?.x ?? G_PAD, (h?.y ?? 0) + (G_SM_BTN + 4));
+  openJosiaDropdown(anchor[0], anchor[1], items);
+}
+
+// 应用颜色筛选：完全替换当前节点的组列表为该颜色下的【所有】编组（按 id 主键）
+function _applyColorFilter(node, color) {
+  const groups = getAllGroups();
+  const keys = [];
+  for (const g of groups) {
+    if ((g.color ?? "") === color) {
+      const k = groupIdOf(g);
+      if (!keys.includes(k)) keys.push(k);
+    }
+  }
+  node.properties.gSlots = keys.length ? keys.slice(0, G_MAX_ROWS) : [null];
+  node.properties.gColor = color;
+  for (const g of groups) recomputeGroupNodes(g);
+  node._lastRecomputeMs = 0;
+  app.graph?.setDirtyCanvas?.(true, false);
+}
+
+// 取消筛选：恢复默认（清除筛选标记 + 组列表回到初始空状态），节点按钮显示"颜色筛选"
+function _clearColorFilter(node) {
+  node.properties.gColor = "";
+  node.properties.gSlots = [null];
+  node._lastRecomputeMs = 0;
+  app.graph?.setDirtyCanvas?.(true, false);
+}
+
+function _showOptionalGroupMenu(node, slotIndex, e) {
+  const groups = getAllGroups();
+  const slots = node.properties?.gSlots ?? [];
+  const items = [];
+  for (const g of groups) {
+    const k = groupIdOf(g);
+    if (slots.includes(k)) continue; // 已选中的编组不再出现
+    items.push({
+      label: g.title || "未命名编组",
+      color: g.color,
+      count: getGroupNodeCount(g),
+      callback: () => {
+        const s = node.properties.gSlots;
+        if (slotIndex < s.length) s[slotIndex] = k;
+        node._lastRecomputeMs = 0;
+        app.graph?.setDirtyCanvas?.(true, false);
+      },
+    });
+  }
+  if (!items.length) items.push({ label: "（没有可添加的编组）", disabled: true });
+  const row = node._gRows.find((r) => r.kind === "dd" && r.i === slotIndex);
+  const anchor = _eventClientPos(e) || nodeLocalToScreen(node, row?.x ?? G_PAD, (row?.y ?? 0) + (row?.h ?? G_DD_H));
+  openJosiaDropdown(anchor[0], anchor[1], items);
+}
+
+// ─────────────────────────────────────────────
 // 注册扩展（ComfyUI 标准方式）
 // ─────────────────────────────────────────────
 app.registerExtension({
@@ -973,6 +1522,35 @@ app.registerExtension({
         );
       };
     }
+
+    // ════════════════════════════════════════
+    // JosiaGroupControllerG — 分组控制节点扩展
+    // ════════════════════════════════════════
+    if (nodeData.name === NODE_NAME_G) {
+
+      const origOnAddedG = nodeType.prototype.onAdded;
+      nodeType.prototype.onAdded = function (graph) {
+        ensureStateG(this);
+        origOnAddedG?.call(this, graph);
+      };
+
+      nodeType.prototype.computeSize = function () {
+        ensureStateG(this);
+        return [G_MIN_W, computeHeightG(this)];
+      };
+
+      nodeType.prototype.onDrawForeground = function (ctx) {
+        ensureStateG(this);
+        drawGroupNode(this, ctx);
+      };
+
+      const origMouseDownG = nodeType.prototype.onMouseDown;
+      nodeType.prototype.onMouseDown = function (e, localPos, canvas) {
+        ensureStateG(this);
+        if (handleMouseDownG(this, e, localPos)) return true;
+        return origMouseDownG?.call(this, e, localPos, canvas) ?? false;
+      };
+    }
   },
 
   /**
@@ -982,12 +1560,16 @@ app.registerExtension({
   loadedGraphNode(node) {
     const isM = node.type === NODE_TYPE_M || node.comfyClass === NODE_NAME_M;
     const isS = node.type === NODE_TYPE_S || node.comfyClass === NODE_NAME_S;
-    if (!isM && !isS) return;
+    const isG = node.type === NODE_TYPE_G || node.comfyClass === NODE_NAME_G;
+    if (!isM && !isS && !isG) return;
 
     requestAnimationFrame(() => {
       if (isM) {
         ensureStateM(node);
         node.size[1] = computeHeightM(getAllGroups().length);
+      } else if (isG) {
+        ensureStateG(node);
+        node.size[1] = computeHeightG(node);
       } else {
         ensureStateS(node);
         node.size[1] = SINGLE_H;

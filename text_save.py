@@ -10,8 +10,12 @@ Josia文本保存节点 v1.7.1
 import os
 import re
 import time
-import subprocess
 from datetime import datetime
+
+try:  # ComfyUI 运行时环境
+    import folder_paths
+except Exception:  # 脱离 ComfyUI 单独导入时降级
+    folder_paths = None
 
 
 # ==================== 通配符解析 ====================
@@ -99,26 +103,86 @@ def find_highest_existing_number(directory, base_name, ext, digits=3):
     return max_num
 
 
-def open_folder_dialog():
-    """使用 PowerShell 打开 Windows 原生文件夹选择对话框"""
-    ps_script = (
-        "Add-Type -AssemblyName System.Windows.Forms; "
-        "$f = New-Object System.Windows.Forms.FolderBrowserDialog; "
-        "$f.Description = '选择输出文件夹'; "
-        "$f.ShowNewFolderButton = $true; "
-        "if ($f.ShowDialog() -eq 'OK') { $f.SelectedPath } else { '' }"
-    )
-    try:
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", ps_script],
-            capture_output=True, text=True, timeout=60,
-            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)
-        )
-        path = result.stdout.strip()
-        return path
-    except Exception as e:
-        print(f"[JosiaTextSave] 文件夹选择失败: {e}")
+# 说明（重要 · 发布安全红线）：
+#   本文件【不得】启动任何外部进程，也【不得】使用动态执行 / 动态导入手段。
+#   ComfyUI 官方注册表（Comfy Registry）的自动安全扫描是「AI + 静态分析」黑盒，
+#   除了官方明文禁止的几类写法之外，还会额外封禁一切看起来像 RCE 的代码模式
+#   （含通过脚本宿主弹出系统对话框）。一旦命中，版本会被置为
+#   NodeVersionStatusBanned，注册表 latest_version 指针随即回落到旧版本
+#   （本包 1.5.5~1.6.4 即因此全军覆没）。
+#   ⚠️ 连注释里也不要出现那些敏感单词的字面量 —— 文本型扫描规则可能误伤。
+#
+#   因此，文件夹选择的正确实现方式：
+#     • 后端只用 os.scandir / os.path / os.mkdir —— 纯 Python 标准库文件 I/O，
+#       与 ComfyUI 核心 folder_paths 扫描模型目录用的是同一套 API，无扫描风险；
+#     • 前端用内置浮层渲染目录树，不依赖系统对话框、不依赖浏览器私有 API；
+#     • 原「打开输出目录」（会启动系统文件管理器）在 1.6.7 中暂时改为「复制路径」，
+#       使本版本成为彻底的「零外部进程」版本，用于验证封禁根因；
+#       待确认 1.6.7 通过扫描后，再评估是否加回。
+
+
+# ==================== 目录浏览辅助（纯 os 标准库） ====================
+def _list_drives():
+    """列出可用根目录。Windows 返回可用盘符，其它系统返回文件系统根。"""
+    entries = []
+    if os.name == "nt":
+        for code in range(65, 91):  # A-Z
+            root = chr(code) + ":\\"
+            try:
+                if os.path.isdir(root):
+                    entries.append({"name": chr(code) + ":", "path": root})
+            except OSError:
+                continue
+    if not entries:
+        root = os.path.abspath(os.sep)
+        entries.append({"name": root, "path": root})
+    return entries
+
+
+def _shortcuts():
+    """常用目录快捷入口（ComfyUI output/input/temp、桌面、用户目录）。"""
+    out = []
+    labels = {"output": "ComfyUI 输出目录", "input": "ComfyUI 输入目录", "temp": "ComfyUI 临时目录"}
+    if folder_paths is not None:
+        for key, label in labels.items():
+            try:
+                d = folder_paths.get_directory_by_type(key)
+            except Exception:
+                continue
+            if d and os.path.isdir(d):
+                out.append({"name": label, "path": os.path.abspath(d)})
+    for label, d in (("桌面", os.path.join(os.path.expanduser("~"), "Desktop")),
+                     ("用户目录", os.path.expanduser("~"))):
+        if d and os.path.isdir(d):
+            out.append({"name": label, "path": os.path.abspath(d)})
+    return out
+
+
+def _parent_of(path):
+    """上级目录；已到根时返回空串（前端据此回到驱动器/快捷方式视图）。"""
+    p = path.rstrip("\\/")
+    parent = os.path.dirname(p)
+    if not parent or parent == p:
         return ""
+    return parent
+
+
+def _list_subdirs(path):
+    try:
+        with os.scandir(path) as it:
+            entries = [{"name": e.name, "path": e.path}
+                       for e in it if _is_dir_entry(e)]
+    except (PermissionError, OSError) as e:
+        return None, str(e)
+    entries.sort(key=lambda x: (x["name"] or "").lower())
+    return entries, None
+
+
+def _is_dir_entry(entry):
+    try:
+        return entry.is_dir(follow_symlinks=False)
+    except OSError:
+        return False
 
 
 # ==================== API 路由 ====================
@@ -126,23 +190,56 @@ try:
     from server import PromptServer
     from aiohttp import web
 
-    @PromptServer.instance.routes.post("/josia_text_save/pick_folder")
-    async def pick_folder(request):
-        loop = __import__('asyncio').get_event_loop()
-        path = await loop.run_in_executor(None, open_folder_dialog)
-        return web.json_response({"path": path})
-
-    @PromptServer.instance.routes.post("/josia_text_save/open_folder")
-    async def open_folder(request):
+    @PromptServer.instance.routes.post("/josia_text_save/list_dirs")
+    async def list_dirs(request):
+        """列出指定目录下的子目录。path 为空时返回驱动器列表与快捷入口。"""
         body = await request.json()
-        folder = body.get("path", "")
-        if folder and os.path.isdir(folder):
-            try:
-                subprocess.Popen(["explorer", folder])
-                return web.json_response({"ok": True})
-            except Exception:
-                pass
-        return web.json_response({"ok": False})
+        path = (body.get("path") or "").strip()
+
+        if not path:
+            return web.json_response({
+                "ok": True, "path": "", "parent": "",
+                "dirs": _list_drives(), "shortcuts": _shortcuts(),
+            })
+
+        if not os.path.isdir(path):
+            return web.json_response({"ok": False, "error": "目录不存在或不可访问"})
+
+        entries, err = _list_subdirs(path)
+        if err:
+            return web.json_response({"ok": False, "error": f"无法读取目录：{err}"})
+
+        return web.json_response({
+            "ok": True,
+            "path": path,
+            "parent": _parent_of(path),
+            "dirs": entries,
+            "shortcuts": [],
+        })
+
+    @PromptServer.instance.routes.post("/josia_text_save/create_dir")
+    async def create_dir(request):
+        """在指定父目录下新建一层文件夹（名称不含路径分隔符，杜绝越权写入）。"""
+        body = await request.json()
+        parent = (body.get("parent") or "").strip()
+        name = (body.get("name") or "").strip()
+
+        if not parent or not name:
+            return web.json_response({"ok": False, "error": "参数不完整"})
+        if any(c in name for c in '\\/:*?"<>|'):
+            return web.json_response({"ok": False, "error": "文件夹名称包含非法字符"})
+        if not os.path.isdir(parent):
+            return web.json_response({"ok": False, "error": "父目录不存在"})
+
+        target = os.path.join(parent, name)
+        try:
+            os.mkdir(target)
+        except FileExistsError:
+            return web.json_response({"ok": False, "error": "该文件夹已存在"})
+        except OSError as e:
+            return web.json_response({"ok": False, "error": str(e)})
+
+        return web.json_response({"ok": True, "path": target})
 
 except Exception:
     pass
@@ -165,9 +262,15 @@ class JosiaTextSave:
 
 【使用方法】
   1. 连接或输入文本内容（支持多行）
-  2. 点击「选择输出目录」按钮或手动输入路径
+  2. 点击「选择输出目录」按钮，在内置文件夹浏览器中挑选目录（也可直接手填/粘贴路径）
   3. 输入文件名（支持通配符）
   4. 选择保存格式（txt 或 csv）
+  5. 点击「复制路径」可将当前输出目录复制到剪贴板
+
+【文件夹浏览器】
+  内置浮层，支持磁盘列表、ComfyUI 输出/输入目录快捷入口、桌面与用户目录、
+  上级导航、路径直接输入跳转、新建文件夹、最近使用记录。
+  不使用系统对话框与子进程，符合 Comfy Registry 安全规范。
 
 【通配符规则】（成对 %xxx% 解析）
   %date%           → 2026-06-30
@@ -198,7 +301,7 @@ class JosiaTextSave:
                 "output_path": ("STRING", {
                     "default": "\U0001f4c1 请选择输出目录\u2026",
                     "display_name": "输出路径",
-                    "tooltip": "文件保存的文件夹路径。文件夹不存在时自动创建。",
+                    "tooltip": "文件保存的文件夹路径。可点击上方「选择输出目录」在内置浏览器中挑选，也可直接输入/粘贴；文件夹不存在时自动创建。",
                 }),
                 "file_name": ("STRING", {
                     "default": "%001%",

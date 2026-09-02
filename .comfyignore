@@ -1,0 +1,23 @@
+# ComfyUI Manager / 注册表打包时排除的文件
+# 说明：本文件只决定「下载安装节点时包里包含哪些文件」，
+#       与注册表显示的【版本号】无关（版本号来自 pyproject.toml 的 version 字段 + 打 v* tag 触发的发布 Action）。
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+
+# 本地备份与开发快照（仅本地保留，不进包）
+backup/
+*.bak
+
+# 文档 / 开发工具（非运行时必需）
+docs/
+tools/
+
+# GitHub 工作流（发布由仓库 Actions 单独处理，节点运行时不需要）
+.github/
+
+# 操作系统 / 编辑器垃圾
+.DS_Store
+Thumbs.db
+desktop.ini
