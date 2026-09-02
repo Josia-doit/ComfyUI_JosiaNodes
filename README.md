@@ -19,7 +19,7 @@ ComfyUI_JosiaNodes/
 ├── image_scaling.py               # 多功能图像缩放裁切节点
 ├── image_comparer.py              # 双图对比预览节点
 ├── flow_valve.py                  # 5 通道流量阀门节点
-├── group_controller.py            # 分组控制节点（多组 + 单组）
+├── group_controller.py            # 分组控制节点（多组 + 单组 + 分组控制）
 ├── lora_stack.py                  # LoRA 堆叠节点（多组顺序应用）
 ├── seed.py                        # 随机种子管理节点
 ├── cache_cleanup.py               # 无用显存 / 内存清理节点（保持模型常驻，不卸载）
@@ -30,11 +30,12 @@ ComfyUI_JosiaNodes/
         ├── encoder.js             # 文本编码节点默认尺寸配置
         ├── multi_image_loader.js  # 多图加载前端（图库/拖拽/缩略图/自适应布局）
         ├── text_list.js           # 文本列表前端
-        ├── text_save.js           # 文本保存前端（文件夹选择器）
+        ├── text_save.js           # 文本保存前端（内置文件夹浏览器 / 复制路径）
         ├── flow_valve.js          # 流量阀门前端美化
         ├── seed.js                # 随机种子前端按钮、快捷操作
         ├── image_comparer.js      # 图像对比滑动 / 按住对比交互
-        ├── group_controller.js    # 分组控制前端 UI、开关、导航逻辑
+        ├── group_controller.js    # 分组控制前端 UI、开关、颜色筛选、导航逻辑
+        ├── group_enhancements.js  # 编组增强（四角缩放 / 标题栏按钮，含设置开关）
         ├── lora_stack.js          # LoRA 堆叠前端交互（滑块、开关、强度调节）
         └── checkpoint_plus.js     # 模型加载节点类型识别与状态栏
 ```
@@ -51,10 +52,13 @@ ComfyUI_JosiaNodes/
 6. [Josia图像对比（JosiaImageComparer）](#6-josia图像对比josiaimagecomparer)
 7. [Josia流量阀门（JosiaFlowValve）](#7-josia流量阀门josiaflowvalve)
 8. [Josia随机种子（JosiaSeed）](#8-josia随机种子josiaseed)
-9. [Josia分组控制（JosiaGroupControllerM / JosiaGroupControllerS）](#9-josia分组控制josiagroupcontrollerm--josiagroupcontrollers)
+9. [Josia多组控制 / 单组控制（JosiaGroupControllerM / JosiaGroupControllerS）](#9-josia多组控制--单组控制josiagroupcontrollerm--josiagroupcontrollers)
 10. [JosiaLoRA堆叠（JosiaLoraStack）](#10-josialora堆叠josialorastack)
 11. [Josia缓存清理（JosiaCacheCleanup）](#11-josia缓存清理josiacachecleanup)
 12. [Josia模型加载（JosiaCheckpointPlus）](#12-josia模型加载josiacheckpointplus)
+13. [Josia分组控制（JosiaGroupControllerG）](#13-josia分组控制josiagroupcontrollerg)
+
+**画布增强功能（非节点，在设置面板中启用）**：[🎨 Josia编组增强](#-josia编组增强画布增强功能)
 
 ---
 
@@ -117,16 +121,18 @@ ComfyUI_JosiaNodes/
 ### 3. Josia文本保存（JosiaTextSave）
 
 - **分类**：Josia
-- **核心功能**：将文本内容保存到文件，支持通配符解析、文件夹选择、图像文件名复用
+- **核心功能**：将文本内容保存到文件，支持通配符解析、输出目录指定、图像文件名复用
 - **输入**：
   - 文本（多行字符串，支持上游节点连接）
   - 图像（可选，接入时自动复用原图文件名）
 - **输出**：输出文本（透传输入文本，方便串联）
 - **参数**：
-  - 选择输出目录：点击按钮打开系统文件夹选择器（置于文本输入框之后，符合「先选目录」的使用惯性）
-  - 保存路径：手动输入或自动填充的目录路径
+  - 选择输出目录：点击「选择输出目录」按钮打开**内置文件夹浏览器**（支持磁盘列表、ComfyUI 输出/输入目录快捷入口、桌面与用户目录、上级导航、路径直接输入跳转、新建文件夹、最近使用记录）；也可直接手填 / 粘贴路径（置于文本输入框之后，符合「先选目录」的使用惯性）
+  - 输出路径：浏览器选中的目录路径，也可手动输入或粘贴
   - 文件名：支持通配符（%date%/%time%/序号等）
   - 保存格式：txt / csv
+  - 复制路径：保存后可一键将当前输出目录复制到剪贴板
+- **关于文件夹选择器**：旧版本通过脚本宿主调用系统文件夹选择对话框，因命中 ComfyUI 注册表自动安全扫描（禁止任意系统调用）已在 `1.6.7` 移除。新版改用**内置文件夹浏览器**——后端用标准库 `os.scandir` 枚举目录、前端浮层渲染，与 ComfyUI 核心 `folder_paths` 扫描模型目录是同一套 API，无扫描风险；「打开输出目录」改为「复制路径」按钮（零外部进程）
 - **稳定性**：重启 ComfyUI 后各参数正确保存，不再因前端按钮序列化导致字段错位（路径串入文本 / 通配符乱跳）
 - **通配符规则**（成对 %xxx% 解析）：
   - `%date%` → 2026-06-30
@@ -175,7 +181,7 @@ ComfyUI_JosiaNodes/
 
 ---
 
-### 3. Josia图像缩放（JosiaImageScaling）
+### 5. Josia图像缩放（JosiaImageScaling）
 - **分类**：Josia
 - **核心功能**：全能图像缩放裁切，支持 4 大比例 + 3 种自定义模式
 - **输入**：图像（可选）、遮罩（可选）
@@ -200,7 +206,7 @@ ComfyUI_JosiaNodes/
 
 ---
 
-### 4. Josia图像对比（JosiaImageComparer）
+### 6. Josia图像对比（JosiaImageComparer）
 - **分类**：Josia
 - **核心功能**：双图实时对比预览，支持两种交互模式；并输出 A/B 左右无缝拼接图
 - **输入**：image_a、image_b（均为可选）
@@ -226,7 +232,7 @@ ComfyUI_JosiaNodes/
 
 ---
 
-### 6. Josia随机种子（JosiaSeed）
+### 8. Josia随机种子（JosiaSeed）
 - **分类**：Josia
 - **核心功能**：专业级随机种子管理，支持自动/递增/递减/固定模式
 - **种子规则**：
@@ -250,9 +256,9 @@ ComfyUI_JosiaNodes/
 
 ---
 
-### 9. Josia分组控制（JosiaGroupControllerM / JosiaGroupControllerS）
+### 9. Josia多组控制 / 单组控制（JosiaGroupControllerM / JosiaGroupControllerS）
 - **分类**：Josia
-- **多组控制（Josia多组控制）**：自动扫描所有编组，一键全部跳过/启用，点击组名快速定位，激活"单选模式"可启用互斥激活
+- **多组控制（Josia多组控制）**：自动扫描工作流中所有编组，逐组列出开关，一键全部跳过/启用，点击组名快速定位，激活"单选模式"可启用互斥激活
 - **单组控制（Josia单组控制）**：下拉选择编组，单个开关精准控制启用/跳过
 - **状态显示**：
   - 绿色：已启用
@@ -263,7 +269,7 @@ ComfyUI_JosiaNodes/
 
 ---
 
-### 10. Josia LoRA 堆叠（JosiaLoraStack）
+### 10. JosiaLoRA堆叠（JosiaLoraStack）
 - **分类**：Josia
 - **核心功能**：多组 LoRA 顺序堆叠，支持 1-10 组独立控制
 - **输入**：模型、CLIP（可选）
@@ -289,7 +295,7 @@ ComfyUI_JosiaNodes/
 
 ---
 
-### 9. Josia缓存清理（JosiaCacheCleanup）
+### 11. Josia缓存清理（JosiaCacheCleanup）
 - **分类**：Josia
 - **核心功能**：在保持模型缓存状态下，轻量清理无用的显存 / 内存，不卸载模型
 - **输入**：任意类型数据（可选，透传用）
@@ -340,13 +346,45 @@ ComfyUI_JosiaNodes/
 
 ---
 
+### 13. Josia分组控制（JosiaGroupControllerG）
+- **分类**：Josia
+- **核心功能**：把多个编组自由组合到同一个节点里，按需一键跳过 / 启用，支持**按编组颜色批量添加**
+- **顶部控制条**：
+  - **数量**：显示当前已添加的编组槽位数
+  - **− / +**：增减编组槽位（**1 ~ 20** 个）；减少时隐藏的槽位保留原有设置，加回来时原样显示
+  - **颜色匹配**：按编组颜色一次性把该颜色下的所有编组加入列表
+  - **单选模式**：仅在本节点选中的编组之间互斥（启用其中一个，其余自动跳过）
+- **编组行**：每行一个下拉框选择目标编组（已被选中的不会重复出现）+ 启用/跳过开关
+- **颜色筛选支持**：无色 / 红色 / 棕色 / 绿色 / 蓝色 / 淡蓝色 / 青色 / 紫色 / 黄色 / 黑色
+  - 对齐 ComfyUI 原生编组颜色选项，下拉按原生顺序排列，不再出现同色多组只显示一项的问题
+- **特点**：纯前端交互、不占算力；选中的编组信息随工作流保存，重新打开自动恢复
+
+---
+
+## 🎨 Josia编组增强（画布增强功能）
+> 这不是节点，而是**画布层面的增强补丁**。在 **设置 → ⚡ Josia节点设置** 中启用；两个开关**默认关闭**，各自独立生效、互不影响。
+
+| 设置项 | 作用 |
+|---|---|
+| **四角缩放** | ComfyUI 原生只有右下角能缩放编组，开启后补上 **左上 / 右上 / 左下** 三个角 |
+| **标题栏按钮** | 编组标题栏最右侧显示两个按钮：**「绕」**一键绕过/恢复编组内所有节点、**「适」**缩放框到节点（复用官方"适配内容"逻辑） |
+
+- **四角缩放细节**：
+  - 只改变编组边框的位置与尺寸，**内部节点绝不跟随移动**（与原生 resize 语义一致）
+  - 拖拽时逐帧实时预览，并**跟随全局「对齐网格」设置**：开启对齐网格后，四角拖拽会像原生右下角一样自动吸附到网格
+  - 悬停四角显示对应的 `nwse-resize` / `nesw-resize` 光标；四角标记的颜色随编组颜色变化
+- **兼容性**：遵循 ComfyUI 官方安全规范，不含任何 `subprocess` / `eval` / `exec` 等系统调用
+
+---
+
 ## 🛠️ 安装方法
 1. 下载整个 `ComfyUI_JosiaNodes` 文件夹
 2. 放入 `ComfyUI/custom_nodes/` 目录下
 3. **（如使用 GGUF 模型）** 安装 [ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF) 插件到 `ComfyUI/custom_nodes/`
 4. 确保 `web/js` 文件夹完整，不要移动或删除文件
 5. 重启 ComfyUI
-6. 看到控制台输出 `[JosiaNodes] ✅ JosiaNodes 加载成功，注册节点数：12` 即成功
+6. 看到控制台输出 `[JosiaNodes] ✅ JosiaNodes 加载成功，注册节点数：14` 即成功
+7. **（可选）启用编组增强**：设置 → `⚡ Josia节点设置`，按需打开「四角缩放」和「标题栏按钮」（默认关闭）
 
 ---
 
@@ -361,13 +399,16 @@ ComfyUI_JosiaNodes/
 
 ## ⚠️ 重要说明
 1. 文本编码节点的 VAE 端口为可选输入，未接入时图生图模式自动降级为空 Latent
-3. 图像缩放节点内置分辨率上限保护（400万像素），避免显存溢出
-4. 缓存清理节点只清理无用显存/内存（不卸载模型、不清理系统文件缓存），全平台行为一致，安全无副作用
-5. 分组控制、图像对比、流量阀门、种子节点、模型加载节点、多图加载节点均依赖前端 JS 文件，不可删除
-6. 所有节点均已配置 `DESCRIPTION` 属性，在搜索节点界面和鼠标悬浮时可查看功能简介
-7. **模型加载节点 GGUF 依赖**：加载 GGUF 格式模型需安装 ComfyUI-GGUF 插件；ckpt/safetensors/bin 格式完全独立运行
-8. **多图加载节点**：`images_out` 批次输出在混合不同比例图片时会自动 letterbox（黑边居中），这是 PyTorch tensor batch 的数学限制；如需每张图独立的正确尺寸，请使用 `image_1` ~ `image_N` 单独输出端口
-9. 文本列表和文本保存节点为纯 Python 标准库实现，不依赖前端 JS 文件，即使前端 JS 丢失也可正常工作（仅文件夹选择功能需 JS 支持）
+2. 图像缩放节点内置分辨率上限保护（400万像素），避免显存溢出
+3. 缓存清理节点只清理无用显存/内存（不卸载模型、不清理系统文件缓存），全平台行为一致，安全无副作用
+4. 分组控制、图像对比、流量阀门、种子节点、模型加载节点、多图加载节点均依赖前端 JS 文件，不可删除
+5. 所有节点均已配置 `DESCRIPTION` 属性，在搜索节点界面和鼠标悬浮时可查看功能简介
+6. **模型加载节点 GGUF 依赖**：加载 GGUF 格式模型需安装 ComfyUI-GGUF 插件；ckpt/safetensors/bin 格式完全独立运行
+7. **多图加载节点**：`images_out` 批次输出在混合不同比例图片时会自动 letterbox（黑边居中），这是 PyTorch tensor batch 的数学限制；如需每张图独立的正确尺寸，请使用 `image_1` ~ `image_N` 单独输出端口
+8. **文本保存节点**：`1.6.7` 起不再调用系统文件夹选择对话框（会触发 ComfyUI 节点库安全扫描），改用**内置文件夹浏览器**（后端标准库枚举 + 前端浮层）；「打开输出目录」改为「复制路径」按钮，均为零外部进程的安全实现
+9. 文本列表和文本保存节点为纯 Python 标准库实现，不依赖前端 JS 文件，即使前端 JS 丢失也可正常工作（仅「选择输出目录」「复制路径」按钮需 JS 支持）
+10. **编组增强默认关闭**：「四角缩放」与「标题栏按钮」两项默认关闭，需在 `设置 → ⚡ Josia节点设置` 中手动开启；若两个开关未同时出现，请确认使用的是最新版前端文件 `web/js/group_enhancements.js`
+11. **编组增强的四角缩放**只改变编组边框，不移动内部节点；若希望内部节点一起移动，请使用 ComfyUI 原生的编组拖动（拖标题栏）
 
 ---
 

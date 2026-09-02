@@ -9,7 +9,7 @@ Josia Group Controller - 分组控制节点核心文件
 节点中文显示名：Josia多组控制 / Josia单组控制
 """
 
-from node_properties import DESCRIPTION_M, DESCRIPTION_S
+from node_properties import DESCRIPTION_M, DESCRIPTION_S, DESCRIPTION_G
 
 
 class JosiaGroupControllerM:
@@ -77,13 +77,48 @@ class JosiaGroupControllerS:
         return {}
 
 
+class JosiaGroupControllerG:
+    """
+    分组控制节点：
+    - 顶部控制条：数量计数 / −+ 增减编组槽位（1~20）/ 颜色匹配（按色批量添加）/ 单选模式（互斥）；
+    - 每个编组槽位：下拉选择目标编组（已选不重复）+ 启用/跳过开关；
+    - 颜色匹配：按编组颜色一次性添加该颜色下的所有编组；
+    - 单选模式：仅在本节点选中的编组中互斥（启用一个即跳过其余）；
+    - 所有交互逻辑由前端 group_controller.js 实现，Python 端仅为占位节点。
+    """
+
+    DESCRIPTION = """🎛️ Josia 分组控制
+灵活组合多个编组，按需跳过 / 启用。
+
+• 顶部控制条 — 数量 / 增减 / 颜色匹配 / 单选模式
+• 编组行     — 下拉选择编组 + 启用/跳过开关
+
+选中的编组信息随工作流保存，重新打开自动恢复。"""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        """节点输入参数（无实际输入，仅占位）"""
+        return {"required": {}}
+
+    RETURN_TYPES = ()          # 无输出
+    FUNCTION = "run"           # 核心执行函数（空实现）
+    OUTPUT_NODE = True         # 标记为输出节点（无实际输出）
+    CATEGORY = "Josia"  # 统一节点分类
+
+    def run(self):
+        """核心执行函数（空实现，交互由前端 JS 处理）"""
+        return {}
+
+
 # ==================== ComfyUI 节点映射（与__init__.py注册名严格一致） ====================
 NODE_CLASS_MAPPINGS = {
     "JosiaGroupControllerM": JosiaGroupControllerM,
-    "JosiaGroupControllerS": JosiaGroupControllerS
+    "JosiaGroupControllerS": JosiaGroupControllerS,
+    "JosiaGroupControllerG": JosiaGroupControllerG
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "JosiaGroupControllerM": "Josia多组控制",
-    "JosiaGroupControllerS": "Josia单组控制"
+    "JosiaGroupControllerS": "Josia单组控制",
+    "JosiaGroupControllerG": "Josia分组控制"
 }
