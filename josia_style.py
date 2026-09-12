@@ -88,10 +88,17 @@ def _list_themes():
     return themes
 
 
+def _is_safe_theme(theme):
+    """校验 theme 是否为 Style/ 目录下真实存在的主题文件夹名，防止路径穿越。"""
+    return bool(theme) and theme in {t["id"] for t in _list_themes()}
+
+
 def _load_theme(theme):
     """加载某主题的风格库（含缓存）。返回 {"list":[...], "by_name":{name:entry}}。"""
     if theme in _STYLE_CACHE:
         return _STYLE_CACHE[theme]
+    if not _is_safe_theme(theme):
+        return {"list": [], "by_name": {}}
     style_dir = os.path.join(STYLE_ROOT, theme)
     styles_path = os.path.join(style_dir, "styles.json")
     result = {"list": [], "by_name": {}}
@@ -274,7 +281,9 @@ def _load_user_config():
 def _save_user_config(cfg):
     """原子写入用户配置（先写临时文件再 rename，避免半写损坏）。"""
     try:
-        tmp = _USER_CONFIG_PATH + ".tmp"
+        tmp = os.path.normpath(_USER_CONFIG_PATH + ".tmp")
+        if not tmp.startswith(os.path.normpath(STYLE_ROOT) + os.sep):
+            return
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
         os.replace(tmp, _USER_CONFIG_PATH)
@@ -296,7 +305,7 @@ try:
     @PromptServer.instance.routes.get("/josia_style/{theme}/styles")
     async def _josia_style_styles(request):
         theme = request.match_info["theme"]
-        if not theme or not os.path.isfile(os.path.join(STYLE_ROOT, theme, "styles.json")):
+        if not _is_safe_theme(theme):
             return _web.json_response({"error": "theme_not_found", "list": []}, status=404)
         data = _load_theme(theme)["list"]
         return _web.json_response({"theme": theme, "list": data})
@@ -313,6 +322,8 @@ try:
     @PromptServer.instance.routes.get("/josia_style/{theme}/thumb")
     async def _josia_style_thumb(request):
         theme = request.match_info["theme"]
+        if not _is_safe_theme(theme):
+            return _web.Response(status=404)
         fname = (request.rel_url.query.get("file", "") or "").replace("\\", "/")
         fname = fname.split("/")[-1]          # 允许传 krea2/thumbs/xxx.jpg，只取文件名
         if not fname:
@@ -334,6 +345,8 @@ try:
     # 画廊 index.html 为自包含单文件（CSS/JS 全内联），无需额外托管静态资源。
     def _gallery_index(request):
         theme = request.match_info.get("theme", "")
+        if not _is_safe_theme(theme):
+            return _web.Response(status=404, text="gallery index.html not found")
         idx = os.path.join(STYLE_ROOT, theme, "gallery", "index.html")
         if not os.path.isfile(idx):
             return _web.Response(status=404, text="gallery index.html not found")
