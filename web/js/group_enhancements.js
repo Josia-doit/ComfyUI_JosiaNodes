@@ -5,12 +5,15 @@
  *   1) 四角缩放（JosiaNodes.CornerResize）：
  *      原生只有右下角可缩放，本补丁补上 左上 / 右上 / 左下 三个角；
  *      内部节点绝不跟随移动（只改 group.pos / group.size，等价于原生 resize 语义）。
- *      跟随全局「对齐网格」设置：开启时拖拽实时对齐到网格，逻辑同原生右下角 resize。
- *   2) 编组标题栏按钮（JosiaNodes.GroupTitleButtons）：
+ *      对齐网格与原生完全一致：开启全局「对齐网格」时，只有「正在拖动的角」吸附到网格，
+ *      锚点角（相对角）保持不动，再由其反算宽高 —— 与 LGraphCanvas 原生右下角 resize 的
+ *      snapToGrid 行为一致（canvas.snapToGrid 为真则按 canvas.grid_size 吸附）。
+ *   2) 编组标题按钮（JosiaNodes.GroupTitleButtons）：
  *        • 「绕」— 一键绕过 / 恢复（切换）编组内所有节点（Bypass）
- *        • 「适」— 缩放框到节点（调用原生 group.resizeTo，复用官方"适配内容"逻辑）
+ *        • 「适」— 适配组内节点（顶边距 = 标题栏高度 + 3 格网格、左右下边距 2 格网格；开启"对齐网格"时整体吸附网格）
  *
- * 设置面板分类：⚡ Josia节点设置（亮色闪电 Emoji + 中文名，独立成项，不归入「其他」；两个开关各自独立子分类，避免同分类合并）。
+ * 设置面板分类：⚡️JosiaNodes（带 ⚡️ Emoji，独立成项，不归入「其他」）。
+ * 两个开关同处「编组增强」分栏：编组四角缩放 + 编组标题按钮。
  *
  * 实现严格对齐 ComfyUI 当前 litegraph（@comfyorg/litegraph）原生逻辑：
  *   - 编组由 LGraphGroup.prototype.draw(graphCanvas, ctx) 绘制；
@@ -28,12 +31,14 @@ const ACTIVE_MODE = 0;
 const ENH_BTN_W   = 22;   // 标题栏按钮宽
 const ENH_BTN_H   = 16;   // 标题栏按钮高
 const ENH_GAP     = 4;    // 按钮间距（= 上下边距，视觉居中）
+const GROUP_MIN_W = 80;   // 编组最小宽（拖拽保底，避免缩到 0）
+const GROUP_MIN_H = 80;   // 编组最小高
 
 // ─────────────────────────────────────────────
-// 设置开关（ComfyUI 设置面板：⚡ Josia节点设置，两个独立开关、各自独立子分类，默认关闭）
+// 设置开关（ComfyUI 设置面板：⚡️JosiaNodes，两个独立开关、各自独立子分类，默认关闭）
 // ─────────────────────────────────────────────
 let _cornerResizeEnabled = false;   // 四角缩放（左上/右上/左下）
-let _titleButtonsEnabled = false;   // 编组标题栏按钮（绕/适）
+let _titleButtonsEnabled = false;   // 编组标题按钮（绕/适）
 
 // 任一开关开启即需要接管绘制与命中（draw 补丁常驻，内部各自再判断）
 function isGroupEnhEnabled() { return _cornerResizeEnabled || _titleButtonsEnabled; }
@@ -55,7 +60,7 @@ function readSetting(id) {
 // ─────────────────────────────────────────────
 // LiteGraph 辅助
 // ─────────────────────────────────────────────
-function getLG() { return window.LiteGraph; }
+function getLG() { return (typeof window !== "undefined" && window.LiteGraph) ? window.LiteGraph : null; }
 
 function getGroupClass() {
   const LG = getLG();
@@ -103,16 +108,60 @@ function toggleBypassGroup(g) {
   (g.graph ?? app.graph)?.setDirtyCanvas?.(true, false);
 }
 
-// 复用官方"缩放框到节点"逻辑：原生 group.resizeTo(children, padding)
-// - 默认 padding = 10（与原生 LGraphGroup.resizeTo 默认一致，距离才会相同）
-// - 若全局开启"对齐网格"，原生会 expandRectToGrid，与后续拖拽网格行为一致，避免错位
+// 纯函数：根据子节点 bbox 计算适配矩形（含上下左右非对称边距 + 可选网格吸附）
+//   - 上边距 = 3 格网格、左右下边距 = 2 格网格（grid 由调用方从 canvas.grid_size 等取得）
+//   - snap=true 时四条边各自 round 到 grid 整数倍（与原生 snapToGrid 行为一致）
+// 返回 {x, y, w, h}，无子节点返回 null。
+function computeFitRect(nodes, grid, snap) {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const n of nodes) {
+    if (!n || !n.pos) continue;
+    const nx = n.pos[0], ny = n.pos[1];
+    const nw = (n.size && n.size[0]) || 100;
+    const nh = (n.size && n.size[1]) || 100;
+    if (nx < minX) minX = nx;
+    if (ny < minY) minY = ny;
+    if (nx + nw > maxX) maxX = nx + nw;
+    if (ny + nh > maxY) maxY = ny + nh;
+  }
+  if (!isFinite(minX)) return null;
+  // 顶边距 = 标题栏高度 + 3 格网格：编组自带标题栏会吃掉一部分上边距，
+  // 仅留 3 格会让节点顶边几乎贴住标题栏（视觉距≈0）；加标题栏高度后标题下方真正留 3 格。
+  const topM = titleHeight() + 3 * grid;
+  const sideM = 2 * grid;  // 左右边距 2 格
+  const botM = 2 * grid;   // 下边距 2 格
+  let x = minX - sideM;
+  let y = minY - topM;
+  let right = maxX + sideM;
+  let bottom = maxY + botM;
+  if (snap) {
+    const s = (v) => Math.round(v / grid) * grid;
+    x = s(x); y = s(y); right = s(right); bottom = s(bottom);
+  }
+  return { x, y, w: right - x, h: bottom - y };
+}
+
+// 适配组内节点（重新设计）：
+//   1) 上边距 3 格网格、左右下边距 2 格网格（边距以 grid_size 为单位，与四角缩放一致）；
+//   2) 开启全局「对齐网格」时，最终 pos/size 也吸附到网格线（四条边各自 round 到 grid 整数倍），
+//      保证编组整体落在网格上，与四角缩放的吸附行为完全一致；
+//   3) pinned 编组不可适配；空编组直接返回。
 function fitGroupToNodes(g) {
+  if (g.pinned) return;
   try { g.recomputeInsideNodes?.(); } catch (_) {}
-  const children = (g._children instanceof Set && g._children.size)
-    ? g._children
-    : (g.nodes ?? g._nodes ?? []);
-  if (!children || (children.size ?? children.length) === 0) return;
-  try { g.resizeTo?.(children, 10); } catch (_) {}   // 原生默认 padding=10
+  const nodes = _groupNodes(g);
+  if (!nodes || nodes.length === 0) return;
+  const grid = getGridSize();
+  const r = computeFitRect(nodes, grid, isSnapToGrid());
+  if (!r) return;
+  let { x, y, w, h } = r;
+  // 最小尺寸保底（吸附时按 grid 整数倍对齐，保持网格一致性）
+  const minW = isSnapToGrid() ? Math.max(GROUP_MIN_W, Math.ceil(GROUP_MIN_W / grid) * grid) : GROUP_MIN_W;
+  const minH = isSnapToGrid() ? Math.max(GROUP_MIN_H, Math.ceil(GROUP_MIN_H / grid) * grid) : GROUP_MIN_H;
+  if (w < minW) w = minW;
+  if (h < minH) h = minH;
+  g.pos = [x, y];
+  g.size = [w, h];
   try { g.recomputeInsideNodes?.(); } catch (_) {}
   const cv = app.canvas;
   if (cv) { cv.dirty_canvas = true; cv.dirty_bgcanvas = true; }
@@ -171,7 +220,7 @@ function drawGroupEnhUI(group, graphCanvas, ctx) {
   const alpha = graphCanvas?.editor_alpha ?? 1;
 
   ctx.save();
-  // 标题栏按钮（垂直居中、右边距 = 上下边距 M）—— 仅「编组标题栏按钮」开启时
+  // 标题栏按钮（垂直居中、右边距 = 上下边距 M）—— 仅「编组标题按钮」开启时
   if (titleButtonsOn()) {
     const bypassX = x + W - M - ENH_BTN_W;
     const fitX    = bypassX - ENH_GAP - ENH_BTN_W;
@@ -210,13 +259,45 @@ function hitGroupCorner(g, gx, gy) {
 // ─────────────────────────────────────────────
 let _activeResize = null;
 
-function _applyCorner(corner, sp, ss, dx, dy) {
-  let x = sp[0], y = sp[1], w = ss[0], h = ss[1];
-  if (corner === "tl")      { x = sp[0] + dx; y = sp[1] + dy; w = ss[0] - dx; h = ss[1] - dy; }
-  else if (corner === "tr") { y = sp[1] + dy;                w = ss[0] + dx; h = ss[1] - dy; }
-  else if (corner === "bl") { x = sp[0] + dx;                w = ss[0] - dx; h = ss[1] + dy; }
-  if (w < 80) { if (corner === "tl" || corner === "bl") x = sp[0] + (ss[0] - 80); w = 80; }
-  if (h < 80) { if (corner === "tl" || corner === "tr") y = sp[1] + (ss[1] - 80); h = 80; }
+// 计算四角缩放后的矩形。gridSize>0 表示需要吸附到网格。
+// 关键：与原生右下角 resize 一致 —— 锚点角（拖拽时不动的那个角）始终保持原值，
+// 只把「正在拖动的角」吸附到网格，再由锚点反算宽高。这样：
+//   - 锚点绝不漂移（原生行为）；
+//   - 拖动角落在网格上（开启「对齐网格」时）；
+//   - 不缩放时（gridSize=0）等价于纯拖拽，仅做最小尺寸保底。
+function _applyCorner(corner, sp, ss, dx, dy, gridSize) {
+  // 拖动角跟随鼠标移动；锚点角（相对角）保持不动（与原生 resize 一致）。
+  // 关键修复：旧写法用「锚点角 - 锁定边」反算宽高，导致右上角宽度、左下角高度丢失 dx/dy 分量
+  // （表现为右上角只能上下缩放、左下角只能左右缩放）。现改为由「锚点角 + 拖动角」两点直接定矩形，
+  // 宽高自然包含完整的位移分量。
+  let ax, ay;       // 锚点角坐标（固定不动）
+  let dxc, dyc;     // 拖动角坐标（= 起点对应角 + 鼠标位移）
+  if (corner === "tl") {
+    dxc = sp[0] + dx;            dyc = sp[1] + dy;
+    ax = sp[0] + ss[0];          ay = sp[1] + ss[1];
+  } else if (corner === "tr") {
+    dxc = sp[0] + ss[0] + dx;    dyc = sp[1] + dy;
+    ax = sp[0];                  ay = sp[1] + ss[1];
+  } else { // bl
+    dxc = sp[0] + dx;            dyc = sp[1] + ss[1] + dy;
+    ax = sp[0] + ss[0];          ay = sp[1];
+  }
+
+  // 对齐网格：只吸附被拖动的角（锚点角不动，与四角缩放 / 原生 resize 的 snapToGrid 一致）
+  if (gridSize > 0) {
+    const snap = (v) => Math.round(v / gridSize) * gridSize;
+    dxc = snap(dxc); dyc = snap(dyc);
+  }
+
+  // 由锚点角 + 拖动角两点确定矩形（任一角均可能为最终左上 / 右下）
+  let x = Math.min(ax, dxc), y = Math.min(ay, dyc);
+  let right = Math.max(ax, dxc), bottom = Math.max(ay, dyc);
+  let w = right - x, h = bottom - y;
+
+  // 最小尺寸保底：只推「被拖动的那条边」，锚点角仍不动
+  if (w < GROUP_MIN_W) { if (dxc >= ax) right = ax + GROUP_MIN_W; else x = ax - GROUP_MIN_W; w = right - x; }
+  if (h < GROUP_MIN_H) { if (dyc >= ay) bottom = ay + GROUP_MIN_H; else y = ay - GROUP_MIN_H; h = bottom - y; }
+
   return { pos: [x, y], size: [w, h] };
 }
 
@@ -229,22 +310,25 @@ function _clearDragCursor() {
   if (cv) cv.style.cursor = "";
 }
 
-// 网格尺寸：与原生 resize 保持一致，优先取 canvas.grid_size，回退 10
-function getGridSize() {
+// ─────────────────────────────────────────────
+// 对齐网格（参考原生 LGraphCanvas 的 snapToGrid / grid_size）
+//   - 原生 resize 时若 canvas.snapToGrid 为真，会把正在拖动的边吸附到 grid_size 网格；
+//     锚点角（右下角原生缩放时为左上角）始终不动。
+//   - ComfyUI 的「对齐网格」设置会同步到 canvas.snapToGrid，网格尺寸在 canvas.grid_size；
+//     这里两者都取，并回退读 ComfyUI 设置项，保证在任意版本都能正确生效。
+// ─────────────────────────────────────────────
+function isSnapToGrid() {
   const cv = app.canvas;
-  return (cv && cv.grid_size) || 10;
+  if (cv && typeof cv.snapToGrid === "boolean") return cv.snapToGrid;
+  const s = readSetting("Comfy.SnapToGrid");
+  return !!s;
 }
 
-// 跟随全局「对齐网格」：开启时把 pos / size 对齐到网格（逻辑同原生右下角 resize）
-function snapToGridIfNeeded(pos, size) {
+function getGridSize() {
   const cv = app.canvas;
-  if (!cv || !cv.snapToGrid) return { pos, size };
-  const g = getGridSize();
-  const snap = (v) => Math.round(v / g) * g;
-  return {
-    pos: [snap(pos[0]), snap(pos[1])],
-    size: [snap(size[0]), snap(size[1])],
-  };
+  if (cv && cv.grid_size) return cv.grid_size;
+  const s = readSetting("Comfy.Graph.GridSize");
+  return (typeof s === "number" && s > 0) ? s : 10;
 }
 
 function _onResizeMove(e) {
@@ -254,12 +338,11 @@ function _onResizeMove(e) {
   const g = _activeResize.group;
   const dx = pos[0] - _activeResize.startGraph[0];
   const dy = pos[1] - _activeResize.startGraph[1];
-  const r = _applyCorner(_activeResize.corner, _activeResize.startPos, _activeResize.startSize, dx, dy);
-  // 跟随全局对齐网格（开启时 pos/size 均吸附到网格，等价于原生右下角 resize 行为）
-  const snapped = snapToGridIfNeeded(r.pos, r.size);
+  // 跟随全局「对齐网格」：开启时把正在拖动的角吸附到网格（锚点角不动），逻辑同原生右下角 resize
+  const r = _applyCorner(_activeResize.corner, _activeResize.startPos, _activeResize.startSize, dx, dy, _activeResize.snapGrid);
   // 只修改边框位置/尺寸，内部子节点（绝对坐标）不受影响
-  g.pos = snapped.pos;
-  g.size = snapped.size;
+  g.pos = r.pos;
+  g.size = r.size;
   // 强制实时重绘（等价于原生拖拽的逐帧预览）
   const cv = app.canvas;
   if (cv) { cv.dirty_canvas = true; cv.dirty_bgcanvas = true; }
@@ -278,6 +361,8 @@ function _onResizeUp(e) {
 
 function startGroupEnhResize(group, corner, e, startGraph) {
   if (_activeResize) return;
+  // 拖拽开始时一次性读取「对齐网格」状态（与原生 resize 一致，避免逐帧重复读设置）
+  const snapGrid = isSnapToGrid() ? getGridSize() : 0;
   _activeResize = {
     group,
     corner,
@@ -285,6 +370,7 @@ function startGroupEnhResize(group, corner, e, startGraph) {
     startGraph: [...startGraph],
     startPos: [group.pos[0], group.pos[1]],
     startSize: [group.size[0], group.size[1]],
+    snapGrid,
   };
   _setDragCursor(corner);
   window.addEventListener("pointermove", _onResizeMove, true);
@@ -306,7 +392,7 @@ function handleGroupEnhMouseDown(canvas, e, pos) {
     const [x, y] = g.pos;
     const [W, H] = g.size;
 
-    // 标题栏按钮（绕 / 适）—— 仅「编组标题栏按钮」开启时拦截
+    // 标题栏按钮（绕 / 适）—— 仅「编组标题按钮」开启时拦截
     if (titleButtonsOn() && gy >= y && gy <= y + th) {
       const bypassX = x + W - M - ENH_BTN_W;
       const fitX    = bypassX - ENH_GAP - ENH_BTN_W;
@@ -420,20 +506,21 @@ function applyGroupEnhancements() {
 app.registerExtension({
   name: "JosiaGroupEnhancements",
   settings: [
+    // ── 编组增强区域（四角缩放 + 标题栏按钮 同处一区）──
     {
       id: "JosiaNodes.CornerResize",
-      name: "四角缩放（左上 / 右上 / 左下）",
+      name: "编组四角缩放",
       type: "boolean",
       defaultValue: false,
-      category: ["⚡ Josia节点设置", "四角缩放"],
+      category: ["⚡️JosiaNodes", "编组增强"],
       onChange: (v) => setCornerResize(v),
     },
     {
       id: "JosiaNodes.GroupTitleButtons",
-      name: "编组标题栏按钮（绕 / 适）",
+      name: "编组标题按钮",
       type: "boolean",
       defaultValue: false,
-      category: ["⚡ Josia节点设置", "标题栏按钮"],
+      category: ["⚡️JosiaNodes", "编组增强"],
       onChange: (v) => setTitleButtons(v),
     },
   ],

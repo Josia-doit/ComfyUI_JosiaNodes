@@ -76,11 +76,16 @@ const PLACEHOLDER_MODEL     = "🖼️ 请选择模型…";
 const PLACEHOLDER_CLIP      = "🧠 请选择模型…";
 const PLACEHOLDER_VAE       = "🎨 请选择模型…";
 const PLACEHOLDER_CLIP_TYPE = "🏷️ 请选择类型…";
-const PLACEHOLDER_VAE2      = "请选择模型...";
+const PLACEHOLDER_VAE2      = "🎵 请选择模型…";
 
 // ─── 工具 ───
 function isGGUF(name) { return typeof name === "string" && name.toLowerCase().endsWith(".gguf"); }
 function findWidget(node, name) { return node.widgets?.find(w => w.name === name) ?? null; }
+
+// 判断 VAE2 是否真正被选择（排除占位符 / 空值）
+function isRealVae2(name) {
+    return typeof name === "string" && name.length > 0 && name !== PLACEHOLDER_VAE2;
+}
 
 function parseGgufQuant(filename) {
     const m = filename.match(/[Qq](\d[\w_.]*?)(?:\.gguf)/i);
@@ -183,6 +188,7 @@ function updateClipOptions(node, modelType) {
 function applyModelTypeLinkage(node, modelType) {
     const clipW = findWidget(node, "clip_name");
     const vaeW  = findWidget(node, "vae_name");
+    const vae2W = findWidget(node, "vae2_name");
     const clipTypeW = findWidget(node, "clip_type");
 
     switch (modelType) {
@@ -196,12 +202,14 @@ function applyModelTypeLinkage(node, modelType) {
             }
             setWidgetDisabled(clipW, false);
             setWidgetDisabled(vaeW,  false);
+            setWidgetDisabled(vae2W, false);   // 非 AIO：恢复 VAE2 可编辑
             setWidgetDisabled(clipTypeW, false);
             updateClipOptions(node, MT.GGUF_UNET);
             break;
         case MT.AIO:
             setWidgetDisabled(clipW, true);
             setWidgetDisabled(vaeW,  true);
+            setWidgetDisabled(vae2W, true);   // AIO 三合一：VAE2 同步锁定（与 CLIP/VAE1 一致）
             // AIO：CLIP类型禁用，值确保在选项列表内
             if (clipTypeW) {
                 const validValues = clipTypeW.options?.values || [];
@@ -222,6 +230,7 @@ function applyModelTypeLinkage(node, modelType) {
             }
             setWidgetDisabled(clipW, false);
             setWidgetDisabled(vaeW,  false);
+            setWidgetDisabled(vae2W, false);   // 非 AIO：恢复 VAE2 可编辑
             setWidgetDisabled(clipTypeW, false);
             updateClipOptions(node, MT.UNET);
             break;
@@ -235,6 +244,7 @@ function applyModelTypeLinkage(node, modelType) {
             }
             setWidgetDisabled(clipW, false);
             setWidgetDisabled(vaeW,  false);
+            setWidgetDisabled(vae2W, false);   // 非 AIO：恢复 VAE2 可编辑
             setWidgetDisabled(clipTypeW, false);
             updateClipOptions(node, MT.UNKNOWN);
             break;
@@ -320,6 +330,7 @@ function drawIdentifiedState(ctx, bx, by, bw, bh, info, node) {
     const clipSizeMB  = info.clipSizeMB || 0;
     const vaeSizeMB   = info.vaeSizeMB || 0;
     const vae2SizeMB  = info.vae2SizeMB || 0;
+    const hasVae2     = info.hasVae2 || false;
     const ggufQuant   = info.ggufQuant || null;
     const lockUnet    = info.lockUnet ?? true;
 
@@ -376,7 +387,11 @@ function drawIdentifiedState(ctx, bx, by, bw, bh, info, node) {
         else if (mt !== MT.AIO) parts.push("CLIP -");
         if (vaeSizeMB > 0) parts.push(`VAE1 ${formatSize(vaeSizeMB)}`);
         else if (mt !== MT.AIO) parts.push("VAE1 -");
-        if (vae2SizeMB > 0) parts.push(`VAE2 ${formatSize(vae2SizeMB)}`);
+        // VAE2 跟随 CLIP/VAE1 同款逻辑：选中即显示「VAE2 X」或「VAE2 -」，未选 / AIO 则不显示
+        if (hasVae2 && mt !== MT.AIO) {
+            if (vae2SizeMB > 0) parts.push(`VAE2 ${formatSize(vae2SizeMB)}`);
+            else parts.push("VAE2 -");
+        }
         sizeStr = parts.join("  |  ");
     }
 
@@ -492,6 +507,8 @@ async function onModelSelected(node, modelName) {
                     fileSizeMB: result.file_size_mb || 0,
                     clipSizeMB: result.clip_size_mb || 0,
                     vaeSizeMB: result.vae_size_mb || 0,
+                    vae2SizeMB: result.vae2_size_mb || 0,
+                    hasVae2: isRealVae2(vae2Name),
                     ggufQuant: result.gguf_quant || ggufQuant,
                 });
             }
@@ -519,6 +536,8 @@ async function onModelSelected(node, modelName) {
         } else {
             setNodePhase(node, PHASE.IDLE);
         }
+        // API 失败也尝试用 refreshAllSizes 兜底刷新尺寸（含 VAE2），避免尺寸空白
+        refreshAllSizes(node);
         return;
     }
 
@@ -531,10 +550,14 @@ async function onModelSelected(node, modelName) {
         fileSizeMB: result.file_size_mb || 0,
         clipSizeMB: result.clip_size_mb || 0,
         vaeSizeMB: result.vae_size_mb || 0,
+        vae2SizeMB: result.vae2_size_mb || 0,   // 与 VAE1/CLIP 一致：切换主模型后也保留 VAE2 尺寸
+        hasVae2: isRealVae2(vae2Name),         // 选中即标记，全局生效
         ggufQuant: result.gguf_quant || null,
         folderSource: result.folder_source || null,
     });
     applyModelTypeLinkage(node, finalType);
+    // 兜底：主模型切换后再拉一次全量尺寸（VAE2 跟随 VAE1/CLIP 一同刷新，避免偶发丢失）
+    refreshAllSizes(node);
 
     console.log(
         `[JosiaCheckpointPlus] ✅ 精确识别完成：${finalType} · ` +
@@ -562,12 +585,13 @@ function watchModelWidget(node) {
     const origCb = modelW.callback;
     modelW.callback = function(value) {
         origCb?.call(this, value);
-        // 清除执行状态
         node._statePhase = null;
 
-        // 同步开关状态到 info
+        // 同步开关状态到 info，但【保留】已拉取的尺寸（VAE1/VAE2/CLIP），
+        // 否则切换主模型瞬间 VAE2 尺寸被清空、须重新选 VAE2 才恢复
         const lockUnet  = findWidget(node, "lock_unet_vram");
         node._stateInfo = {
+            ...(node._stateInfo || {}),
             lockUnet:  lockUnet?.value ?? true,
             isLoaded:  false,
         };
@@ -631,6 +655,7 @@ async function refreshAllSizes(node) {
         clipSizeMB: result.clip_size_mb || 0,
         vaeSizeMB: result.vae_size_mb || 0,
         vae2SizeMB: result.vae2_size_mb || 0,
+        hasVae2: isRealVae2(vae2Val),   // 与 VAE1/CLIP 一致：选中即标记，全局生效
         ggufQuant: result.gguf_quant || node._stateInfo?.ggufQuant || null,
     });
 }
@@ -801,6 +826,7 @@ app.registerExtension({
                     clipSizeMB: message?.clip_size_mb?.[0] || 0,
                     vaeSizeMB: message?.vae_size_mb?.[0] || 0,
                     vae2SizeMB: message?.vae2_size_mb?.[0] || 0,
+                    hasVae2: isRealVae2(findWidget(this, "vae2_name")?.value),
                     ggufQuant: message?.gguf_quant?.[0] || null,
                 });
 
@@ -818,6 +844,7 @@ app.registerExtension({
                     clipSizeMB: message?.clip_size_mb?.[0] || 0,
                     vaeSizeMB: message?.vae_size_mb?.[0] || 0,
                     vae2SizeMB: message?.vae2_size_mb?.[0] || 0,
+                    hasVae2: isRealVae2(findWidget(this, "vae2_name")?.value),
                 });
             }
         };

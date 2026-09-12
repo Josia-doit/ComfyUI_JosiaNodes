@@ -38,7 +38,7 @@ class JosiaGroupControllerM:
     RETURN_TYPES = ()          # 无输出
     FUNCTION = "run"           # 核心执行函数（空实现）
     OUTPUT_NODE = True         # 标记为输出节点（无实际输出）
-    CATEGORY = "Josia"  # 统一节点分类
+    CATEGORY = "⚡️JosiaNodes"  # 统一节点分类
 
     def run(self):
         """核心执行函数（空实现，交互由前端 JS 处理）"""
@@ -70,7 +70,7 @@ class JosiaGroupControllerS:
     RETURN_TYPES = ()          # 无输出
     FUNCTION = "run"           # 核心执行函数（空实现）
     OUTPUT_NODE = True         # 标记为输出节点（无实际输出）
-    CATEGORY = "Josia"  # 统一节点分类
+    CATEGORY = "⚡️JosiaNodes"  # 统一节点分类
 
     def run(self):
         """核心执行函数（空实现，交互由前端 JS 处理）"""
@@ -103,7 +103,7 @@ class JosiaGroupControllerG:
     RETURN_TYPES = ()          # 无输出
     FUNCTION = "run"           # 核心执行函数（空实现）
     OUTPUT_NODE = True         # 标记为输出节点（无实际输出）
-    CATEGORY = "Josia"  # 统一节点分类
+    CATEGORY = "⚡️JosiaNodes"  # 统一节点分类
 
     def run(self):
         """核心执行函数（空实现，交互由前端 JS 处理）"""

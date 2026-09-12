@@ -12,7 +12,7 @@ import re
 class JosiaTextList:
     """将多行字符串按分隔符分割为字符串列表"""
 
-    CATEGORY = "Josia"
+    CATEGORY = "⚡️JosiaNodes"
     FUNCTION = "split_string"
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("prompt_list",)

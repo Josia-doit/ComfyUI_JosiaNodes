@@ -59,7 +59,7 @@ class JosiaCacheCleanup:
 
     特点：单端口任意输入透传，不影响工作流数据流转。"""
 
-    CATEGORY = "Josia"
+    CATEGORY = "⚡️JosiaNodes"
     FUNCTION = "execute_clean"  # 核心执行函数名
 
     # 定义节点输入参数（ComfyUI核心要求）

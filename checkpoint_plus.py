@@ -1,78 +1,7 @@
 """
-Josia CheckpointPlus - 高级智能模型加载节点 v2.9.14
-v2.9.14 变更：
-  - 归一化 VAE 命名，与“双 VAE”语义一致：
-    • 下拉「VAE模型」→「VAE模型1」；「VAE2模型」→「VAE模型2」。
-    • 输出端口第 3 个由「VAE」改为「VAE1」（第 4 个仍为「VAE2」）。
-      （RETURN_TYPES 类型仍为 ("MODEL","CLIP","VAE","VAE")，仅显示名改为
-       VAE1/VAE2，不影响与原生 VAE 解码器的连接兼容性。）
-  - 信息窗口尺寸显示修复：
-    • 根因：重开 / 加载工作流时，onConfigure / onAdded 仅恢复了 model_type
-      与文件名，未重新向服务端拉取尺寸，导致“类型显示正常、但 UNET/CLIP/
-      VAE 尺寸空白”，必须手动改一次 UNET 触发刷新才显示。
-    • 现加载 / 重建节点时，主动向 /josia/detect_model_type 异步拉取
-      UNET / CLIP / VAE1 / VAE2 尺寸并刷新信息窗，做到实时显示。
-    • 信息窗同时展示 VAE1 与 VAE2 两个尺寸（原仅显示单个 VAE）。
-v2.9.11 变更：
-  - 修复「VAE2」端口接不上 VAE 解码器的问题：原 RETURN_TYPES 第 4 项写成了
-    "VAE2"，而 ComfyUI 没有该类型，导致端口颜色异常且无法与 VAE 类节点连线。
-    现第 4 项类型改回 "VAE"（与标准 VAE 解码器兼容），仅显示名保留 "VAE2"
-    （RETURN_NAMES），端口颜色与可连接性恢复正常。
-  - VAE2 下拉默认项由「🎵 请选择VAE…」改为与其他选项一致的「请选择模型…」，
-    保持占位文案统一。
-v2.9.10 变更：
-  - 新增「VAE2模型」选择项（音频/视频双 VAE）：支持视频模型同时加载
-    视频 VAE + 音频 VAE 并分别输出（VAE / VAE2 两个端口）。
-    VAE 加载逻辑增强：兼容官方各音频 VAE（LTX / MMAudio / SA3 / MINIMAX H3 等），
-    对带 audio_vae./vocoder. 前缀的音频 VAE 自动做官方同款前缀替换后加载。
-    VAE2 下拉同时列出 models/vae 与 models/checkpoints（官方音频 VAE 多置于 checkpoints）。
-  - UNET保活（lock_unet_vram）经复核：新版 ComfyUI 自带的模型驻留管理已能在
-    首次使用后保持 UNET 常驻，本开关主要价值是「加载即预热到 GPU、复用零延迟」，
-    不会造成旧版「分时显存优化」那种出图降速，属可选增益而非拖累；显存吃紧的
-    多模型工作流可关闭以释放余量。行为不变，仅更新说明文案。
-v2.9.9 变更：
-  - CLIP类型下拉补全至与最新官方 CLIPLoader / DualCLIPLoader 完全对齐：
-    新增 joyimage / mage / minimax（MINIMAX H3 等最新开源模型对应的 CLIP 架构）。
-    现下拉已覆盖官方两节点的全部类型（含 sdxl/flux/hunyuan_video 等一体化单 CLIP 便利项），
-    _clip_type_to_enum 用 .upper() 精确命中 comfy.sd.CLIPType 枚举（JOYIMAGE/MAGE/MINIMAX 均已确认存在）。
-v2.9.8 变更：
-  - CLIP类型下拉补全并修正：对齐官方 CLIPLoader / DualCLIPLoader 最新类型，
-    新增 cosmos / hidream / boogu / krea2 / hunyuan_video / hunyuan_video_15 /
-    kandinsky5 / kandinsky5_image / newbie；修正 ace（原 ACE_Clip 拼写错会静默
-    回退 stable_diffusion）、pixeldit（原 pixeledit 拼写错会静默回退 SD）两项失效选项。
-v2.9.7 变更：
-  - 彻底移除「分时显存优化」功能（定时卸载CLIP/VAE导致出图降速至201s）
-    该功能已无存在价值，后续可用独立节点实现显存调度
-  - 状态栏"保活"标签扩展为"UNET保活"
-v2.9.6 变更：
-  - 移除 _SmartCLIP / _SmartVAE 包装器（不再干扰 ComfyUI 原生调度）
-  - UNET 锁定改为仅保活模式：不强制占满 VRAM，
-    让 ComfyUI 自行决定缓存位置（VRAM 或共享显存）
-  - 修复 _detect_category_from_file 对非 safetensors 文件的重复加载
-  - 移除无效的 vram_management_mode 字段
-  - timed_vram 参数不再影响加载逻辑（ComfyUI 原生调度已最优）
-v2.9.5 变更：
-  - 移除「模型精度」调节功能（FP8/FP16/FP32等）
-  - 理由：在RTX 4060上无正收益（无FP8硬件加速）
-  -       已FP8的模型执行冗余转换会导致内存抖动+画质劣化
-v2.9.4 修复：
-  - AIO模式下CLIP类型不再替换为"已自动识别（内置）"文本
-  - 改为保持原值+禁用，避免运行时"Value not in list"报错
-  - 统一_origValues命名规范
-v2.9.3 修复：
-  - 占位文本统一+Emoji图标（🖼️主模型 🧠CLIP 🏷️类型 🎨VAE）
-  - AIO模式下禁用控件显示"已使用内置XXX"提示文本
-  - GGUF模式不再过滤CLIP列表（允许搭配非GGUF CLIP）
-  - GGUF模式CLIP类型可手动选择（对齐原生GGUF加载器行为）
-  - 移除GGUF UNET强制搭配GGUF CLIP限制
-v2.9.1 修复：
-  - CLIP类型下拉框全量显示（不再按枚举过滤，修复只有LTXV可选的问题）
-  - 取消自动识别CLIP类型，纯手动选择（简化逻辑，减少BUG）
-  - 1:1 复刻原生CLIPLoader类型列表
-  - 控件顺序重排：主模型→CLIP模型→CLIP类型→VAE模型→UNET锁→分时优化
-  - 关闭OUTPUT_NODE（无下游不执行）
-  - 分时显存优化默认关闭，提示"低配电脑启用可防OOM但出图较慢"
-  - 智能常驻显存策略：非分时模式不再强制卸载CLIP到系统内存
+Josia CheckpointPlus — 高级智能一体化模型加载节点 v2.9.14
+自动识别 AIO / 独立 UNET / GGUF 模型，一体化加载 MODEL + CLIP + 双 VAE（VAE1 / VAE2）；
+内置 CLIP 类型全量下拉、模型尺寸实时检测、UNET 保活，AIO 模式自动复用内置组件。
 """
 import os
 import re
@@ -89,13 +18,13 @@ from node_properties import CHECKPOINT_PLUS_DESCRIPTION
 
 # ========================== 常量 ==========================
 
-CATEGORY = "Josia"
+CATEGORY = "⚡️JosiaNodes"
 
 PLACEHOLDER_MODEL     = "🖼️ 请选择模型…"
 PLACEHOLDER_CLIP      = "🧠 请选择模型…"
 PLACEHOLDER_VAE       = "🎨 请选择模型…"
 PLACEHOLDER_CLIP_TYPE = "🏷️ 请选择类型…"
-PLACEHOLDER_VAE2      = "请选择模型..."
+PLACEHOLDER_VAE2      = "🎵 请选择模型…"
 
 # ── CLIP 类型选项（对齐官方 CLIPLoader / DualCLIPLoader 下拉，并修正失效项） ──
 # 说明：
@@ -316,18 +245,11 @@ def _get_all_vaes() -> list:
         return []
 
 def _get_all_vaes_extended() -> list:
-    """VAE2 下拉列表：models/vae + models/checkpoints（官方音频 VAE 多置于 checkpoints）。"""
-    combined = []
-    seen = set()
-    for key in ("vae", "checkpoints"):
-        try:
-            for f in folder_paths.get_filename_list(key):
-                if f not in seen:
-                    seen.add(f)
-                    combined.append(f)
-        except Exception:
-            pass
-    return combined
+    """VAE2 下拉列表：仅 models/vae 文件夹（不再混入 models/checkpoints，避免列出无关模型）。"""
+    try:
+        return folder_paths.get_filename_list("vae")
+    except Exception:
+        return []
 
 
 def _get_combined_model_list() -> list:
@@ -625,7 +547,7 @@ class JosiaCheckpointPlus:
                         "• 节点会同时输出 VAE1 与 VAE2 两个端口，下游按需接入。\n"
                         "• AIO 视频模型：内置视频 VAE 走 VAE 端口，音频 VAE 走此处。\n"
                         "• 兼容官方音频 VAE（带 audio_vae./vocoder. 前缀者自动转换）。\n"
-                        "• 下拉同时列出 models/vae 与 models/checkpoints。"
+                        "• 下拉仅列出 models/vae 中的 VAE 模型。"
                     ),
                 }),
                 "lock_unet_vram": ("BOOLEAN", {

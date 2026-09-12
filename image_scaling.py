@@ -1,11 +1,14 @@
 """
-Josia 图像缩放节点（4比例横竖版合并版）
+Josia 图像缩放节点
 功能：
-1. 支持4类比例预设（1:1/2:3/3:4/16:9，含横竖双方向）
+1. 单一「选择比例」下拉：默认关；含 1:1 / 2:3 / 3:2 / 3:4 / 4:3 / 9:16 / 16:9 / 21:9 等比例
+   - 选定比例且下方未开启任何缩放模式 → 按接入图片分辨率适配新比例，多余部分中心裁切
+   - 下方开启缩放模式（像素/边长/手动）→ 缩放模式优先生效，比例仅作提示
 2. 多维度缩放控制：边长缩放/像素缩放/手动宽高缩放
 3. 渐进式缩放（低分辨率优化）、分辨率上限限制、锁定倍数对齐
-4. 多裁剪方式（居中/左/右/上/下）、多缩放算法（BOX/BICUBIC等）
+4. 多裁剪方式、多缩放算法（BOX/BICUBIC等）
 5. 支持图像/遮罩输入输出，批量处理，输出宽度和高度数值
+6. 允许空挂（不接图像）→ 输出空白图片；不接输出图片时可作为分辨率选择器提供宽高
 本地文件名：image_scaling.py
 节点英文标识：JosiaImageScaling
 节点中文显示名：Josia图像缩放
@@ -19,22 +22,26 @@ import gc
 
 # 导入常量配置（外部化参数，便于维护）
 from node_properties import (
-    NODE_CATEGORY, PRESET_SIZES, LOCK_MULTIPLE_CHOICES,
+    NODE_CATEGORY, RATIO_OPTIONS, RATIO_ASPECT, LOCK_MULTIPLE_CHOICES,
     CROP_METHODS, RESAMPLE_FILTERS, DEFAULT_PARAMS, NODE_DISPLAY_NAME_SCALING,
     IMAGE_SCALING_DESCRIPTION
 )
 
+_NODE = "JosiaImageScaling"
+
 class JosiaImageScaling:
     """📐 Josia 图像缩放
-多功能图像缩放裁切节点，支持 4 大比例预设与 3 种自定义模式。
+多功能图像缩放裁切节点，支持「选择比例」与 3 种自定义缩放模式。
 
+• 🔁 选择比例：单一下拉（默认关），含 1:1 / 2:3 / 3:2 / 3:4 / 4:3 / 9:16 / 16:9 / 21:9 等
+       未开启任何缩放模式时，按接入图片分辨率适配新比例，多余部分中心裁切
 • 🖼️ 像素缩放：按百万像素目标自动计算尺寸（最高优先级）
 • ✏️ 手动宽高：直接指定宽高，支持一键切换宽高
 • 📏 边长缩放：按最长边 / 最短边缩放至指定像素
-• 预设比例：1:1 / 2:3 / 3:4 / 16:9（含横竖双方向）
 
 ⚙️ 高级特性：锁定倍数 / 多种裁剪方式 / 5 种缩放算法 / 分辨率保护
-❗ 不设置任何尺寸时，图像原封不动透传；无图像输入时可提供宽高数值用于文生图"""
+❗ 不设置任何尺寸时，图像原封不动透传；无图像输入时输出空白图片，
+   不接输出图片时可作为分辨率选择器提供宽高数值用于文生图"""
 
     DESCRIPTION = IMAGE_SCALING_DESCRIPTION
     CATEGORY = NODE_CATEGORY
@@ -44,20 +51,11 @@ class JosiaImageScaling:
 
     @classmethod
     def INPUT_TYPES(cls):
-        """定义节点界面参数（4类比例预设 + 多维度缩放控制）"""
-        # 提取各类比例预设选项
-        square_choices = [item[0] for item in PRESET_SIZES["1:1 正方形"]]
-        photo_choices = [item[0] for item in PRESET_SIZES["2:3/3:2 摄影比例"]]
-        short_choices = [item[0] for item in PRESET_SIZES["3:4/4:3 短视频比例"]]
-        video_choices = [item[0] for item in PRESET_SIZES["16:9/9:16 全平台视频"]]
-
+        """定义节点界面参数（选择比例 + 多维度缩放控制）"""
         return {
             "required": {
-                # 1. 4类比例预设栏（每栏含横竖双方向）
-                "1:1 正方形": (square_choices, {"default": "关"}),
-                "2:3/3:2 摄影比例": (photo_choices, {"default": "关"}),
-                "3:4/4:3 短视频比例": (short_choices, {"default": "关"}),
-                "16:9/9:16 全平台视频": (video_choices, {"default": "关"}),
+                # 1. 选择比例（单一下拉，默认关）
+                "选择比例": (RATIO_OPTIONS, {"default": "关"}),
 
                 # 2. 基础控制参数
                 "锁定倍数": (LOCK_MULTIPLE_CHOICES, {"default": DEFAULT_PARAMS["lock_multiple"]}),
@@ -110,7 +108,7 @@ class JosiaImageScaling:
                 }),
             },
             "optional": {
-                "图像": ("IMAGE",),    # 可选图像输入
+                "图像": ("IMAGE",),    # 可选图像输入（允许空挂）
                 "遮罩": ("MASK",),      # 可选遮罩输入
             }
         }
@@ -144,10 +142,7 @@ class JosiaImageScaling:
         :return: (处理后图像, 处理后遮罩, 最终宽度, 最终高度)
         """
         # 1. 提取界面参数
-        square = kwargs.get("1:1 正方形", "关")
-        photo = kwargs.get("2:3/3:2 摄影比例", "关")
-        short = kwargs.get("3:4/4:3 短视频比例", "关")
-        video = kwargs.get("16:9/9:16 全平台视频", "关")
+        ratio_choice = kwargs.get("选择比例", "关")
 
         lock_multiple_str = kwargs.get("锁定倍数", DEFAULT_PARAMS["lock_multiple"])
         lock_multiple = 1 if lock_multiple_str == "关" else int(lock_multiple_str)
@@ -180,28 +175,16 @@ class JosiaImageScaling:
             orig_w = DEFAULT_PARAMS["default_base_width"]
             orig_h = DEFAULT_PARAMS["default_base_height"]
 
-        # 4. 参数优先级控制（像素缩放 > 手动宽高 > 边长缩放 > 预设比例）
-        if enable_pixel_scale:
-            enable_side_scale = False
-            enable_manual_size = False
-            square = photo = short = video = "关"
-        elif enable_manual_size:
-            enable_side_scale = False
-            square = photo = short = video = "关"
-        elif enable_side_scale:
-            square = photo = short = video = "关"
-        else:
-            # 保证预制尺寸仅一个生效
-            presets = [("1:1 正方形", square), ("2:3/3:2 摄影比例", photo), ("3:4/4:3 短视频比例", short), ("16:9/9:16 全平台视频", video)]
-            non_off_presets = [p for p in presets if p[1] != "关"]
-            if len(non_off_presets) > 1:
-                for model_name, _ in non_off_presets[:-1]:
-                    kwargs[model_name] = "关"
-                square, photo, short, video = [kwargs.get(p[0], "关") for p in presets]
+        # 4. 参数优先级控制（像素缩放 > 手动宽高 > 边长缩放 > 选择比例）
+        #    任一下方缩放模式开启时，比例仅作提示、不参与尺寸计算
+        ratio_enabled = (ratio_choice != "关")
+        any_scale_mode = enable_pixel_scale or enable_manual_size or enable_side_scale
+        if any_scale_mode:
+            ratio_enabled = False
 
         # 5. 计算目标尺寸
         target_w, target_h = self._calculate_target_size(
-            orig_w, orig_h, square, photo, short, video,
+            orig_w, orig_h, ratio_choice, ratio_enabled,
             enable_side_scale, side_to_scale, side_length,
             enable_pixel_scale, pixel_million, lock_multiple,
             enable_manual_size, manual_width, manual_height
@@ -213,7 +196,10 @@ class JosiaImageScaling:
         final_w, final_h = max(32, final_w), max(32, final_h)  # 最小尺寸限制
         final_w, final_h = self._check_resolution_limit(final_w, final_h)
 
-        # 7. 处理图像（批量处理）
+        # 比例模式（未开启缩放模式）下强制使用中心裁切（用户要求：多余部分中心裁切）
+        effective_crop = "中心裁剪" if (ratio_enabled and not any_scale_mode) else crop_method
+
+        # 7. 处理图像（批量处理）；无图像时输出空白图片
         if 图像 is not None:
             batch_size = 图像.shape[0]
             processed_images = []
@@ -231,12 +217,12 @@ class JosiaImageScaling:
                 # 选择缩放方式（渐进式/单步）
                 resample = RESAMPLE_FILTERS.get(resample_algo, Image.Resampling.BOX)
                 if enable_manual_size:
-                    img_pil, mask_pil = self._apply_crop_or_stretch(img_pil, mask_pil, final_w, final_h, crop_method, resample)
+                    img_pil, mask_pil = self._apply_crop_or_stretch(img_pil, mask_pil, final_w, final_h, effective_crop, resample)
                 else:
                     if resolution_steps > 1 and (final_w * final_h) < 2_000_000:
-                        img_pil, mask_pil = self._progressive_scale(img_pil, mask_pil, final_w, final_h, resolution_steps, resample_algo, crop_method)
+                        img_pil, mask_pil = self._progressive_scale(img_pil, mask_pil, final_w, final_h, resolution_steps, resample_algo, effective_crop)
                     else:
-                        img_pil, mask_pil = self._single_scale(img_pil, mask_pil, final_w, final_h, resample_algo, crop_method)
+                        img_pil, mask_pil = self._single_scale(img_pil, mask_pil, final_w, final_h, resample_algo, effective_crop)
 
                 # PIL转张量
                 img_array = np.array(img_pil).astype(np.float32) / 255.0
@@ -255,20 +241,21 @@ class JosiaImageScaling:
             del processed_images, processed_masks
             gc.collect()
         else:
-            # 无输入图像时返回 None（防止误接入下游导致图像劣化）
-            img_result = None
-            mask_result = None
+            # 允许空挂：无输入图像时输出一张目标尺寸的空白图片（黑底）
+            img_result = torch.zeros((1, final_h, final_w, 3), dtype=torch.float32)
+            mask_result = torch.zeros((1, final_h, final_w), dtype=torch.float32)
 
         # 8. 最终内存释放
         gc.collect()
 
         return (img_result, mask_result, final_w, final_h)
 
-    def _calculate_target_size(self, orig_w, orig_h, square, photo, short, video,
+    def _calculate_target_size(self, orig_w, orig_h, ratio_choice, ratio_enabled,
                               enable_side, side_type, side_len, enable_pixel, pixel_mill, lock_mult,
                               enable_manual, manual_w, manual_h):
         """
         计算目标尺寸（根据不同缩放模式）
+        优先级：像素缩放 > 手动宽高 > 边长缩放 > 选择比例（按接入图分辨率适配新比例）> 原图透传
         :return: (目标宽度, 目标高度)
         """
         # 像素缩放模式
@@ -320,17 +307,17 @@ class JosiaImageScaling:
                 target_h = (target_h // lock_mult) * lock_mult
             return (max(32, target_w), max(32, target_h))
 
-        # 预设比例模式
-        presets = [("1:1 正方形", square), ("2:3/3:2 摄影比例", photo), ("3:4/4:3 短视频比例", short), ("16:9/9:16 全平台视频", video)]
-        for model_name, preset_text in presets:
-            if preset_text != "关":
-                for display_text, size_tuple in PRESET_SIZES[model_name]:
-                    if display_text == preset_text and size_tuple is not None:
-                        preset_w, preset_h = size_tuple
-                        if lock_mult > 1:
-                            preset_w = (preset_w // lock_mult) * lock_mult
-                            preset_h = (preset_h // lock_mult) * lock_mult
-                        return (preset_w, preset_h)
+        # 选择比例模式：按接入图片分辨率（像素面积）适配新比例，多余部分由调用方中心裁切
+        if ratio_enabled and ratio_choice in RATIO_ASPECT:
+            aspect = RATIO_ASPECT[ratio_choice]
+            area = max(1, orig_w) * max(1, orig_h)
+            # area = w * h，w = aspect * h  ⇒  h = sqrt(area / aspect)，w = h * aspect
+            target_h = int(round(math.sqrt(area / aspect)))
+            target_w = int(round(target_h * aspect))
+            if lock_mult > 1:
+                target_w = (target_w // lock_mult) * lock_mult
+                target_h = (target_h // lock_mult) * lock_mult
+            return (max(32, target_w), max(32, target_h))
 
         # 默认返回原始尺寸（无任何尺寸设置时，原封不动透传）
         # 不对齐锁定倍数，保持原图尺寸完全一致

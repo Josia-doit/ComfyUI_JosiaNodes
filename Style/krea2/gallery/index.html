@@ -1,0 +1,664 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Josia 风格画廊</title>
+<style>
+  :root {
+    --bg: #0f0f13;
+    --panel: #1b1b22;
+    --panel2: #14141a;
+    --border: #2c2c36;
+    --text: #e8e8ee;
+    --sub: #9a9aa6;
+    --blue: #6fb3ff;
+    --accent: #2b6cff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  }
+  header {
+    position: sticky; top: 0; z-index: 20;
+    padding: 14px 22px 12px; background: rgba(15,15,19,.94);
+    border-bottom: 1px solid var(--border); backdrop-filter: blur(6px);
+  }
+  .headline { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  header h1 { font-size: 18px; margin: 0; font-weight: 700; }
+  header h1 .en { font-size: 12px; color: var(--sub); font-weight: 400; margin-left: 8px; }
+  .search {
+    position: relative; flex: 1; min-width: 200px; max-width: 420px;
+    display: flex; align-items: center; background: var(--panel);
+    border: 1px solid var(--border); border-radius: 10px; padding: 0 12px;
+  }
+  .search span { font-size: 14px; opacity: .6; margin-right: 8px; }
+  .search input {
+    flex: 1; background: transparent; border: none; color: var(--text);
+    padding: 10px 0; font-size: 14px; outline: none;
+  }
+  .count { color: var(--sub); font-size: 13px; margin-left: auto; }
+
+  /* ---- 主题下拉 ---- */
+  .theme-sel {
+    position: relative; flex: 0 0 auto;
+    background: var(--panel); color: var(--text);
+    border: 1px solid var(--border); border-radius: 10px;
+    padding: 9px 30px 9px 12px; font-size: 13px; font-weight: 600; font-family: inherit;
+    cursor: pointer; outline: none; max-width: 220px;
+    appearance: none; -webkit-appearance: none; -moz-appearance: none;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'><path d='M2 4l4 4 4-4' fill='none' stroke='%239a9aa6' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+    background-repeat: no-repeat; background-position: right 10px center;
+  }
+  .theme-sel:hover { border-color: var(--accent); }
+  .theme-sel option { background: #1b1b22; color: var(--text); }
+
+  /* ---- 分类按钮组：统一配色，仅激活按钮带背景色 ---- */
+  .cats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(116px, 1fr));
+    gap: 8px;
+    margin-top: 12px;
+  }
+  .catbtn {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 1px; min-width: 0; padding: 8px 6px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    color: var(--text); cursor: pointer; font-family: inherit;
+    transition: background .12s, border-color .12s, transform .12s;
+  }
+  .catbtn .cb-cn {
+    font-size: 13px; font-weight: 600; line-height: 1.15; color: #f2f2f6;
+    max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .catbtn .cb-en {
+    font-size: 10px; color: #c2c2cf; line-height: 1.1; letter-spacing: .2px;
+    max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .catbtn:hover { border-color: var(--accent); transform: translateY(-1px); }
+  /* 激活态：带背景色 + 清晰白色文本 */
+  .catbtn.on { background: var(--accent); border-color: var(--accent); }
+  .catbtn.on .cb-cn { color: #ffffff; }
+  .catbtn.on .cb-en { color: rgba(255,255,255,.85); }
+
+  main { padding: 18px 22px 60px; }
+  .grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 14px; align-content: start;
+  }
+  .tile {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    overflow: hidden; cursor: pointer; transition: transform .12s, border-color .12s;
+  }
+  .tile:hover { transform: translateY(-2px); border-color: var(--accent); }
+  .tile img { width: 100%; aspect-ratio: 1/1; object-fit: cover; display: block; background: #222; }
+  .tile .meta { padding: 8px 10px; }
+  .tile .cn { font-size: 14px; font-weight: 600; color: #fff; }
+  .tile .en { font-size: 11px; color: var(--sub); margin-top: 2px; }
+  .tile .sec { font-size: 11px; color: var(--blue); margin-top: 3px; }
+  .empty { text-align: center; color: var(--sub); padding: 60px 0; }
+
+  /* ---- 浮窗 ---- */
+  .lb {
+    position: fixed; inset: 0; z-index: 100; display: none;
+    align-items: center; justify-content: center;
+    background: rgba(8,8,12,.82); backdrop-filter: blur(4px);
+  }
+  .lb.show { display: flex; }
+  .lb-card {
+    display: flex; align-items: stretch; overflow: hidden;
+    background: var(--panel2); border: 1px solid var(--border);
+    border-radius: 16px; box-shadow: 0 24px 80px rgba(0,0,0,.66);
+  }
+  .lb-img { flex: 0 0 auto; background: #000; display: flex; align-items: center; justify-content: center; }
+  .lb-img img { display: block; object-fit: contain; background: #000; }
+  .lb-info {
+    flex: 1 1 auto; min-width: 0; overflow: hidden;
+    padding: 20px 24px; display: flex; flex-direction: column; gap: 12px;
+    background: #1c1c22; box-sizing: border-box;
+  }
+  .lb-info .cn { font-size: 24px; font-weight: 700; color: #fff; line-height: 1.25; flex: 0 0 auto; }
+  .lb-info .en { font-size: 14px; color: var(--sub); letter-spacing: .3px; flex: 0 0 auto; }
+  .lb-info .sec { font-size: 13px; color: var(--blue); flex: 0 0 auto; margin-top: -6px; }
+  .lb-info .blk { flex: 0 0 auto; min-width: 0; }
+  .lb-info .lbl { font-size: 13px; color: #8b8b98; letter-spacing: .5px; margin-bottom: 6px; font-weight: 600; }
+  .lb-info .txt { white-space: pre-wrap; word-break: break-word; }
+  .lb-info .txt.cn { font-size: 15px; line-height: 1.65; color: #dcdce6; }
+  .lb-info .txt.en { font-size: 14px; line-height: 1.58; color: #a9a9b6; }
+  .lb-actions { display: flex; gap: 10px; margin-top: auto; padding-top: 8px; flex: 0 0 auto; }
+  .lb-actions button {
+    padding: 9px 16px; font-size: 13px; border: 1px solid transparent; border-radius: 9px;
+    cursor: pointer; font-weight: 600; font-family: inherit;
+  }
+  .lb-actions .cp { background: var(--accent); color: #fff; }
+  .lb-actions .cn2 { background: #34343e; color: var(--text); }
+  .lb-close {
+    position: absolute; top: 18px; right: 22px; font-size: 26px; color: #fff;
+    background: rgba(0,0,0,.45); border: none; border-radius: 50%; width: 42px; height: 42px;
+    cursor: pointer; line-height: 1;
+  }
+  .toast {
+    position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%);
+    background: #2b6cff; color: #fff; padding: 10px 20px; border-radius: 999px;
+    font-size: 14px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 200;
+  }
+  .toast.show { opacity: 1; }
+
+  /* ---- 对比：tile 右上角 ✦ 按钮（hover 显示）---- */
+  .tile { position: relative; }
+  .tile .cmp-star {
+    position: absolute; top: 6px; right: 6px; z-index: 5;
+    width: 26px; height: 26px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px; line-height: 1; cursor: pointer;
+    background: rgba(0,0,0,.55); border: 1px solid rgba(255,255,255,.25);
+    color: #ffd76a; opacity: 0; transform: scale(.8);
+    transition: opacity .12s, transform .12s, background .12s;
+    user-select: none;
+  }
+  .tile:hover .cmp-star { opacity: 1; transform: scale(1); }
+  .tile .cmp-star:hover { background: rgba(0,0,0,.8); }
+  .tile .cmp-star.on {
+    opacity: 1; transform: scale(1);
+    background: #f0a030; color: #fff; border-color: #f0a030;
+  }
+  .tile.cmp-selected { border-color: #f0a030 !important; box-shadow: 0 0 0 2px #f0a030 inset !important; }
+
+  /* ---- 对比浮窗 ---- */
+  .cmp-overlay {
+    position: fixed; inset: 0; z-index: 110; display: none;
+    align-items: center; justify-content: center;
+    background: rgba(8,8,12,.88); backdrop-filter: blur(6px);
+  }
+  .cmp-overlay.show { display: flex; }
+  .cmp-panel {
+    width: 94%; max-width: 1560px; max-height: 92vh;
+    background: var(--panel2); border: 1px solid var(--border);
+    border-radius: 16px; box-shadow: 0 24px 80px rgba(0,0,0,.66);
+    overflow: hidden; display: flex; flex-direction: column;
+  }
+  .cmp-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 22px; background: rgba(15,15,19,.95);
+    border-bottom: 1px solid var(--border); flex: 0 0 auto;
+  }
+  .cmp-header h2 { font-size: 16px; margin: 0; font-weight: 700; color: #fff; }
+  .cmp-header .hint { font-size: 12px; color: var(--sub); margin-left: 10px; }
+  .cmp-close {
+    font-size: 24px; color: #fff; background: rgba(0,0,0,.45); border: none;
+    border-radius: 50%; width: 38px; height: 38px; cursor: pointer; line-height: 1;
+  }
+  .cmp-body { display: flex; gap: 0; flex: 1 1 auto; min-height: 0; }
+  .cmp-side {
+    flex: 1; min-width: 0; display: flex; flex-direction: column;
+    border-right: 1px solid var(--border); overflow-y: auto;
+  }
+  .cmp-side:last-child { border-right: none; }
+  .cmp-img-wrap {
+    flex: 0 0 auto; background: #000; display: flex; align-items: center; justify-content: center;
+    overflow: hidden;
+  }
+  .cmp-img-wrap img { max-width: 100%; max-height: 50vh; object-fit: contain; display: block; }
+  .cmp-info {
+    flex: 1; min-width: 0; overflow-y: auto;
+    padding: 18px 20px; display: flex; flex-direction: column; gap: 10px;
+    background: #1c1c22; box-sizing:border-box;
+  }
+  .cmp-info .cname { font-size: 18px; font-weight: 700; color: #fff; line-height: 1.25; }
+  .cmp-info .csec { font-size: 12px; color: var(--blue); margin-top: 2px; }
+  .cmp-info .clbl { font-size: 11.5px; color: #8b8b98; letter-spacing: .5px; margin-bottom: 4px; font-weight: 600; }
+  .cmp-info .ctxt { white-space: pre-wrap; word-break: break-word; font-size: 13px; line-height: 1.6; }
+  .cmp-info .ctxt.cn { color: #dcdce6; }
+  .cmp-info .ctxt.en { color: #a9a9b6; }
+  .cmp-actions {
+    display: flex; gap: 8px; padding: 12px 20px;
+    background: rgba(15,15,19,.95); border-top: 1px solid var(--border); flex: 0 0 auto;
+  }
+  .cmp-actions button {
+    padding: 8px 14px; font-size: 12px; border: 1px solid transparent; border-radius: 8px;
+    cursor: pointer; font-weight: 600; font-family: inherit;
+  }
+  .cmp-actions .cp { background: var(--accent); color: #fff; }
+  .cmp-actions .cn2 { background: #34343e; color: var(--text); }
+
+  /* ---- 底部对比浮条 ---- */
+  .cmp-fbar {
+    position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%);
+    z-index: 105; display: none; align-items: center; gap: 14px;
+    padding: 10px 16px; border-radius: 14px;
+    background: rgba(22,22,30,.96); border: 1px solid #2a3a66;
+    box-shadow: 0 12px 40px rgba(0,0,0,.5); backdrop-filter: blur(8px);
+    max-width: 92vw;
+  }
+  .cmp-fbar.show { display: flex; }
+  .cmp-fbar .fb-slots { display: flex; align-items: center; gap: 10px; }
+  .cmp-fbar .fb-slot {
+    display: flex; align-items: center; gap: 7px; padding: 5px 8px;
+    background: var(--panel); border: 1px solid #2a3a66; border-radius: 9px;
+  }
+  .cmp-fbar .fb-slot .fb-thumb { width: 34px; height: 34px; border-radius: 6px; object-fit: cover; background:#222; flex:0 0 auto; }
+  .cmp-fbar .fb-slot .fb-text { display: flex; flex-direction: column; min-width: 0; }
+  .cmp-fbar .fb-slot .fb-cn { font-size: 12px; color: #fff; font-weight: 600; max-width: 140px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cmp-fbar .fb-slot .fb-idx { font-size: 10px; color: #f0a030; }
+  .cmp-fbar .fb-slot .fb-x {
+    width: 16px; height: 16px; border-radius: 50%; border: none; background: #34343e;
+    color: #fff; font-size: 11px; line-height: 1; cursor: pointer; flex: 0 0 auto;
+  }
+  .cmp-fbar .fb-slot .fb-empty { font-size: 12px; color: var(--sub); padding: 6px 4px; }
+  .cmp-fbar .fb-actions { display: flex; gap: 8px; }
+  .cmp-fbar button.fb-btn {
+    padding: 9px 16px; font-size: 13px; border-radius: 9px; cursor: pointer;
+    font-weight: 600; font-family: inherit; border: 1px solid transparent;
+  }
+  .cmp-fbar .fb-cmp { background: var(--accent); color: #fff; }
+  .cmp-fbar .fb-cmp:disabled { background: #2a2a34; color: #6a6a76; cursor: not-allowed; }
+  .cmp-fbar .fb-cancel { background: transparent; color: var(--sub); border: 1px solid var(--border); }
+</style>
+</head>
+<body>
+  <header>
+    <div class="headline">
+      <h1>Josia 风格画廊<span class="en">Josia Style Gallery</span></h1>
+      <select id="themeSel" class="theme-sel" title="选择风格主题（当前仅 Krea2，新增主题文件夹后会自动出现）">
+        <option value="krea2">Krea2</option>
+      </select>
+      <div class="search">
+        <span>🔍</span>
+        <input id="search" type="text" placeholder="搜索样式（中/英文）…"
+               title="支持中文名与英文名实时筛选" />
+      </div>
+      <div class="count" id="count"></div>
+    </div>
+    <div class="cats" id="cats"></div>
+  </header>
+  <main>
+    <div class="grid" id="grid"></div>
+    <div class="empty" id="empty" style="display:none;">没有匹配的样式</div>
+  </main>
+
+  <div class="lb" id="lb">
+    <button class="lb-close" id="lbClose" title="关闭（Esc）">×</button>
+    <div class="lb-card" id="lbCard">
+      <div class="lb-img" id="lbImgCol"><img id="lbImg" alt="" /></div>
+      <div class="lb-info" id="lbInfo">
+        <div class="cn" id="lbCn"></div>
+        <div class="en" id="lbEn"></div>
+        <div class="sec" id="lbSec"></div>
+        <div class="blk">
+          <div class="lbl">风格提示词（中文）</div>
+          <div class="txt cn" id="lbPromptCn"></div>
+        </div>
+        <div class="blk">
+          <div class="lbl">风格提示词（English）</div>
+          <div class="txt en" id="lbPromptEn"></div>
+        </div>
+        <div class="lb-actions">
+          <button class="cp" id="lbCopyEn" title="复制完整英文风格提示词（可直接用于生成）">复制英文提示词</button>
+          <button class="cn2" id="lbCopyCn" title="复制中文译文（便于阅读与整理）">复制中文译文</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="toast" id="toast">已复制</div>
+
+  <!-- 对比浮窗 -->
+  <div class="cmp-overlay" id="cmpOverlay">
+    <div class="cmp-panel">
+      <div class="cmp-header">
+        <div>
+          <h2>风格对比<span class="hint">Side-by-Side Comparison</span></h2>
+        </div>
+        <button class="cmp-close" id="cmpClose" title="关闭对比">×</button>
+      </div>
+      <div class="cmp-body" id="cmpBody"></div>
+      <div class="cmp-actions" id="cmpActions"></div>
+    </div>
+  </div>
+
+  <!-- 底部对比浮条 -->
+  <div class="cmp-fbar" id="cmpFbar">
+    <div class="fb-slots" id="cmpSlots"></div>
+    <div class="fb-actions">
+      <button class="fb-btn fb-cmp" id="fbCmp" disabled>对比</button>
+      <button class="fb-btn fb-cancel" id="fbCancel">取消对比</button>
+    </div>
+  </div>
+
+<script>
+  // 从 URL 推断主题：/josia_style/<theme>/gallery
+  const m = location.pathname.match(/\/josia_style\/([^/]+)\/gallery/);
+  let THEME = m ? decodeURIComponent(m[1]) : "krea2";
+
+  // 分类：中文一行 + 英文小字一行
+  const CATS = [
+    ["",                  "全部风格", "All Styles"],
+    ["3D Render",         "3D渲染",   "3D Render"],
+    ["Anime",             "动漫",     "Anime"],
+    ["Cartoon",           "卡通",     "Cartoon"],
+    ["Comics",            "漫画",     "Comics"],
+    ["Cover Art",         "封面艺术", "Cover Art"],
+    ["Design",            "设计",     "Design"],
+    ["Digital Painting",  "数字绘画", "Digital Painting"],
+    ["Drawing",           "素描",     "Drawing"],
+    ["Painting",          "绘画",     "Painting"],
+    ["Photography",       "摄影",     "Photography"]
+  ];
+  const SECTION_CN = {};
+  CATS.forEach(c => { if (c[0]) SECTION_CN[c[0]] = c[1]; });
+
+  let ALL = [];
+  let activeCat = "";
+  const grid = document.getElementById("grid");
+  const empty = document.getElementById("empty");
+  const countEl = document.getElementById("count");
+  const catsEl = document.getElementById("cats");
+  const searchInput = document.getElementById("search");
+  const themeSel = document.getElementById("themeSel");
+
+  function esc(t) {
+    return String(t || "").replace(/[&<>"']/g, c => (
+      {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+  }
+  function thumbUrl(s) {
+    return `/josia_style/${encodeURIComponent(THEME)}/thumb?file=${encodeURIComponent(s.thumb)}`;
+  }
+
+  function buildCats() {
+    const present = new Set(ALL.map(x => x.section));
+    catsEl.innerHTML = "";
+    CATS.forEach(([key, cn, en]) => {
+      const btn = document.createElement("button");
+      btn.className = "catbtn" + (key === activeCat ? " on" : "");
+      btn.dataset.cat = key;
+      const n = key === "" ? ALL.length : ALL.filter(x => x.section === key).length;
+      btn.title = key === "" ? `显示全部风格（共 ${n} 个）` : `筛选「${cn} ${en}」分类（共 ${n} 个）`;
+      btn.innerHTML = `<span class="cb-cn">${esc(cn)}</span><span class="cb-en">${esc(en)}</span>`;
+      // 没有该分类的风格时仍保留按钮（保持 11 个等宽布局），但弱化显示
+      if (key !== "" && !present.has(key)) { btn.style.opacity = ".45"; }
+      btn.addEventListener("click", () => {
+        activeCat = key;
+        catsEl.querySelectorAll(".catbtn").forEach(b => {
+          b.classList.toggle("on", b.dataset.cat === activeCat);
+        });
+        render();
+      });
+      catsEl.appendChild(btn);
+    });
+  }
+
+  async function loadThemes() {
+    let themes = [{ id: THEME, label: THEME.charAt(0).toUpperCase() + THEME.slice(1) }];
+    try {
+      const res = await fetch("/josia_style/themes");
+      const data = await res.json();
+      if (data.themes && data.themes.length) themes = data.themes;
+    } catch (e) { /* 网络异常时保留默认（当前主题） */ }
+    themeSel.innerHTML = "";
+    themes.forEach(t => {
+      const opt = document.createElement("option");
+      opt.value = t.id;
+      opt.textContent = t.label;
+      themeSel.appendChild(opt);
+    });
+    themeSel.value = THEME;
+  }
+
+  async function loadTheme(theme) {
+    THEME = theme;
+    activeCat = "";
+    searchInput.value = "";
+    try {
+      const res = await fetch(`/josia_style/${encodeURIComponent(THEME)}/styles`);
+      const data = await res.json();
+      ALL = data.list || [];
+    } catch (e) { ALL = []; }
+    buildCats();
+    render();
+  }
+
+  async function init() {
+    await loadThemes();
+    await loadTheme(THEME);
+  }
+
+  function render() {
+    const q = (searchInput.value || "").trim().toLowerCase();
+    const isEnglish = /[a-z]/i.test(q);
+    grid.innerHTML = "";
+    let shown = 0;
+    for (const s of ALL) {
+      const cn = (s.name_cn || s.name).toLowerCase();
+      const en = (s.name || "").toLowerCase();
+      if (q && !(cn.includes(q) || en.includes(q))) continue;
+      if (activeCat && s.section !== activeCat) continue;
+      const tile = document.createElement("div");
+      tile.className = "tile";
+      tile.dataset.name = s.name;
+      const inCmp = cmpCandidates.some(c => c.name === s.name);
+      if (inCmp) tile.classList.add("cmp-selected");
+      const secTxt = s.section ? (SECTION_CN[s.section] || s.section) + " · " + s.section : "";
+      tile.innerHTML =
+        `<div class="cmp-star${inCmp ? " on" : ""}" title="选为对比备选（最多 2 个）">✦</div>` +
+        `<img loading="lazy" src="${thumbUrl(s)}" alt="${esc(s.name)}" />` +
+        `<div class="meta"><div class="cn">${esc(isEnglish ? s.name : (s.name_cn || s.name))}</div>` +
+        `<div class="en">${esc(isEnglish ? (s.name_cn || "") : s.name)}</div>` +
+        (secTxt ? `<div class="sec">${esc(secTxt)}</div>` : "") + `</div>`;
+      // ✦ 按钮：切换对比备选
+      const star = tile.querySelector(".cmp-star");
+      star.addEventListener("click", (e) => { e.stopPropagation(); toggleCandidate(s, tile); });
+      // 点击卡片其他区域：打开单图浮窗
+      tile.addEventListener("click", () => openLightbox(s));
+      grid.appendChild(tile);
+      shown++;
+    }
+    empty.style.display = shown === 0 ? "block" : "none";
+    countEl.textContent = `共 ${shown} / ${ALL.length} 个样式`;
+  }
+
+  // ============ 浮窗 ============
+  const lb = document.getElementById("lb");
+  const lbCard = document.getElementById("lbCard");
+  const lbImgCol = document.getElementById("lbImgCol");
+  const lbImg = document.getElementById("lbImg");
+  const lbInfo = document.getElementById("lbInfo");
+  let current = null;
+
+  /** 计算卡片尺寸：高度锁定为图片边长，文本列尽量宽，文本高度不超过图片高度 */
+  function layoutCard() {
+    const vw = window.innerWidth, vh = window.innerHeight;
+    let cardW = Math.min(1560, Math.round(vw * 0.96));
+    let S = Math.min(640, Math.round(vw * 0.42), Math.round(vh * 0.88));
+    if (cardW - S < 430) S = Math.max(260, cardW - 430);
+    lbCard.style.width = cardW + "px";
+    lbCard.style.height = S + "px";
+    lbImgCol.style.width = S + "px";
+    lbImg.style.width = S + "px";
+    lbImg.style.height = S + "px";
+    lbInfo.style.height = S + "px";
+  }
+
+  /** 字号自适应：逐步缩小双语提示词字号，确保不出现滚动条 / 不超出图片高度 */
+  function fitText() {
+    const cnEl = document.getElementById("lbPromptCn");
+    const enEl = document.getElementById("lbPromptEn");
+    let cnPx = 15, enPx = 14, guard = 0;
+    const apply = () => {
+      cnEl.style.fontSize = cnPx.toFixed(1) + "px";
+      enEl.style.fontSize = enPx.toFixed(1) + "px";
+    };
+    apply();
+    while (lbInfo.scrollHeight > lbInfo.clientHeight + 1 && cnPx > 9.5 && guard++ < 60) {
+      cnPx -= 0.4;
+      enPx = Math.max(9, enPx - 0.35);
+      apply();
+    }
+  }
+
+  function openLightbox(s) {
+    current = s;
+    lbImg.src = thumbUrl(s);
+    document.getElementById("lbCn").textContent = s.name_cn || s.name;
+    document.getElementById("lbEn").textContent = s.name;
+    document.getElementById("lbSec").textContent = s.section ? (SECTION_CN[s.section] || s.section) + " · " + s.section : "";
+    document.getElementById("lbPromptCn").textContent = s.prompt_cn || "（暂无中文译文）";
+    document.getElementById("lbPromptEn").textContent = s.prompt || "";
+    lb.classList.add("show");
+    layoutCard();
+    fitText();
+  }
+  function closeLightbox() { lb.classList.remove("show"); current = null; }
+
+  document.getElementById("lbClose").addEventListener("click", closeLightbox);
+  lb.addEventListener("click", (e) => { if (e.target === lb) closeLightbox(); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeLightbox(); });
+  window.addEventListener("resize", () => { if (lb.classList.contains("show")) { layoutCard(); fitText(); } });
+
+  document.getElementById("lbCopyEn").addEventListener("click", () => {
+    // 复制英文提示词，并带上格式标签：Style: <风格提示词> 换行 Subject: （便于用户直接续写）
+    if (current) copy(`Style: ${current.prompt || ""}\nSubject: `, "已复制英文提示词（含格式标签）");
+  });
+  document.getElementById("lbCopyCn").addEventListener("click", () => {
+    // 复制中文译文，使用英文标签（与英文格式一致，避免模型不认）
+    if (current) copy(`Style: ${current.prompt_cn || ""}\nSubject: `, "已复制中文译文（含格式标签）");
+  });
+  function copy(text, msg) {
+    if (!text) { toast("没有可复制的内容"); return; }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(() => toast(msg)).catch(() => fallbackCopy(text, msg));
+    } else { fallbackCopy(text, msg); }
+  }
+  function fallbackCopy(text, msg) {
+    const ta = document.createElement("textarea");
+    ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand("copy"); toast(msg); } catch (e) { toast("复制失败，请手动选择"); }
+    document.body.removeChild(ta);
+  }
+  let toastTimer = null;
+  function toast(msg) {
+    const t = document.getElementById("toast");
+    t.textContent = msg; t.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => t.classList.remove("show"), 1400);
+  }
+
+  // ============ 对比（tile hover ✦ 选定 → 底部浮条 → 并排对比）============
+  // 最多保留 2 个备选，FIFO 轮换：选满后再选则替换最早的一个
+  let cmpCandidates = [];   // [{name, name_cn, section, prompt, prompt_cn, thumb}]
+
+  const cmpOverlay = document.getElementById("cmpOverlay");
+  const cmpClose = document.getElementById("cmpClose");
+  const cmpBody = document.getElementById("cmpBody");
+  const cmpActions = document.getElementById("cmpActions");
+  const cmpFbar = document.getElementById("cmpFbar");
+  const cmpSlots = document.getElementById("cmpSlots");
+  const fbCmp = document.getElementById("fbCmp");
+  const fbCancel = document.getElementById("fbCancel");
+
+  function closeCmp() { cmpOverlay.classList.remove("show"); cmpBody.innerHTML = ""; cmpActions.innerHTML = ""; }
+
+  /** 切换某个风格为对比备选（再次点击取消） */
+  function toggleCandidate(s, tileEl) {
+    const idx = cmpCandidates.findIndex(c => c.name === s.name);
+    if (idx >= 0) {
+      // 取消选定
+      cmpCandidates.splice(idx, 1);
+    } else {
+      cmpCandidates.push(s);
+      // 超过 2 个 → 踢出最早选定的（FIFO）
+      if (cmpCandidates.length > 2) cmpCandidates.shift();
+    }
+    render();        // 重绘：同步所有 tile 的 ✦ / 边框状态
+    renderFbar();
+  }
+
+  /** 底部浮条：显示备选 + 对比按钮（满2个才激活）+ 取消按钮 */
+  function renderFbar() {
+    if (cmpCandidates.length === 0) { cmpFbar.classList.remove("show"); return; }
+    cmpFbar.classList.add("show");
+    let html = "";
+    for (let i = 0; i < 2; i++) {
+      const c = cmpCandidates[i];
+      if (c) {
+        html +=
+          `<div class="fb-slot">
+            <img class="fb-thumb" src="${thumbUrl(c)}" alt="">
+            <div class="fb-text">
+              <span class="fb-idx">备选 ${i + 1}</span>
+              <span class="fb-cn">${esc(c.name_cn || c.name)}</span>
+            </div>
+            <button class="fb-x" title="移除该备选" data-rm="${esc(c.name)}">×</button>
+          </div>`;
+      } else {
+        html += `<div class="fb-slot"><span class="fb-empty">备选 ${i + 1}（空缺）</span></div>`;
+      }
+    }
+    cmpSlots.innerHTML = html;
+    // 绑定移除
+    cmpSlots.querySelectorAll(".fb-x").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const nm = btn.dataset.rm;
+        const idx = cmpCandidates.findIndex(c => c.name === nm);
+        if (idx >= 0) { cmpCandidates.splice(idx, 1); render(); renderFbar(); }
+      });
+    });
+    // 对比按钮：满 2 个才激活
+    fbCmp.disabled = cmpCandidates.length < 2;
+  }
+
+  /** 并排对比：中文在上、英文在下（与单图浮窗一致） */
+  function sideHtml(s, side) {
+    return `<div class="cmp-side">
+        <div class="cmp-img-wrap"><img src="${thumbUrl(s)}" alt="${esc(s.name)}" /></div>
+        <div class="cmp-info">
+          <div class="cname">${esc(s.name_cn || s.name)}</div>
+          <div class="csec">${s.section ? esc((SECTION_CN[s.section] || s.section) + " · " + s.section) : ""}</div>
+          <div class="clbl">风格提示词（中文）</div>
+          <div class="ctxt cn">${esc(s.prompt_cn || "（暂无中文译文）")}</div>
+          <div class="clbl">风格提示词（English）</div>
+          <div class="ctxt en">${esc(s.prompt || "")}</div>
+        </div>
+      </div>`;
+  }
+
+  function showComparison() {
+    if (cmpCandidates.length < 2) return;
+    const [a, b] = cmpCandidates;
+    cmpOverlay.classList.add("show");
+    cmpBody.innerHTML = sideHtml(a, "a") + sideHtml(b, "b");
+    cmpActions.innerHTML =
+      `<button class="cp" data-side="a">复制 A 提示词（Style:）</button>
+       <button class="cp" data-side="b">复制 B 提示词（Style:）</button>
+       <button class="cn2" id="cmpSwapAB">⇄ 交换左右</button>`;
+    cmpActions.querySelectorAll(".cp[data-side]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const s = btn.dataset.side === "a" ? a : b;
+        copy(`Style: ${s.prompt || ""}\nSubject: `, `已复制 ${btn.dataset.side.toUpperCase()} 风格提示词`);
+      });
+    });
+    document.getElementById("cmpSwapAB").addEventListener("click", () => {
+      cmpCandidates.reverse();
+      showComparison();
+    });
+  }
+
+  function clearCandidates() {
+    cmpCandidates = [];
+    closeCmp();
+    render();       // 取消所有 tile 选中态
+    renderFbar();
+  }
+
+  fbCmp.addEventListener("click", () => { if (cmpCandidates.length === 2) showComparison(); });
+  fbCancel.addEventListener("click", clearCandidates);
+  cmpClose.addEventListener("click", closeCmp);
+  cmpOverlay.addEventListener("click", (e) => { if (e.target === cmpOverlay) closeCmp(); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && cmpOverlay.classList.contains("show")) closeCmp(); });
+
+  searchInput.addEventListener("input", render);
+  themeSel.addEventListener("change", () => loadTheme(themeSel.value));
+  init();
+</script>
+</body>
+</html>

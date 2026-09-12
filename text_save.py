@@ -103,22 +103,22 @@ def find_highest_existing_number(directory, base_name, ext, digits=3):
     return max_num
 
 
-# 说明（重要 · 发布安全红线）：
-#   本文件【不得】启动任何外部进程，也【不得】使用动态执行 / 动态导入手段。
+# 说明（重要 · 功能优先于注册表分发）：
 #   ComfyUI 官方注册表（Comfy Registry）的自动安全扫描是「AI + 静态分析」黑盒，
-#   除了官方明文禁止的几类写法之外，还会额外封禁一切看起来像 RCE 的代码模式
-#   （含通过脚本宿主弹出系统对话框）。一旦命中，版本会被置为
-#   NodeVersionStatusBanned，注册表 latest_version 指针随即回落到旧版本
-#   （本包 1.5.5~1.6.4 即因此全军覆没）。
-#   ⚠️ 连注释里也不要出现那些敏感单词的字面量 —— 文本型扫描规则可能误伤。
+#   除了官方明文禁止的几类写法之外，还会额外标记一切看起来像 RCE 的代码模式，
+#   以及「后端暴露目录操作接口」这类看起来像任意文件读写的模式。
+#   实测结论（2026-09-03）：
+#     • 1.5.5~1.6.4：含外部进程调用（PowerShell 对话框等）→ 全部 NodeVersionStatusBanned；
+#     • 1.6.7：移除全部外部进程后 → NodeVersionStatusFlagged（人工复核队列，非 Banned）。
+#   即：移除外部进程确实让评级从 Banned 降级，但仍被标记。剩余嫌疑指向本文件新增的
+#   目录浏览路由（后端可枚举/新建任意目录）。继续为注册表裁剪功能将无限牺牲可用性，
+#   因此项目决定：**功能优先，以 GitHub 直接分发（git clone / 手动拷贝）为主渠道**，
+#   不再为通过注册表扫描而删减功能。
 #
-#   因此，文件夹选择的正确实现方式：
-#     • 后端只用 os.scandir / os.path / os.mkdir —— 纯 Python 标准库文件 I/O，
-#       与 ComfyUI 核心 folder_paths 扫描模型目录用的是同一套 API，无扫描风险；
-#     • 前端用内置浮层渲染目录树，不依赖系统对话框、不依赖浏览器私有 API；
-#     • 原「打开输出目录」（会启动系统文件管理器）在 1.6.7 中暂时改为「复制路径」，
-#       使本版本成为彻底的「零外部进程」版本，用于验证封禁根因；
-#       待确认 1.6.7 通过扫描后，再评估是否加回。
+#   本文件当前实现：
+#     • 文件夹选择：后端 os.scandir 枚举目录 + 前端内置浮层渲染，零外部进程；
+#     • 打开输出目录：os.startfile（Python 标准库，非子进程），仅 Windows 生效；
+#     • 复制路径：纯前端剪贴板写入，任何平台可用。
 
 
 # ==================== 目录浏览辅助（纯 os 标准库） ====================
@@ -241,6 +241,28 @@ try:
 
         return web.json_response({"ok": True, "path": target})
 
+    @PromptServer.instance.routes.post("/josia_text_save/open_folder")
+    async def open_folder(request):
+        """在系统文件管理器中打开输出目录（Windows 资源管理器）。
+
+        使用 os.startfile —— Python 标准库 API，非子进程调用。
+        非 Windows 平台无此 API，返回 not_supported，由前端引导改用「复制路径」。
+        """
+        body = await request.json()
+        folder = (body.get("path") or "").strip()
+        if not folder:
+            return web.json_response({"ok": False, "error": "路径为空"})
+        if not os.path.isdir(folder):
+            return web.json_response({"ok": False, "error": "目录不存在"})
+        try:
+            if hasattr(os, "startfile"):
+                os.startfile(folder)
+                return web.json_response({"ok": True})
+            return web.json_response({"ok": False, "error": "not_supported"})
+        except Exception as e:
+            print(f"[JosiaTextSave] 打开文件夹失败: {e}")
+            return web.json_response({"ok": False, "error": str(e)})
+
 except Exception:
     pass
 
@@ -251,7 +273,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {}
 
 
 class JosiaTextSave:
-    CATEGORY = "Josia"
+    CATEGORY = "⚡️JosiaNodes"
     FUNCTION = "save_text"
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("file_path",)
@@ -265,12 +287,13 @@ class JosiaTextSave:
   2. 点击「选择输出目录」按钮，在内置文件夹浏览器中挑选目录（也可直接手填/粘贴路径）
   3. 输入文件名（支持通配符）
   4. 选择保存格式（txt 或 csv）
-  5. 点击「复制路径」可将当前输出目录复制到剪贴板
+  5. 点击「打开输出目录」在系统文件管理器中打开该目录
+  6. 点击「复制路径」可将当前输出目录复制到剪贴板
 
 【文件夹浏览器】
   内置浮层，支持磁盘列表、ComfyUI 输出/输入目录快捷入口、桌面与用户目录、
   上级导航、路径直接输入跳转、新建文件夹、最近使用记录。
-  不使用系统对话框与子进程，符合 Comfy Registry 安全规范。
+  目录数据由后端标准库文件 I/O 提供，不调用系统对话框。
 
 【通配符规则】（成对 %xxx% 解析）
   %date%           → 2026-06-30

@@ -5,6 +5,8 @@ Josia ComfyUI 自定义节点集 - 总注册文件
 2. 代码内类名/注册名：带Josia（如JosiaEncoder、JosiaImageComparer）
 3. 中文显示名：带Josia（如Josia文本编码、Josia图像对比）
 包含节点：文本编码、多图加载、流量阀门、缓存清理、随机种子、图像对比、图像缩放、分组控制、LoRA堆叠、模型加载、文本列表、文本保存
+
+统一节点分类：⚡️JosiaNodes（由 node_properties.NODE_CATEGORY 与各节点文件内的 CATEGORY 共同保证）。
 """
 import os
 import importlib.util
@@ -32,7 +34,8 @@ def register_node(module_name, node_alias, display_name):
         
         if hasattr(module, "NODE_CLASS_MAPPINGS"):
             if node_alias in module.NODE_CLASS_MAPPINGS:
-                NODE_CLASS_MAPPINGS[node_alias] = module.NODE_CLASS_MAPPINGS[node_alias]
+                node_cls = module.NODE_CLASS_MAPPINGS[node_alias]
+                NODE_CLASS_MAPPINGS[node_alias] = node_cls
                 NODE_DISPLAY_NAME_MAPPINGS[node_alias] = display_name
                 # 成功时不打印，最后统一汇总
             else:
@@ -46,8 +49,7 @@ def register_node(module_name, node_alias, display_name):
         print(f"[JosiaNodes] ❌ {display_name} 加载异常：{str(e)}")
 
 # ==================== 批量注册所有节点 ====================
-# 单级分类 Josia：节点菜单由 ComfyUI 默认排序（不再用带编号的子分类，
-# 以免某些版本分类名覆盖导致节点丢失）。顺序即最初版本，保持稳定。
+# 统一分类 ⚡️JosiaNodes（由 node_properties.NODE_CATEGORY 与各节点 CATEGORY 共同保证）
 register_node("encoder", "JosiaEncoder", "Josia文本编码")
 register_node("flow_valve", "JosiaFlowValve", "Josia流量阀门")
 register_node("cache_cleanup", "JosiaCacheCleanup", "Josia缓存清理")
@@ -62,6 +64,7 @@ register_node("checkpoint_plus", "JosiaCheckpointPlus", "Josia模型加载")
 register_node("multi_image_loader", "JosiaMultiImageLoader", "Josia多图加载")
 register_node("text_list", "JosiaTextList", "Josia文本列表")
 register_node("text_save", "JosiaTextSave", "Josia文本保存")
+register_node("josia_style", "JosiaStyleSelect", "Josia风格选择")
 
 # ==================== 兼容旧版导入 ====================
 __all__ = [
@@ -73,6 +76,7 @@ __all__ = [
 
 # ==================== 最终验证输出 ====================
 if NODE_CLASS_MAPPINGS:
-    print(f"[JosiaNodes] ✅ JosiaNodes 加载成功，注册节点数：{len(NODE_CLASS_MAPPINGS)}")
+    print(f"[JosiaNodes] ✅ JosiaNodes 加载成功，注册节点数：{len(NODE_CLASS_MAPPINGS)}"
+          f"（分类 ⚡️JosiaNodes）")
 else:
     print("[JosiaNodes] ⚠️ 无任何节点成功注册")

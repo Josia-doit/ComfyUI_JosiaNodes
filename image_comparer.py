@@ -16,7 +16,7 @@ from node_properties import IMAGE_COMPARER_DESCRIPTION
 
 class JosiaImageComparer(PreviewImage):  # 类名改为JosiaImageComparer（匹配__init__.py注册名）
     NAME = "Josia图像对比"
-    CATEGORY = "Josia"
+    CATEGORY = "⚡️JosiaNodes"
     FUNCTION = "compare_images"
 
     # IMAGE 输出：将图像A与图像B左右无缝拼接成一张图输出
@@ -83,6 +83,35 @@ class JosiaImageComparer(PreviewImage):  # 类名改为JosiaImageComparer（匹�
         return _to_target(img_a, ca), _to_target(img_b, cb)
 
     @staticmethod
+    def _resize_to(b, target_h, target_w):
+        """把 [B,H,W,C] 图像等比缩放到 (target_h, target_w)。
+        优先用 ComfyUI 原生 common_upscale（质量好），若当前版本对该签名/通道数不支持
+        则回退到 PyTorch 原生 F.interpolate（对任意通道数稳定可用），保证“导出拼接图像”
+        在任何 ComfyUI 版本下都不会因缩放报错。
+        """
+        b4 = b.movedim(-1, 1)  # [B,H,W,C] -> [B,C,H,W]
+        try:
+            out = comfy.utils.common_upscale(b4, target_w, target_h, "lanczos", "disabled")
+        except Exception:
+            out = torch.nn.functional.interpolate(
+                b4, size=(target_h, target_w), mode="bilinear", align_corners=False
+            )
+        return out.movedim(1, -1)  # 还原 [B,H,W,C]
+
+    @staticmethod
+    def _normalize_channels(img):
+        """确保输出通道数为 1/3/4 之一，避免下游保存/导出遇到非标准通道数报错。"""
+        c = img.shape[-1]
+        if c in (1, 3, 4):
+            return img
+        if c > 4:                      # 多余通道：裁剪到前 4 通道 (RGBA)
+            return img[..., :4]
+        if c == 2:                    # 2 通道（灰度+alpha 等）：取首通道复制为 RGB
+            return img[..., 0:1].repeat(1, 1, 1, 3)
+        # 其它异常通道数（如 5/6）：复制首通道补成 RGB
+        return img[..., 0:1].repeat(1, 1, 1, 3)
+
+    @staticmethod
     def _concat_horizontal(img_a, img_b):
         """
         将两张 IMAGE 张量沿宽度方向左右无缝拼接。
@@ -90,6 +119,7 @@ class JosiaImageComparer(PreviewImage):  # 类名改为JosiaImageComparer（匹�
         - 若两图高度不一致，则把 B 缩放到与 A 相同高度（保持宽高比）后再拼接，避免错位。
         - 若两图 batch 数不同，取较小者对齐。
         - 若两图通道数不一致(RGBA vs RGB 等)，自动对齐到相同通道数，避免 torch.cat 报错。
+        - 末尾再做通道数归一化（1/3/4），保证导出/保存路径永不因异常通道数崩溃。
         """
         # 对齐 batch 数量
         n = min(img_a.shape[0], img_b.shape[0])
@@ -105,12 +135,13 @@ class JosiaImageComparer(PreviewImage):  # 类名改为JosiaImageComparer（匹�
             # 把 B 缩放到高度 h_a，宽度按原始宽高比等比缩放
             target_h = h_a
             target_w = max(1, round(b.shape[2] * target_h / h_b))
-            b = b.movedim(-1, 1)  # [B,H,W,C] -> [B,C,H,W]
-            b = comfy.utils.common_upscale(b, target_w, target_h, "lanczos", "disabled")
-            b = b.movedim(1, -1)  # 还原 [B,H,W,C]
+            b = JosiaImageComparer._resize_to(b, target_h, target_w)
 
         # 沿宽度维度（dim=2）拼接
-        return torch.cat([a, b], dim=2)
+        out = torch.cat([a, b], dim=2)
+        # 通道兜底：确保输出为 1/3/4 通道，兼容所有 ComfyUI 版本的保存/导出
+        out = JosiaImageComparer._normalize_channels(out)
+        return out.contiguous()
 
     def compare_images(self, 图像A=None, 图像B=None,
                        filename_prefix="Josia.compare.",

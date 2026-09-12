@@ -27,7 +27,7 @@ def new_random_seed():
 
 class JosiaSeed:
     NAME = "JosiaSeed"
-    CATEGORY = "Josia"
+    CATEGORY = "⚡️JosiaNodes"
     DESCRIPTION = """Josia随机种子节点 v7.2.2
 功能说明：
 1. seed = -1：每次生成新随机种子

@@ -34,7 +34,7 @@ class JosiaLoraStack:
 
     DESCRIPTION = LORA_STACK_DESCRIPTION
 
-    CATEGORY = "Josia"
+    CATEGORY = "⚡️JosiaNodes"
     FUNCTION = "apply_loras"
     
     RETURN_TYPES = ("MODEL", "CLIP")

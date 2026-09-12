@@ -1,30 +1,12 @@
 """
 JosiaMultiImageLoader — 多图加载节点 v7.6
-批量加载多张图片，支持路径列表、上传、拖拽、粘贴。
-支持串联：可选 images 输入端口，上游图像插入本节点图像之前合并输出。
-动态输出：根据载入图像数量自动激活对应数量的独立图像端口 + images_out 汇总输出。
+批量加载多张图片，支持路径列表、上传、拖拽、粘贴，可选 images 输入串联合并。
+动态输出：按载入数量自动激活独立图像端口，并输出 images_out 汇总。
 
-v7.5 改进（列表模式改用 ComfyUI 原生 list 展开，彻底删除序号递增机制）:
-- ★ 列表模式不再用「序号递增」（v7.0~v7.4 的 widget 值驱动 / IS_CHANGED / set_index 消息 /
-      前端 onExecuted 回声 / 归零友好报错 全部废弃）。
-- ★ 利用 ComfyUI 原生机制：images_out 返回 [t1, t2, ..., tN]（list），
-      OUTPUT_IS_LIST=True 让下游（如 llama.cpp 反推）自动逐张执行 N 次 ——
-      这就是「像提示词列表那样按数量自动跑多次」在图像上的等价实现。
-- ★ 一次排队 = 全部图像自动打完标，无需手动批次按钮、无需序号、无需下游单独循环。
-- ★ 批次模式（输出合并 batch）保持原行为，llama.cpp 一次性反推全部（用分隔符合并输出）。
-
-【上游兼容性】
-  ✅ 批次上游（如另一个多图加载的批次模式）：拆分为多张，与本地合并为组合池
-  ✅ 单图上游（如 LoadImage 节点）：作为1张上游加入组合池
-  ✅ 列表模式上游：组合池整体作为 list 展开（逐张输出全部）
-
-v7.1: control_after_generate 种子递增尝试（已废弃）
-v7.0: 输出序号控制 + 原生开关 + 自动递增
-v6.9: 输出模式开关 + 端口改名 images_out
-v6.8: 真正的 N 步渐进缩放 + Emoji统一
-v6.7: 标准上传 API + Emoji更换
-v6.4: BOOLEAN 原生开关
-v6.0: 每图独立等比缩放 + 图库自适应 optimizeGrid
+【列表模式】
+  采用 ComfyUI 原生 list 展开（images_out 返回 list + OUTPUT_IS_LIST=True），
+  一次排队即逐张自动处理，不再使用序号递增机制；
+  批次模式保持原行为（合并 batch 后一次性输出）。
 """
 import os
 import math

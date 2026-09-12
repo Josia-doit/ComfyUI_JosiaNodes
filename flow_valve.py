@@ -28,7 +28,7 @@ class JosiaFlowValve:  # 类名与__init__.py注册的JosiaFlowValve严格一致
     RETURN_NAMES = ("输出1", "输出2", "输出3", "输出4", "输出5")
 
     FUNCTION = "run"  # 核心执行函数名
-    CATEGORY = "Josia"  # 节点分类（ComfyUI左侧菜单路径）
+    CATEGORY = "⚡️JosiaNodes"  # 节点分类（ComfyUI左侧菜单路径）
 
     @classmethod
     def INPUT_TYPES(cls):
