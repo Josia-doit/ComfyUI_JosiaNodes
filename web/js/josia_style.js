@@ -790,20 +790,22 @@ app.registerExtension({
         ro.observe(grid);
       } catch (e) { /* 老浏览器无 ResizeObserver 时忽略 */ }
 
-      // 仅在尺寸无效（新节点未初始化 / 异常）时设定默认尺寸；
-      // 加载自工作流的节点保留其保存尺寸，拖动修改后的尺寸也不会被覆盖
+      // 尺寸初始化策略（关键：切换工作流再切回必须保持用户调整后的尺寸）
+      //  - 全新节点（工作流未注入保存尺寸）：套用新默认宽高
+      //  - 从工作流加载的节点：保留其保存尺寸，用户拖动修改后绝不被覆盖
+      //  - 仅对「宽度恰好等于上一版旧默认(757)」的遗留节点做一次收窄迁移，
+      //    用户手动调整后的宽度不会恰好等于旧默认，因此不会被误伤
       requestAnimationFrame(() => {
         layoutGrid();
         computeDims();
         const cur = node.size || [];
         const curW = cur?.[0] || 0;
-        // 判定是否应用「缩短后的新默认宽度」：
-        //  - 新节点（未被工作流配置注入保存尺寸）
-        //  - 或仍停留在上一版默认宽度(≤OLD_DEFAULT_W)的节点 → 一并缩短到新默认宽度
-        const isFresh = !node._josiaConfigReady;
-        const atOldDefault = curW > 0 && curW <= OLD_DEFAULT_W;
-        if (isFresh || atOldDefault) {
-          node.setSize([defW, defH]);   // 直接套用缩短后的新默认宽高（含旧过宽默认节点 → 一并收窄）
+        const isFresh = !node._josiaConfigReady;                          // 全新节点（无配置注入）
+        const atOldDefault = curW > 0 && Math.abs(curW - OLD_DEFAULT_W) <= 1; // 恰为旧默认宽度(±1px)
+        if (isFresh) {
+          node.setSize([defW, defH]);   // 新节点：套用新默认宽高
+        } else if (atOldDefault) {
+          node.setSize([defW, defH]);   // 遗留旧默认宽节点：一次性收窄到新默认
         }
         // 任何节点都不低于最小尺寸（宽/高）
         if ((node.size?.[0] || 0) < minW) node.size[0] = minW;
