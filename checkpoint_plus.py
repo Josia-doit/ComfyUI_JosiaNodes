@@ -150,92 +150,104 @@ def _get_all_checkpoints() -> list:
 
 
 def _get_all_unets() -> list:
+    candidates = []
     # 常规 diffusion_models 列表（已含 .gguf，因 GGUF 插件把 .gguf 注册进了扩展名）
-    base = []
     try:
-        base = folder_paths.get_filename_list("diffusion_models")
+        candidates += list(folder_paths.get_filename_list("diffusion_models"))
     except Exception:
         pass
-
     # GGUF UNET：优先使用 ComfyUI-GGUF 插件注册的 unet_gguf 列表
-    # （其文件名可被 GGUF 加载器直接解析，是最可靠的来源）
-    gguf_extra = []
     try:
-        gguf_extra = list(folder_paths.get_filename_list("unet_gguf"))
-    except Exception:
-        gguf_extra = []
-
-    # 兜底：直接遍历文件夹（兼容插件未注册 / 自定义路径的极端情况）
-    try:
-        paths = list(folder_paths.get_folder_paths("diffusion_models"))
-    except Exception:
-        paths = []
-    try:
-        paths += list(folder_paths.get_folder_paths("unet_gguf"))
+        candidates += list(folder_paths.get_filename_list("unet_gguf"))
     except Exception:
         pass
-    for folder in paths:
+    # 兜底：直接遍历文件夹（兼容插件未注册 / 自定义路径的极端情况）
+    folders = []
+    try:
+        folders += list(folder_paths.get_folder_paths("diffusion_models"))
+    except Exception:
+        pass
+    try:
+        folders += list(folder_paths.get_folder_paths("unet_gguf"))
+    except Exception:
+        pass
+    for folder in folders:
         if not os.path.isdir(folder):
             continue
         for root, _, files in os.walk(folder):
             for f in files:
                 if f.lower().endswith(".gguf"):
-                    rel = os.path.relpath(os.path.join(root, f), folder)
-                    rel = rel.replace("\\", "/")
-                    if rel not in gguf_extra:
-                        gguf_extra.append(rel)
+                    rel = os.path.relpath(os.path.join(root, f), folder).replace("\\", "/")
+                    candidates.append(rel)
+    return _dedupe_and_sort(candidates)
 
-    combined = []
-    seen = set()
-    for f in base + gguf_extra:
-        if f not in seen:
-            seen.add(f)
-            combined.append(f)
-    return combined
+
+def _resolve_full_path(rel_name: str):
+    """尝试用多个可能的 folder 类别把相对路径解析为绝对路径，用于精确去重。
+    解析失败（类别不匹配/插件差异）时返回 None，调用方回退到相对字符串去重。"""
+    for cat in ("clip", "clip_gguf", "diffusion_models", "unet_gguf", "checkpoints"):
+        try:
+            p = folder_paths.get_full_path(cat, rel_name)
+            if p and os.path.exists(p):
+                return os.path.normcase(os.path.normpath(p))
+        except Exception:
+            continue
+    return None
+
+
+def _dedupe_and_sort(rel_names: list) -> list:
+    """对相对路径列表做：绝对路径精确去重 + 不区分大小写排序（同文件夹相邻）。
+
+    解决两类问题：
+      • 重复：同一物理文件在不同来源（clip 列表 / clip_gguf 列表 / 手动遍历）
+        可能返回不同相对路径字符串（如 'gguf/qwen.gguf' vs 'qwen.gguf'），
+        按字符串去重会漏掉 → 改为按解析后的绝对路径去重。
+      • 排序：各来源各自排序后拼接，导致同文件夹模型被拆散 → 改为统一排序。
+    """
+    seen = {}
+    for name in rel_names:
+        if not name:
+            continue
+        abs_p = _resolve_full_path(name)
+        key = abs_p if abs_p else ("rel:" + name)
+        if key not in seen:
+            seen[key] = name
+    result = list(seen.values())
+    result.sort(key=lambda s: s.lower())
+    return result
 
 
 def _get_all_clips() -> list:
+    candidates = []
     # 常规 clip 列表
-    base = []
     try:
-        base = folder_paths.get_filename_list("clip")
+        candidates += list(folder_paths.get_filename_list("clip"))
     except Exception:
         pass
-
-    # GGUF CLIP：优先使用 ComfyUI-GGUF 插件注册的 clip_gguf 列表
-    gguf_extra = []
+    # GGUF CLIP：ComfyUI-GGUF 插件注册的 clip_gguf 列表
     try:
-        gguf_extra = list(folder_paths.get_filename_list("clip_gguf"))
+        candidates += list(folder_paths.get_filename_list("clip_gguf"))
     except Exception:
-        gguf_extra = []
-
+        pass
     # 兜底：直接遍历文件夹（兼容插件未注册的极端情况）
+    folders = []
     try:
-        paths = list(folder_paths.get_folder_paths("clip"))
-    except Exception:
-        paths = []
-    try:
-        paths += list(folder_paths.get_folder_paths("clip_gguf"))
+        folders += list(folder_paths.get_folder_paths("clip"))
     except Exception:
         pass
-    for folder in paths:
+    try:
+        folders += list(folder_paths.get_folder_paths("clip_gguf"))
+    except Exception:
+        pass
+    for folder in folders:
         if not os.path.isdir(folder):
             continue
         for root, _, files in os.walk(folder):
             for f in files:
                 if f.lower().endswith(".gguf"):
-                    rel = os.path.relpath(os.path.join(root, f), folder)
-                    rel = rel.replace("\\", "/")
-                    if rel not in gguf_extra:
-                        gguf_extra.append(rel)
-
-    combined = []
-    seen = set()
-    for f in base + gguf_extra:
-        if f not in seen:
-            seen.add(f)
-            combined.append(f)
-    return combined
+                    rel = os.path.relpath(os.path.join(root, f), folder).replace("\\", "/")
+                    candidates.append(rel)
+    return _dedupe_and_sort(candidates)
 
 
 def _get_all_vaes() -> list:
@@ -253,16 +265,10 @@ def _get_all_vaes_extended() -> list:
 
 
 def _get_combined_model_list() -> list:
-    """合并 checkpoint + unet 列表"""
+    """合并 checkpoint + unet 列表（绝对路径去重 + 统一排序）"""
     checkpoints = _get_all_checkpoints()
     unets = _get_all_unets()
-    combined = []
-    seen = set()
-    for f in checkpoints + unets:
-        if f not in seen:
-            seen.add(f)
-            combined.append(f)
-    return combined if combined else []
+    return _dedupe_and_sort(checkpoints + unets)
 
 
 def _safe_empty_cache():

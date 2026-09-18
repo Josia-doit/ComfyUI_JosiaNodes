@@ -30,6 +30,7 @@ class JosiaEncoder:
     DESCRIPTION = """🖊️ Josia 文本编码
 支持文生图与图生图一体化 CLIP/VAE 编码，最多融合 5 张参考图。
 
+• 图像接口：默认仅显示「图像1」，接入后自动展开「图像2」…依次最多 5 张
 • 图像参考模式：开启时参考图像生成Latent，关闭时输出空Latent
 • 负向提示词开关：关闭时自动将负向条件归零
 • 参考 Latent 模式：开启时注入参考Latent条件，关闭时仅使用文本条件
@@ -76,6 +77,10 @@ class JosiaEncoder:
             },
             "optional": {
                 "vae": ("VAE", {"display_name": "VAE"}),
+                # 图像接口：name 必须是后端 kwarg 键 image1..image5（执行层按名取参），不可改成中文。
+                # 中文展示走 renderer 的 localized_name：后端这里声明的 display_name 会在
+                # 「节点重建」时被官方建节点代码换算成 localized_name（两者都是显示层，不影响执行）。
+                # 前端运行期动态 addInput 不走这条换算链路，须自行传 {localized_name:"图像N"}。
                 "image1": ("IMAGE", {"display_name": "图像1"}),
                 "image2": ("IMAGE", {"display_name": "图像2"}),
                 "image3": ("IMAGE", {"display_name": "图像3"}),

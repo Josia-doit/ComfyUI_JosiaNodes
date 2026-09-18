@@ -13,11 +13,77 @@ function imageDataToUrl(data) {
     return api.apiURL(`/view?filename=${encodeURIComponent(data.filename)}&type=${data.type}&subfolder=${data.subfolder || ""}${app.getPreviewFormatParam()}${app.getRandParam()}`);
 }
 
+/* ============================================================================
+ * 渲染结果留存（撤销 / 切换工作流 / 刷新页面后不丢失）
+ * ----------------------------------------------------------------------------
+ * 对比图由后端 PreviewImage.save_images 写入 ComfyUI 的 temp 目录，只要服务进程
+ * 没重启，文件一直都在（temp 只在启动与退出时被清空）。所以前端只需要把
+ * 「文件名 + subfolder + type」这 3 个字段记住，随时都能重新取回图像。
+ *
+ * 为什么用 localStorage 而不是 node.properties：
+ *   ① properties 会进工作流 JSON，执行一次就把工作流标记为「已修改」；
+ *   ② properties 参与撤销栈快照，而「撤销」恰恰是本功能要兼容的操作，
+ *      存进去反而会让撤销出现一次无意义的状态回退。
+ *   localStorage 完全不触碰图状态，对工作流、撤销栈、文件内容零影响。
+ * ========================================================================== */
+const CACHE_PREFIX = "JosiaComparer.v1.";
+const DESC_FIELDS = ["filename", "subfolder", "type"];
+const CACHE_MAX_ENTRIES = 200;
+let _cacheWrites = 0;
+
+/** 当前工作流标识：跨刷新稳定（路径也是前端自己给草稿/缩略图用的键） */
+function currentWorkflowKey() {
+    try {
+        const wf = app.extensionManager?.workflow?.activeWorkflow;
+        const key = wf?.path ?? wf?.key;
+        return key ? String(key) : null;
+    } catch (e) {
+        return null;
+    }
+}
+
+/** 只保留持久化所需的 3 个字段，避免把整个 ui 对象写进 localStorage */
+function pickDesc(img) {
+    if (!img || typeof img !== "object" || !img.filename) return null;
+    const d = {};
+    for (const f of DESC_FIELDS) {
+        if (img[f] !== undefined) d[f] = img[f];
+    }
+    return d;
+}
+
+/** 描述符指纹：判断「已渲染的是不是同一对图」，保证还原是幂等的 */
+function descSig(d) {
+    return d ? `${d.type || "temp"}|${d.subfolder || ""}|${d.filename}` : "";
+}
+
+/** 遍历根图（含子图）内的所有节点 */
+function walkNodes(fn) {
+    const seen = new Set();
+    const visit = (graph, depth) => {
+        if (!graph || depth > 3) return;
+        for (const node of graph._nodes || []) {
+            if (!node || seen.has(node)) continue;
+            seen.add(node);
+            try {
+                fn(node);
+            } catch (e) {}
+            if (node.subgraph) visit(node.subgraph, depth + 1);
+        }
+    };
+    try {
+        visit(app.graph, 0);
+    } catch (e) {}
+}
+
 // 图像对比节点类（封装所有交互逻辑）
 class JosiaImageComparerNode {
     constructor(node) {
         this.node = node;
         this.imgs = []; // 存储对比图像A/B
+        this.descs = [null, null]; // 当前已渲染图像的描述符（后端 temp 文件名等）
+        this.imgSig = ""; // 已渲染图像对的指纹（幂等还原用）
+        this.healTries = 0; // 自愈式还原的尝试次数上限
         this.isPointerOver = false; // 鼠标是否悬停在节点上
         this.pointerPos = [0, 0]; // 鼠标位置
         this.comparerMode = "Slide"; // 默认对比模式：滑动
@@ -25,6 +91,169 @@ class JosiaImageComparerNode {
         this.initProperties(); // 初始化节点属性
         this.setupEvents(); // 绑定鼠标事件
         this.addModeToggle(); // 添加模式切换开关
+        this.scheduleRestore(); // 还原上次的渲染结果（撤销/切换工作流/刷新后用）
+    }
+
+    /* ======================= 渲染结果留存（本地缓存） ======================= */
+
+    /** 缓存键：工作流标识 + 节点ID（两者都跨刷新稳定，且避免不同工作流的同名节点串味） */
+    cacheKey() {
+        const wk = currentWorkflowKey();
+        const id = this.node?.id;
+        if (!wk || id === undefined || id === null) return null;
+        return `${CACHE_PREFIX}${wk}#${id}`;
+    }
+
+    /** 写入/清除缓存；a、b 都为空表示清除 */
+    writeCache(a, b) {
+        const key = this.cacheKey();
+        if (!key) return;
+        try {
+            if (!a && !b) {
+                localStorage.removeItem(key);
+                return;
+            }
+            localStorage.setItem(key, JSON.stringify({ a, b, t: Date.now() }));
+            if (++_cacheWrites % 20 === 0) this.pruneCache();
+        } catch (e) {}
+    }
+
+    /** 读出缓存（字段非法/解析失败一律当作没有） */
+    readCache() {
+        const key = this.cacheKey();
+        if (!key) return null;
+        try {
+            const raw = localStorage.getItem(key);
+            if (!raw) return null;
+            const obj = JSON.parse(raw);
+            if (!obj) return null;
+            const a = pickDesc(obj.a);
+            const b = pickDesc(obj.b);
+            return a || b ? { a, b } : null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    /** 缓存清理：条目过多时按时间淘汰最旧的一批，避免 localStorage 无限增长 */
+    pruneCache() {
+        try {
+            const keys = [];
+            for (let i = 0; i < localStorage.length; i++) {
+                const k = localStorage.key(i);
+                if (k && k.startsWith(CACHE_PREFIX)) keys.push(k);
+            }
+            if (keys.length <= CACHE_MAX_ENTRIES) return;
+            const entries = keys.map((k) => {
+                let t = 0;
+                try {
+                    t = JSON.parse(localStorage.getItem(k))?.t || 0;
+                } catch (e) {}
+                return { k, t };
+            });
+            entries.sort((x, y) => x.t - y.t);
+            for (const e of entries.slice(0, entries.length - CACHE_MAX_ENTRIES)) {
+                localStorage.removeItem(e.k);
+            }
+        } catch (e) {}
+    }
+
+    /**
+     * 从 app.nodeOutputs 里取本节点的 ui 数据（a_images / b_images）。
+     * 只在 onNodeOutputsUpdated 钩子里调用：该钩子恰好在「输出被整体替换」时触发
+     * （撤销、切回工作流时前端会 restoreOutputs），此刻读到的必然是当前工作流的数据，
+     * 不会读到上一个工作流的残留。
+     */
+    pairFromOutputs(outputs) {
+        if (!outputs) return null;
+        const id = this.node?.id;
+        if (id === undefined || id === null) return null;
+        const keys = [String(id)];
+        const gid = this.node?.graph?.id;
+        if (gid) keys.push(`${gid}:${id}`);
+        for (const k of keys) {
+            const o = outputs[k];
+            if (o && (o.a_images || o.b_images)) {
+                return { a: pickDesc(o.a_images?.[0]), b: pickDesc(o.b_images?.[0]) };
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 应用一对描述符：加载 A/B 图像，并可选写入缓存。幂等——指纹相同直接跳过。
+     * @returns {boolean} 是否发生了变化
+     */
+    applyPair(pair, persist) {
+        if (!pair) return false;
+        const a = pair.a || null;
+        const b = pair.b || null;
+        const sig = `${descSig(a)}||${descSig(b)}`;
+        if (sig === this.imgSig) return false;
+
+        this.imgSig = sig;
+        this.descs = [a, b];
+        this.imgs = [];
+        if (a) this.loadImage(a, 0);
+        if (b) this.loadImage(b, 1);
+        if (persist) this.writeCache(a, b);
+        this.node.setDirtyCanvas(true, false);
+        return true;
+    }
+
+    /** 加载单张对比图；文件确实已不存在时丢弃该引用与缓存，避免反复重试 */
+    loadImage(desc, index) {
+        const img = new Image();
+        img.src = imageDataToUrl(desc);
+        img.onload = () => this.node.setDirtyCanvas(true, false);
+        img.onerror = () => {
+            if (this.imgs[index] === img) this.imgs[index] = undefined;
+            this.descs[index] = null;
+            this.imgSig = `${descSig(this.descs[0])}||${descSig(this.descs[1])}`;
+            if (this.descs[0] || this.descs[1]) {
+                this.writeCache(this.descs[0], this.descs[1]);
+            } else {
+                this.writeCache(null, null);
+            }
+            this.node.setDirtyCanvas(true, false);
+        };
+        this.imgs[index] = img;
+    }
+
+    /** 清空已渲染内容与缓存（本次执行确实没有可用图像时调用） */
+    clearRendered() {
+        this.imgs = [];
+        this.descs = [null, null];
+        this.imgSig = "";
+        this.writeCache(null, null);
+        this.node.setDirtyCanvas(true, false);
+    }
+
+    /** 还原渲染结果：优先本地缓存（按工作流+节点索引，最抗撤销/切换/刷新） */
+    restore() {
+        if (this.imgs[0]) return false;
+        const cached = this.readCache();
+        if (!cached) return false;
+        return this.applyPair(cached, false);
+    }
+
+    /** 输出被整体替换（撤销 / 切回工作流）时，用内存中的输出兜底还原 */
+    restoreFromOutputs(outputs) {
+        if (this.imgs[0]) return false;
+        const pair = this.pairFromOutputs(outputs);
+        if (!pair) return false;
+        const changed = this.applyPair(pair, false);
+        if (changed) this.writeCache(pair.a, pair.b);
+        return changed;
+    }
+
+    /** 节点新建/重配后，下一帧还原（此刻 node.id 一定已就绪，且撤销重载已完成） */
+    scheduleRestore() {
+        requestAnimationFrame(() => {
+            try {
+                this.restore();
+            } catch (e) {}
+        });
     }
 
     // 添加模式切换开关
@@ -124,26 +353,31 @@ class JosiaImageComparerNode {
         search(output, 0);
         if (!data) return;
 
-        this.imgs = [];
-        // 加载图像A
-        if (data.a_images?.[0]) {
-            const imgA = new Image();
-            imgA.src = imageDataToUrl(data.a_images[0]);
-            imgA.onload = () => this.node.setDirtyCanvas(true, false);
-            this.imgs[0] = imgA;
+        const a = pickDesc(data.a_images?.[0]);
+        const b = pickDesc(data.b_images?.[0]);
+        if (!a && !b) {
+            // 本次执行确实没有图像（A/B 均未接入）→ 清空渲染内容与缓存
+            this.clearRendered();
+            return;
         }
-        // 加载图像B
-        if (data.b_images?.[0]) {
-            const imgB = new Image();
-            imgB.src = imageDataToUrl(data.b_images[0]);
-            imgB.onload = () => this.node.setDirtyCanvas(true, false);
-            this.imgs[1] = imgB;
-        }
+        // 渲染并写入缓存：撤销 / 切换工作流 / 刷新页面后据此还原
+        this.applyPair({ a, b }, true);
     }
 
     // 绘制图像对比界面
     draw(ctx) {
-        if (!this.imgs[0] || !this.imgs[0].complete) return;
+        if (!this.imgs[0]) {
+            // 自愈：节点被重建（撤销 / 切工作流）或还原时机早于数据就绪时，这里补还原。
+            // 有次数上限，避免无缓存时每帧都去读一遍存储。
+            if (this.healTries < 3) {
+                this.healTries++;
+                try {
+                    this.restore();
+                } catch (e) {}
+            }
+            if (!this.imgs[0]) return;
+        }
+        if (!this.imgs[0].complete) return;
 
         const node = this.node;
         const pad = 12;
@@ -263,6 +497,21 @@ app.registerExtension({
         if (comparer.modeToggle) {
             comparer.modeToggle.value = (savedMode === "Click");
         }
+        // 还原上次渲染结果（撤销 / 切换工作流 / 刷新页面后进入这里）
+        comparer.scheduleRestore();
         node.setDirtyCanvas(true, false);
+    },
+
+    /**
+     * 输出被整体替换时触发（切回工作流、撤销重载等，前端会 restoreOutputs）。
+     * 这是读 app.nodeOutputs 唯一安全的时机——此刻拿到的必然是当前工作流的数据。
+     * 已从本地缓存还原过的节点不会被覆盖。
+     */
+    onNodeOutputsUpdated(outputs) {
+        walkNodes((node) => {
+            if (node.type === "JosiaImageComparer" && node.josiaComparer) {
+                node.josiaComparer.restoreFromOutputs(outputs);
+            }
+        });
     }
 });

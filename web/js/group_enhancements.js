@@ -507,12 +507,17 @@ app.registerExtension({
   name: "JosiaGroupEnhancements",
   settings: [
     // ── 编组增强区域（四角缩放 + 标题栏按钮 同处一区）──
+    // ⚠️ category 末级 key 必须每个设置唯一：前端 buildTree()（treeUtil.ts）以 category
+    //    数组为「树路径」，同一路径的多个设置会塌进同一个节点并被 `parent.data = item`
+    //    覆盖 ⇒ 只剩最后一个，前面的设置直接从设置面板消失（四角缩放曾因此丢失）。
+    //    末级 key 只作树键、不会显示在 UI 上（面板按 flattenTree 收叶子、以 setting.name 显示），
+    //    中间层「编组增强」才是分组标题。官方核心设置同样用末段唯一写法。
     {
       id: "JosiaNodes.CornerResize",
       name: "编组四角缩放",
       type: "boolean",
       defaultValue: false,
-      category: ["⚡️JosiaNodes", "编组增强"],
+      category: ["⚡️JosiaNodes", "编组增强", "CornerResize"],
       onChange: (v) => setCornerResize(v),
     },
     {
@@ -520,7 +525,7 @@ app.registerExtension({
       name: "编组标题按钮",
       type: "boolean",
       defaultValue: false,
-      category: ["⚡️JosiaNodes", "编组增强"],
+      category: ["⚡️JosiaNodes", "编组增强", "GroupTitleButtons"],
       onChange: (v) => setTitleButtons(v),
     },
   ],

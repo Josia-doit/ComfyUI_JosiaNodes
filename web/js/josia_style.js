@@ -24,6 +24,18 @@ const CTRL_FALLBACK = 210;    // 控件区高度兜底值
 const POP_IMG = 512;          // 悬停浮窗图片显示边长（回退到原尺寸）
 const POP_INFO_W = 480;       // 右侧文本区宽度（收窄让浮窗紧凑，文本填满高度）
 const OLD_DEFAULT_W = 757;    // 上一版默认节点宽度（4 列基础宽再 +1/3），用于识别未自定义加宽/仍过宽的节点
+const GRID_MAX_H = 800;       // 预览网格高度上限(px)：仅用于 1.0 经典路径；远高于正常尺寸，不影响自由缩放
+
+// ---------------- Node 2.0(Vue) 检测 ----------------
+// 仅以官方内部标志 LiteGraph.vueNodesMode 为唯一判据（严格 === true）；取不到时返回 false。
+// 默认 false ⇒ 走 1.0 经典路径，保证经典界面行为与上一版完全一致、绝不被误伤。
+// （历史教训：曾用设置项 + 多重兜底判据做检测，在 1.0 下误判为 true，导致四个节点自定义 UI 全部失效。）
+function isVueNodes2() {
+  try {
+    const lg = (typeof window !== "undefined" && window.LiteGraph) ? window.LiteGraph : null;
+    return !!(lg && lg.vueNodesMode === true);
+  } catch (e) { return false; }
+}
 
 // ---------------- 分类双语 ----------------
 const SECTION_ORDER = ["3D Render", "Anime", "Cartoon", "Comics", "Cover Art",
@@ -167,6 +179,9 @@ app.registerExtension({
   async beforeRegisterNodeDef(nodeType, nodeData) {
     if (nodeData.name !== "JosiaStyleSelect") return;
 
+    // 节点尺寸稳定性：Node 2.0 高度无限生长的修复见 applyLayout 中对预览网格高度的上限钳制
+    // （GRID_MAX_H），此处不覆写 computeSize，以免破坏 1.0 下节点自由缩放能力。
+
     const onNodeCreated = nodeType.prototype.onNodeCreated;
     const onConfigure = nodeType.prototype.onConfigure;
     const origResize = nodeType.prototype.onResize;
@@ -183,9 +198,14 @@ app.registerExtension({
       const multiW = getWidget(node, "multi_select");
 
       // 隐藏的仅作数据载体的控件（它们没有输入端口，不会影响端口位置）
+      // 注意：经典 LiteGraph 依据 widget.hidden 判定显隐，而 Node 2.0(Vue) 依据 widget.options.hidden
+      // （见 useProcessedWidgets 的 isWidgetVisible 与 extractWidgetDisplayOptions）。
+      // 两者都设才能在两个渲染器下都隐藏；隐藏不影响取值与序列化。
       [themeW, formatW, selW, multiW].forEach((w) => {
         if (!w) return;
         w.hidden = true;
+        w.options = w.options || {};
+        w.options.hidden = true;
         w.computeSize = () => [0, 0];
       });
 
@@ -385,7 +405,7 @@ app.registerExtension({
       grid.style.cssText =
         "width:100%;flex:0 0 auto;overflow-y:auto;overflow-x:hidden;display:grid;" +
         "gap:" + GAP + "px;padding:8px;align-content:start;justify-content:start;" +
-        "background:#14141a;border:1px solid #2a2a32;border-radius:10px;box-sizing:border-box;";
+        "background:#14141a;border:1px solid #2a2a32;border-radius:10px;box-sizing:border-box;height:180px;";
 
       // 滚动位置持久化：跨工作流 / 撤销重建后，恢复上次浏览到的缩略图位置
       const scrollKey = () => `josia_style_scroll_${node.id ?? "n"}_${state.theme || "none"}`;
@@ -486,6 +506,8 @@ app.registerExtension({
           const ctrlH = measureControls();
           // 节点内部可用总高（不强制下限）：文本框 + 控件区占固定部分，剩余全给网格。
           // 网格随节点自由伸缩（overflow 内部滚动），缩到多小都不会溢出节点边框。
+          // 节点高度唯一来源是 this.size（用户拖拽 / 工作流保存值）；无限生长的根治在
+          // 下方对预览网格高度的上限钳制（GRID_MAX_H），此处只按当前尺寸分配内部高度。
           const nodeH = node.size?.[1] || 0;
           const inner = Math.max(80, nodeH - CHROME);
           let taH = Math.round(inner * 0.3);
@@ -493,7 +515,23 @@ app.registerExtension({
           let gridH = inner - ctrlH - taH;
           if (gridH < 0) { gridH = 0; taH = Math.max(50, inner - ctrlH); }
           setPromptHeight(taH);
-          grid.style.height = gridH + "px";
+          if (isVueNodes2()) {
+            // ---- Node 2.0(Vue) 路径 ----
+            // 2.0 的节点高度由 DOM 实测高度驱动（节点元素为 min-height:--node-height + 内容自适应）。
+            // 若给网格设「固定像素高」，该高度会成为节点 min-content 的下界 → 节点被顶高且无法缩短。
+            // 改为 flex 填充（flex:1 1 auto + min-height:0，且不设固定 height）：
+            //   • min-height:0 让网格的 min-content 贡献归零 → 节点不再被顶高，可自由缩放；
+            //   • flex-grow 让网格自动占满剩余空间 → 高度跟随节点，内容超出时内部滚动。
+            if (grid.style.flex !== "1 1 auto") grid.style.flex = "1 1 auto";
+            if (grid.style.height !== "auto") grid.style.height = "auto";
+            if (grid.style.minHeight !== "0px") grid.style.minHeight = "0px";
+          } else {
+            // ---- Node 1.0(经典) 路径：完全保持经典界面原有逻辑 ----
+            // 高度上限钳制：斩断「节点尺寸→网格 DOM 高度→再测量撑大节点」的无限生长反馈环。
+            // 1.0 正常拖拽尺寸远低于此上限，故对自由缩放无影响。
+            if (gridH > GRID_MAX_H) gridH = GRID_MAX_H;
+            grid.style.height = gridH + "px";
+          }
           // computeSize 只回报固定最小高度（minH），与节点实际高度/行数彻底解耦：
           // 节点高度仅由用户拖动决定，缩放宽度不再影响高度。
           contentH = minH;
@@ -802,10 +840,12 @@ app.registerExtension({
         const curW = cur?.[0] || 0;
         const isFresh = !node._josiaConfigReady;                          // 全新节点（无配置注入）
         const atOldDefault = curW > 0 && Math.abs(curW - OLD_DEFAULT_W) <= 1; // 恰为旧默认宽度(±1px)
+        // Node 2.0 下适度降低默认高度（仅 Vue 渲染器生效，经典界面尺寸保持不变）
+        const defHUse = isVueNodes2() ? Math.round(defH * 0.8) : defH;
         if (isFresh) {
-          node.setSize([defW, defH]);   // 新节点：套用新默认宽高
+          node.setSize([defW, defHUse]);   // 新节点：套用默认宽高
         } else if (atOldDefault) {
-          node.setSize([defW, defH]);   // 遗留旧默认宽节点：一次性收窄到新默认
+          node.setSize([defW, defHUse]);   // 遗留旧默认宽节点：一次性收窄到新默认
         }
         // 任何节点都不低于最小尺寸（宽/高）
         if ((node.size?.[0] || 0) < minW) node.size[0] = minW;
