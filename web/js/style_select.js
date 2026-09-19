@@ -1,6 +1,6 @@
 /**
  * Josia 风格选择节点前端扩展
- * 节点标识：JosiaStyleSelect（与后端 josia_style.py 的 NODE_CLASS_MAPPINGS 键一致）
+ * 节点标识：JosiaStyleSelect（与后端 style_select.py 的 NODE_CLASS_MAPPINGS 键一致）
  *
  * 布局约定（重要）：
  *  - 用户提示词使用「原生多行文本控件」，这样 LiteGraph 才会把该输入端口的圆点
@@ -408,7 +408,7 @@ app.registerExtension({
         "background:#14141a;border:1px solid #2a2a32;border-radius:10px;box-sizing:border-box;height:180px;";
 
       // 滚动位置持久化：跨工作流 / 撤销重建后，恢复上次浏览到的缩略图位置
-      const scrollKey = () => `josia_style_scroll_${node.id ?? "n"}_${state.theme || "none"}`;
+      const scrollKey = () => `style_select_scroll_${node.id ?? "n"}_${state.theme || "none"}`;
       let scrollTimer = null;
       grid.addEventListener("scroll", () => {
         clearTimeout(scrollTimer);
@@ -812,7 +812,7 @@ app.registerExtension({
       // ---------------------------------------------------------------------
       // 挂载 DOM 控件 + 初始尺寸
       // ---------------------------------------------------------------------
-      const widget = node.addDOMWidget("style_ui", "josia_style_ui", root, { serialize: false });
+      const widget = node.addDOMWidget("style_ui", "style_select_ui", root, { serialize: false });
       // computeSize 返回「固定最小值」contentH（在 applyLayout 中按 控件区+网格最小高度 算出，与节点实际高度解耦）。
       // 这样拖拽缩小时不会被 clamp 回弹（只增高不缩小）；节点多余高度由 grid 的 overflow 自然填充（root 为 overflow:visible）。
       widget.computeSize = (w) => [w, Math.max(0, contentH)];

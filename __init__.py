@@ -64,7 +64,7 @@ register_node("checkpoint_plus", "JosiaCheckpointPlus", "Josia模型加载")
 register_node("multi_image_loader", "JosiaMultiImageLoader", "Josia多图加载")
 register_node("text_list", "JosiaTextList", "Josia文本列表")
 register_node("text_save", "JosiaTextSave", "Josia文本保存")
-register_node("josia_style", "JosiaStyleSelect", "Josia风格选择")
+register_node("style_select", "JosiaStyleSelect", "Josia风格选择")
 
 # ==================== 兼容旧版导入 ====================
 __all__ = [

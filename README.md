@@ -13,7 +13,7 @@ ComfyUI_JosiaNodes/
 ├── __init__.py                    # 节点总注册、统一导出、加载日志
 ├── node_properties.py             # 全节点常量、尺寸预设、描述文案
 ├── encoder.py                     # 文本 + 多图参考编码节点
-├── josia_style.py                 # 风格选择节点（Krea2 风格库选择器）
+├── style_select.py                # 风格选择节点（Krea2 风格库选择器）
 ├── multi_image_loader.py          # 多图批量加载节点（缩放/上传/拖拽/粘贴）
 ├── text_list.py                   # 文本列表节点（多行按行分割为列表）
 ├── text_save.py                   # 文本保存节点（保存文本到文件）
@@ -30,7 +30,7 @@ ComfyUI_JosiaNodes/
 └── web/
     └── js/
         ├── encoder.js             # 文本编码节点默认尺寸配置
-        ├── josia_style.js          # 风格选择节点前端（主题/分类/搜索/收藏/拖动/画廊）
+        ├── style_select.js         # 风格选择节点前端（主题/分类/搜索/收藏/拖动/画廊）
         ├── multi_image_loader.js  # 多图加载前端（图库/拖拽/缩略图/自适应布局）
         ├── text_list.js           # 文本列表前端
         ├── text_save.js           # 文本保存前端（内置文件夹浏览器 / 打开输出目录 / 复制路径）

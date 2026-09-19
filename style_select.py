@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Josia 风格选择节点【集合 Krea2 风格选择器】
-本地文件名：josia_style.py
+本地文件名：style_select.py
 节点英文标识：JosiaStyleSelect
 节点中文显示名：Josia风格选择
 
@@ -54,6 +54,9 @@ WILDCARD_HELP = [
 _STYLE_CACHE = {}
 # 缩略图归一化索引缓存：theme -> {归一化名: 真实文件名}
 _THUMB_INDEX = {}
+# 主题白名单缓存：{"mtime": Style/ 目录修改时间, "dirs": {normcase(名字): 真实名字}}
+# 用目录 mtime 失效，新增 / 删除主题文件夹后自动重扫。
+_THEME_CACHE = {"mtime": None, "dirs": {}}
 
 
 def _norm_key(s):
@@ -64,16 +67,76 @@ def _norm_key(s):
     return re.sub(r"[^0-9a-z\u00c0-\u024f\u4e00-\u9fff]", "", s.lower())
 
 
+def _list_theme_dirs():
+    """Style/ 下真实子目录的 {normcase(名字): 真实名字} 映射，即主题白名单。
+
+    ⚠️ 安全边界：theme 是**不可信输入**，两个来源都能注入——
+      ① URL 动态段（/josia_style/{theme}/...）：aiohttp 匹配路径时保留 %2F 编码，
+        匹配后才解码，于是 `..%2F..` 能把路径分隔符塞进单段；
+      ② 工作流 JSON 里的 widget 取值。
+    而 os.path.join(base, "C:\\x") 之类遇绝对路径会**丢弃前缀**，靠字符串 startswith
+    兜不住。所以主题名必须先"只允许 Style/ 下真实存在的目录名"这一层白名单过滤。
+    """
+    try:
+        mtime = os.path.getmtime(STYLE_ROOT)
+    except OSError:
+        mtime = None
+    if _THEME_CACHE["mtime"] == mtime and _THEME_CACHE["dirs"]:
+        return _THEME_CACHE["dirs"]
+    dirs = {}
+    try:
+        with os.scandir(STYLE_ROOT) as it:
+            for entry in it:
+                try:
+                    if entry.is_dir():
+                        dirs[os.path.normcase(entry.name)] = entry.name
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    _THEME_CACHE["mtime"] = mtime
+    _THEME_CACHE["dirs"] = dirs
+    return dirs
+
+
+def _resolve_theme(theme):
+    """把 theme 校验并解析为 Style/ 下的绝对目录路径；非法一律返回 None。
+
+    非法 = 非字符串 / 空 / 含路径分隔符或 `:`（盘符、NTFS 数据流）/ 绝对路径 /
+           不是 Style/ 下真实存在的目录名（结构上已挡掉 `.` `..` 与 symlink 名）。
+    """
+    if not isinstance(theme, str) or not theme:
+        return None
+    if theme in (".", "..") or any(ch in theme for ch in ("/", "\\", ":", "\x00")):
+        return None
+    if os.path.isabs(theme) or os.path.splitdrive(theme)[0]:
+        return None
+    name = _list_theme_dirs().get(os.path.normcase(theme))
+    if not name:
+        return None
+    return os.path.join(STYLE_ROOT, name)
+
+
+def _is_within(path, root):
+    """path 是否位于 root 之内（含相等）。两个参数须已 realpath（缩略图路由里各做一次）。"""
+    p, r = os.path.normcase(path), os.path.normcase(root)
+    return p == r or p.startswith(r + os.sep)
+
+
 def _thumb_index(theme):
-    """某主题的「归一化名 -> 真实文件名」索引（懒加载缓存）。"""
-    if theme in _THUMB_INDEX:
-        return _THUMB_INDEX[theme]
+    """某主题的「归一化名 -> 真实文件名」索引（懒加载缓存）。主题非法时返回空索引。"""
+    theme_dir = _resolve_theme(theme)
+    if theme_dir is None:
+        return {}
+    key = os.path.basename(theme_dir)
+    if key in _THUMB_INDEX:
+        return _THUMB_INDEX[key]
     idx = {}
-    thumb_dir = os.path.join(STYLE_ROOT, theme, "thumbs")
+    thumb_dir = os.path.join(theme_dir, "thumbs")
     if os.path.isdir(thumb_dir):
         for f in os.listdir(thumb_dir):
             idx.setdefault(_norm_key(os.path.splitext(f)[0]), f)
-    _THUMB_INDEX[theme] = idx
+    _THUMB_INDEX[key] = idx
     return idx
 
 
@@ -89,10 +152,17 @@ def _list_themes():
 
 
 def _load_theme(theme):
-    """加载某主题的风格库（含缓存）。返回 {"list":[...], "by_name":{name:entry}}。"""
-    if theme in _STYLE_CACHE:
-        return _STYLE_CACHE[theme]
-    style_dir = os.path.join(STYLE_ROOT, theme)
+    """加载某主题的风格库（含缓存）。返回 {"list":[...], "by_name":{name:entry}}。
+
+    主题名非法（含路径穿越）时返回空结果——工作流 JSON 里的 theme 也可能是被人改过的。
+    """
+    theme_dir = _resolve_theme(theme)
+    if theme_dir is None:
+        return {"list": [], "by_name": {}}
+    key = os.path.basename(theme_dir)
+    if key in _STYLE_CACHE:
+        return _STYLE_CACHE[key]
+    style_dir = theme_dir
     styles_path = os.path.join(style_dir, "styles.json")
     result = {"list": [], "by_name": {}}
     try:
@@ -116,7 +186,7 @@ def _load_theme(theme):
             result["by_name"][e.get("name", "")] = e
     except Exception:
         pass
-    _STYLE_CACHE[theme] = result
+    _STYLE_CACHE[key] = result
     return result
 
 
@@ -295,9 +365,11 @@ try:
 
     @PromptServer.instance.routes.get("/josia_style/{theme}/styles")
     async def _josia_style_styles(request):
-        theme = request.match_info["theme"]
-        if not theme or not os.path.isfile(os.path.join(STYLE_ROOT, theme, "styles.json")):
+        # theme 是 URL 动态段 = 不可信输入，必须先过白名单（见 _resolve_theme）
+        theme_dir = _resolve_theme(request.match_info["theme"])
+        if theme_dir is None or not os.path.isfile(os.path.join(theme_dir, "styles.json")):
             return _web.json_response({"error": "theme_not_found", "list": []}, status=404)
+        theme = os.path.basename(theme_dir)
         data = _load_theme(theme)["list"]
         return _web.json_response({"theme": theme, "list": data})
 
@@ -312,20 +384,38 @@ try:
 
     @PromptServer.instance.routes.get("/josia_style/{theme}/thumb")
     async def _josia_style_thumb(request):
-        theme = request.match_info["theme"]
+        # theme 同上不可信；file 只取纯文件名，再对最终路径做 realpath 包含性校验
+        theme_dir = _resolve_theme(request.match_info["theme"])
+        if theme_dir is None:
+            return _web.Response(status=404)
         fname = (request.rel_url.query.get("file", "") or "").replace("\\", "/")
         fname = fname.split("/")[-1]          # 允许传 krea2/thumbs/xxx.jpg，只取文件名
-        if not fname:
+        # 空名 / NUL（realpath 会抛 ValueError，得挡在 500 之前）
+        if not fname or "\x00" in fname:
             return _web.Response(status=404)
-        base = os.path.normpath(os.path.join(STYLE_ROOT, theme, "thumbs"))
-        path = os.path.normpath(os.path.join(base, fname))
-        if not (path.startswith(base + os.sep) and os.path.isfile(path)):
-            # 兜底：磁盘文件名可能被清洗过（去掉 . : ' ! / & – 等特殊字符），
-            # 按归一化名再匹配一次，避免预览图 404。
-            real = _thumb_index(theme).get(_norm_key(os.path.splitext(fname)[0]))
-            if not real:
-                return _web.Response(status=404)
-            path = os.path.join(base, real)
+        stem_key = _norm_key(os.path.splitext(fname)[0])
+        # `.` / `..` / 纯符号名（归一化后为空）直接拒绝
+        if not stem_key:
+            return _web.Response(status=404)
+        base = os.path.join(theme_dir, "thumbs")
+        base_real = os.path.realpath(base)
+        path = None
+        # ① 直接按文件名找。含 `:` 的串**不**直接落到文件系统（挡 NTFS 数据流 a.jpg:evil），
+        #    交给 ② 的归一化兜底 —— 原名里的 `:` 常是被清洗过的磁盘名留下的，仍可匹配。
+        if ":" not in fname and fname not in (".", ".."):
+            cand = os.path.realpath(os.path.join(base, fname))
+            if _is_within(cand, base_real) and os.path.isfile(cand):
+                path = cand
+        if path is None:
+            # ② 兜底：磁盘文件名可能被清洗过（去掉 . : ' ! / & – 等特殊字符），
+            #    按归一化名再匹配一次，避免预览图 404。real 取自 listdir，天然是本目录内真名。
+            real = _thumb_index(os.path.basename(theme_dir)).get(stem_key)
+            if real:
+                cand = os.path.join(base_real, real)
+                if _is_within(os.path.realpath(cand), base_real) and os.path.isfile(cand):
+                    path = cand
+        if path is None:
+            return _web.Response(status=404)
         return _web.FileResponse(path)
 
     # 本地化画廊：浏览器图标目标。
@@ -333,8 +423,10 @@ try:
     # （无 show_index 且不自动回退 index.html），改为显式回 index.html。
     # 画廊 index.html 为自包含单文件（CSS/JS 全内联），无需额外托管静态资源。
     def _gallery_index(request):
-        theme = request.match_info.get("theme", "")
-        idx = os.path.join(STYLE_ROOT, theme, "gallery", "index.html")
+        theme_dir = _resolve_theme(request.match_info.get("theme", ""))
+        if theme_dir is None:
+            return _web.Response(status=404, text="theme not found")
+        idx = os.path.join(theme_dir, "gallery", "index.html")
         if not os.path.isfile(idx):
             return _web.Response(status=404, text="gallery index.html not found")
         return _web.FileResponse(idx)
