@@ -7,11 +7,19 @@
 
 ---
 
-## [未发布] - 2026-09-19
+## [1.7.6] - 2026-09-19
 
 ### 🐛 Bug 修复
 
 #### 风格选择节点 · HTTP 路由路径穿越加固
+
+> **来源与复核**：GitHub PR #5（自动安全扫描机器人 OrbisAI 提交）。复核后确认——**风险真实存在，
+> 但报告点名的位置（`_save_user_config` 里临时文件 `tmp` 的那一行）是误报**：该路径由模块常量拼出，
+> POST 请求体只影响写入的 JSON 内容（仅接受 `favorites` / `order` 两个键），路径不可控；补丁在该处
+> 加的 `startswith` 守卫恒为真，不解决任何问题。真正的问题在下面这三条 `{theme}` 路由。
+> **处置**：未合并该 PR，按同一思路自行修复，并顺带修掉原补丁的两处副作用（每次请求都 `os.listdir`
+> 的重复 IO；白名单口径绑 `styles.json` 会导致只有 gallery/thumbs 的主题被误拒 404）。
+
 - 三条含动态段的接口（`/josia_style/{theme}/styles`、`/josia_style/{theme}/thumb`、`/josia_style/{theme}/gallery`）此前只做字符串前缀校验，挡不住构造过的 `theme`：
   - aiohttp 匹配路由时**保留 `%2F` 编码**、匹配之后才解码，于是 `..%2F..%2F` 能把路径分隔符塞进单个「路径段」；
   - `os.path.join()` 遇到绝对路径（如 `C:\...`）会**直接丢弃已有前缀**，前缀校验形同虚设。
@@ -25,6 +33,7 @@
 #### 文件更名：与全包命名惯例统一
 - `josia_style.py` → **`style_select.py`**；前端 `web/js/josia_style.js` → **`web/js/style_select.js`**（全包节点文件统一为「不加 josia 前缀 + 全小写 + 下划线分词」）。
 - 节点英文标识 `JosiaStyleSelect`、中文显示名、HTTP 路由前缀 `/josia_style/...` **均未改动**——已有工作流与 `Style/` 下自定义主题文件夹里的画廊页都无需调整。
+- 路由**刻意不跟随文件名**：全包接口本就统一使用 `josia_` 前缀而非文件名直译（`multi_image_loader.py` → `/josia_multi_image/...`、`checkpoint_plus.py` → `/josia/detect_model_type`、`text_save.py` → `/josia_text_save/...`）。路由属**对外契约**，改名会波及用户自行复制的主题画廊页与浏览器书签，收益仅为字面美观，故保持 `/josia_style/...` 不变。
 - 前端内部 DOM 控件类型名与滚动位置缓存键同步改为 `style_select_*`（滚动位置属临时界面状态，重置无影响）。
 
 ---
