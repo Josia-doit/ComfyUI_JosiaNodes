@@ -56,12 +56,11 @@ ComfyUI_JosiaNodes/
 6. [Josia图像对比（JosiaImageComparer）](#6-josia图像对比josiaimagecomparer)
 7. [Josia流量阀门（JosiaFlowValve）](#7-josia流量阀门josiaflowvalve)
 8. [Josia随机种子（JosiaSeed）](#8-josia随机种子josiaseed)
-9. [Josia多组控制 / 单组控制（JosiaGroupControllerM / JosiaGroupControllerS）](#9-josia多组控制--单组控制josiagroupcontrollerm--josiagroupcontrollers)
+9. [Josia多组控制 / 单组控制 / 分组控制（JosiaGroupControllerM / JosiaGroupControllerS / JosiaGroupControllerG）](#9-josia多组控制--单组控制--分组控制josiagroupcontrollerm--josiagroupcontrollers--josiagroupcontrollerg)
 10. [JosiaLoRA堆叠（JosiaLoraStack）](#10-josialora堆叠josialorastack)
 11. [Josia缓存清理（JosiaCacheCleanup）](#11-josia缓存清理josiacachecleanup)
 12. [Josia模型加载（JosiaCheckpointPlus）](#12-josia模型加载josiacheckpointplus)
-13. [Josia分组控制（JosiaGroupControllerG）](#13-josia分组控制josiagroupcontrollerg)
-14. [Josia风格选择（JosiaStyleSelect）](#14-josia风格选择josiastylechange)
+13. [Josia风格选择（JosiaStyleSelect）](#13-josia风格选择josiastyleselect)
 
 **画布 / 列表增强功能（非节点，在设置面板中启用）**：[🎨 Josia编组增强](#-josia编组增强画布增强功能)　|　[🎨 Josia模型列表增强](#-josia模型列表增强子文件夹着色下拉已选项高亮)
 
@@ -270,15 +269,24 @@ ComfyUI_JosiaNodes/
 
 ---
 
-### 9. Josia多组控制 / 单组控制（JosiaGroupControllerM / JosiaGroupControllerS）
+### 9. Josia多组控制 / 单组控制 / 分组控制（JosiaGroupControllerM / JosiaGroupControllerS / JosiaGroupControllerG）
 - **分类**：⚡️JosiaNodes
 - **多组控制（Josia多组控制）**：自动扫描工作流中所有编组，逐组列出开关，一键全部跳过/启用，点击组名快速定位，激活"单选模式"可启用互斥激活
 - **单组控制（Josia单组控制）**：下拉选择编组，单个开关精准控制启用/跳过
+- **分组控制（Josia分组控制）**：把多个编组自由组合到同一个节点里，按需一键跳过 / 启用，支持**按编组颜色批量添加**
+  - **顶部控制条**：
+    - **数量**：显示当前已添加的编组槽位数
+    - **− / +**：增减编组槽位（**1 ~ 20** 个）；减少时隐藏的槽位保留原有设置，加回来时原样显示
+    - **颜色匹配**：按编组颜色一次性把该颜色下的所有编组加入列表
+    - **单选模式**：仅在本节点选中的编组之间互斥（启用其中一个，其余自动跳过）
+  - **编组行**：每行一个下拉框选择目标编组（已被选中的不会重复出现）+ 启用/跳过开关
+  - **颜色筛选支持**：无色 / 红色 / 棕色 / 绿色 / 蓝色 / 淡蓝色 / 青色 / 紫色 / 黄色 / 黑色
+    - 对齐 ComfyUI 原生编组颜色选项，下拉按原生顺序排列，不再出现同色多组只显示一项的问题
 - **状态显示**：
   - 绿色：已启用
   - 红色：已跳过
   - 橙色：部分跳过
-- **特点**：纯前端交互、不占算力、支持右键菜单、状态随工作流保存
+- **特点**：纯前端交互、不占算力、支持右键菜单；选中的编组信息随工作流保存，重新打开自动恢复
 <img width="652" height="757" alt="image" src="https://github.com/user-attachments/assets/dcc74c21-55d5-4c2c-9adf-ef447583df19" />
 
 ---
@@ -361,22 +369,7 @@ ComfyUI_JosiaNodes/
 
 ---
 
-### 13. Josia分组控制（JosiaGroupControllerG）
-- **分类**：⚡️JosiaNodes
-- **核心功能**：把多个编组自由组合到同一个节点里，按需一键跳过 / 启用，支持**按编组颜色批量添加**
-- **顶部控制条**：
-  - **数量**：显示当前已添加的编组槽位数
-  - **− / +**：增减编组槽位（**1 ~ 20** 个）；减少时隐藏的槽位保留原有设置，加回来时原样显示
-  - **颜色匹配**：按编组颜色一次性把该颜色下的所有编组加入列表
-  - **单选模式**：仅在本节点选中的编组之间互斥（启用其中一个，其余自动跳过）
-- **编组行**：每行一个下拉框选择目标编组（已被选中的不会重复出现）+ 启用/跳过开关
-- **颜色筛选支持**：无色 / 红色 / 棕色 / 绿色 / 蓝色 / 淡蓝色 / 青色 / 紫色 / 黄色 / 黑色
-  - 对齐 ComfyUI 原生编组颜色选项，下拉按原生顺序排列，不再出现同色多组只显示一项的问题
-- **特点**：纯前端交互、不占算力；选中的编组信息随工作流保存，重新打开自动恢复
-
----
-
-### 14. Josia风格选择（JosiaStyleSelect）
+### 13. Josia风格选择（JosiaStyleSelect）
 - **分类**：⚡️JosiaNodes
 - **核心功能**：内置 Krea2 风格库，平替文生图工作流的 CLIP 文本编码器，把选中的风格提示词与你的提示词拼合后输出正向条件
 - **输入**：CLIP、用户提示词（多行文本）
