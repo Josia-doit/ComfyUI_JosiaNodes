@@ -16,6 +16,12 @@ import comfy.model_management
 
 from node_properties import CHECKPOINT_PLUS_DESCRIPTION
 
+try:
+    # 跨节点模型共享注册表（本包内模块）。缺失/异常时仅降级为「不共享」，不影响加载。
+    from model_registry import publish as _publish_vae
+except Exception:          # pragma: no cover
+    _publish_vae = None
+
 # ========================== 常量 ==========================
 
 CATEGORY = "⚡️JosiaNodes"
@@ -654,6 +660,18 @@ class JosiaCheckpointPlus:
             "gguf_quant": [gguf_quant],
             "clip_type": [clip_type],
         }
+        # ── 登记到跨节点共享注册表 ──
+        # 让「Josia媒体保存」等下游节点能**不连线**直接引用这里载入的 VAE / VAE2。
+        # 登记失败绝不影响加载本身，所以整段吞异常。
+        if _publish_vae is not None:
+            try:
+                _label1 = vae_name if (vae_name and vae_name != PLACEHOLDER_VAE) else main_model
+                _label2 = vae2_name if (vae2_name and vae2_name != PLACEHOLDER_VAE2) else ""
+                _publish_vae(vae=vae_obj, vae2=vae2_obj,
+                             label1=_label1, label2=_label2, source=main_model)
+            except Exception as _e:
+                print(f"[JosiaCheckpointPlus] ⚠️ 模型共享登记失败（不影响本次加载）：{_e}")
+
         return {"ui": ui_state, "result": (model_obj, clip_obj, vae_obj, vae2_obj)}
 
     def _precheck_aio(self, model_name: str) -> bool:

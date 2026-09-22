@@ -14,6 +14,181 @@ function imageDataToUrl(data) {
 }
 
 /* ============================================================================
+ * 胶囊控件（与 media_save 同款样式：统一高度 + 圆头胶囊 + thumb 实测定位）
+ * ----------------------------------------------------------------------------
+ * 只做「展示 + 点选」，状态落 node.properties（与原有 comparer_mode 一致），
+ * 不新增后端参数，避免破坏旧工作流的 widgets_values 顺序。
+ * ========================================================================== */
+const CMP_ROW_H = 22;
+let _cmpStyleInjected = false;
+
+/** 注入胶囊样式（幂等，只注入一次） */
+function cmpInjectStyles() {
+    if (_cmpStyleInjected) return;
+    _cmpStyleInjected = true;
+    const css = `
+.jcmp-row{display:flex;align-items:center;flex-wrap:wrap;gap:8px;box-sizing:border-box;}
+.jcmp-capsule{height:${CMP_ROW_H}px;box-sizing:border-box;
+  border:1px solid var(--border-default,rgba(128,128,128,.5));
+  background:var(--base-background,rgba(20,20,22,.92));
+  color:var(--base-foreground,inherit);font-size:11px;
+  border-radius:999px;display:inline-flex;align-items:center;padding:3px;gap:0;flex:0 0 auto;}
+.jcmp-cap-track{position:relative;display:inline-flex;align-items:center;}
+.jcmp-cap-thumb{position:absolute;top:0;left:0;height:100%;border-radius:999px;
+  background:var(--primary-background,#3d6ea8);transition:transform .14s ease,width .14s ease;pointer-events:none;}
+.jcmp-cap-item{position:relative;z-index:1;padding:0 10px;height:16px;line-height:16px;font-size:10px;
+  cursor:pointer;white-space:nowrap;opacity:.72;user-select:none;}
+.jcmp-cap-item.on{opacity:1;font-weight:600;color:#fff;}
+/* 数字输入（混合度：内联灰标签 + 上下步进箭头，与 media_save 同款） */
+.jcmp-numwrap{height:${CMP_ROW_H}px;box-sizing:border-box;
+  border:1px solid var(--border-default,rgba(128,128,128,.5));
+  background:var(--base-background,rgba(20,20,22,.92));
+  color:var(--base-foreground,inherit);font-size:11px;
+  border-radius:999px;display:inline-flex;align-items:center;overflow:hidden;flex:0 0 auto;}
+.jcmp-in-lab{flex:0 0 auto;opacity:.55;font-size:10px;padding:0 4px 0 8px;white-space:nowrap;user-select:none;}
+.jcmp-numwrap input{border:none;background:transparent;color:inherit;font:inherit;text-align:right;
+  width:34px;padding:0 2px;outline:none;-moz-appearance:textfield;appearance:textfield;}
+.jcmp-numwrap input::-webkit-outer-spin-button,
+.jcmp-numwrap input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0;display:none;}
+.jcmp-num-step{flex:0 0 auto;width:14px;border:none;background:transparent;color:inherit;cursor:pointer;
+  font-size:9px;opacity:.6;padding:0;}
+.jcmp-num-step:hover{opacity:1;}
+`;
+    const st = document.createElement("style");
+    st.textContent = css;
+    document.head.appendChild(st);
+}
+
+/**
+ * 数字输入（纯 UI 状态，不绑后端 widget）：手动输入 + 滚轮 + 上下箭头，步进取整。
+ * 🔴 步进结果必须钳回 [min,max]（media_save 质量框踩过「100 上推到 105」的坑）。
+ */
+function cmpMkNumber(getValue, onChange, { label, step = 5, min = 0, max = 100 } = {}) {
+    const wrap = document.createElement("div");
+    wrap.className = "jcmp-numwrap";
+    if (label) {
+        const s = document.createElement("span");
+        s.className = "jcmp-in-lab";
+        s.textContent = label;
+        wrap.appendChild(s);
+    }
+    const inp = document.createElement("input");
+    inp.type = "number";
+    inp.min = min;
+    inp.max = max;
+    inp.value = getValue();
+
+    const clamp = (v) => Math.max(min, Math.min(max, v));
+    const commit = (snap) => {
+        let v = parseFloat(inp.value);
+        if (!isFinite(v)) v = min;
+        if (snap) v = Math.round(v / step) * step;
+        v = clamp(v);
+        inp.value = v;
+        onChange(v);
+    };
+    const stepBy = (dir) => {
+        let v = parseFloat(inp.value);
+        if (!isFinite(v)) v = Number(getValue()) || min;
+        v = clamp(v);
+        // 向上取整到下一个 step 倍数、向下取整到上一个 → 28→上30下25再±step
+        if (dir > 0) v = (v % step === 0) ? v + step : Math.ceil(v / step) * step;
+        else v = (v % step === 0) ? v - step : Math.floor(v / step) * step;
+        v = clamp(v); // 🔴 步进结果钳回范围内
+        inp.value = v;
+        onChange(v);
+    };
+
+    inp.addEventListener("change", () => commit(false));
+    inp.addEventListener("blur", () => commit(false));
+    inp.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") commit(false);
+        else if (e.key === "ArrowUp") { e.preventDefault(); stepBy(1); }
+        else if (e.key === "ArrowDown") { e.preventDefault(); stepBy(-1); }
+    });
+    // 滚轮调数值，别把事件漏给画布缩放
+    inp.addEventListener("wheel", (e) => {
+        e.preventDefault(); e.stopPropagation();
+        stepBy(e.deltaY < 0 ? 1 : -1);
+    }, { passive: false });
+
+    const up = document.createElement("button");
+    up.type = "button"; up.className = "jcmp-num-step"; up.textContent = "▲";
+    const dn = document.createElement("button");
+    dn.type = "button"; dn.className = "jcmp-num-step"; dn.textContent = "▼";
+    up.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); stepBy(1); });
+    dn.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); stepBy(-1); });
+
+    wrap.appendChild(inp);
+    wrap.appendChild(up);
+    wrap.appendChild(dn);
+    wrap._input = inp;
+    return wrap;
+}
+
+/**
+ * 胶囊：多项互斥选择。
+ * thumb 用单元格实测几何定位（offsetLeft / offsetWidth 元素坐标系）—— 直接用
+ * 百分比 translateX(idx*100%) 会让最后一项的色块贴到容器边缘（media_save 踩过的坑）；
+ * 用 rect（屏幕像素）则会被画布 transform 缩放再乘一次，色块过宽甚至跑出胶囊。
+ * 🔴 同心圆等距：thumb 填满 track（top:0/height:100%），四向留白全部由胶囊 padding
+ * 统一提供（3px）—— 若 thumb 自己再 inset（如 top:2px），垂直间距就是 padding+inset，
+ * 会大于水平间距，色块看起来「上下松、左右贴边」。
+ */
+function cmpMkCapsule(items, getValue, onPick) {
+    const box = document.createElement("div");
+    box.className = "jcmp-capsule";
+    const track = document.createElement("div");
+    track.className = "jcmp-cap-track";
+    const thumb = document.createElement("div");
+    thumb.className = "jcmp-cap-thumb";
+    track.appendChild(thumb);
+    const cells = [];
+    for (const it of items) {
+        const s = document.createElement("span");
+        s.className = "jcmp-cap-item";
+        s.textContent = it.label;
+        s.title = it.tip || it.label;
+        s.addEventListener("click", (e) => {
+            e.stopPropagation();
+            onPick(it.value);
+            sync();
+        });
+        track.appendChild(s);
+        cells.push(s);
+    }
+    box.appendChild(track);
+
+    function sync() {
+        const v = getValue();
+        let idx = items.findIndex((it) => String(it.value) === String(v));
+        if (idx < 0) idx = 0;
+        const cell = cells[idx];
+        // 🔴 必须用 offsetLeft / offsetWidth（元素坐标系），绝不能用 getBoundingClientRect。
+        // 原因：DOM widget 容器带 transform/zoom（ComfyUI 用 useAbsolutePosition+transform 定位），
+        // rect 量到的是「屏幕像素」= 元素尺寸 × 画布缩放；把它写进 thumb.style.width / translateX
+        // 会被再乘一次缩放 ⇒ 色块过宽、切换时整块跑出胶囊外（实测色块≈2 个单元格宽）。
+        const x = cell.offsetLeft;
+        const w = cell.offsetWidth;
+        if (w > 0) {
+            thumb.style.transform = `translateX(${x}px)`;
+            thumb.style.width = `${w}px`;
+        }        cells.forEach((c, i) => c.classList.toggle("on", i === idx));
+    }
+
+    // 字体加载完成 / 容器尺寸变化后重新量一次，避免首帧量到旧布局
+    try {
+        if (document.fonts && document.fonts.ready && document.fonts.ready.then) {
+            document.fonts.ready.then(() => sync()).catch(() => {});
+        }
+        const ro = new ResizeObserver(() => sync());
+        ro.observe(track);
+    } catch (e) { /* 老环境无 ResizeObserver 时忽略 */ }
+
+    return { el: box, sync };
+}
+
+/* ============================================================================
  * 渲染结果留存（撤销 / 切换工作流 / 刷新页面后不丢失）
  * ----------------------------------------------------------------------------
  * 对比图由后端 PreviewImage.save_images 写入 ComfyUI 的 temp 目录，只要服务进程
@@ -87,6 +262,8 @@ class JosiaImageComparerNode {
         this.isPointerOver = false; // 鼠标是否悬停在节点上
         this.pointerPos = [0, 0]; // 鼠标位置
         this.comparerMode = "Slide"; // 默认对比模式：滑动
+        this.fitMode = "默认"; // 显示适配方式：默认 / 等宽 / 等高
+        this.blend = 0; // 混合度：上层图像B叠加在A上的不透明度（0=关闭；与滑动/点击对比共存，不替代）
 
         this.initProperties(); // 初始化节点属性
         this.setupEvents(); // 绑定鼠标事件
@@ -256,34 +433,95 @@ class JosiaImageComparerNode {
         });
     }
 
-    // 添加模式切换开关
+    /**
+     * 添加对比模式 + 适配方式胶囊（替代原生的 toggle widget，与 media_save 同款样式）
+     * 状态仍落 node.properties（对齐原有的 comparer_mode），不新增后端参数。
+     */
     addModeToggle() {
-        const toggle = this.node.addWidget(
-            "toggle",
-            "切换模式",
-            this.comparerMode === "Click",
-            (value) => {
-                this.comparerMode = value ? "Click" : "Slide";
-                // 同步保存到节点属性，确保工作流保存/加载后状态一致
-                this.node.properties.comparer_mode = this.comparerMode;
-                this.node.setDirtyCanvas(true, false);
-            },
-            {
-                on: "🖱️ 点击对比（按住鼠标切换图像）",
-                off: "↔️ 滑动对比（鼠标滑动分割图像）"
+        cmpInjectStyles();
+        const node = this.node;
+        const root = document.createElement("div");
+        root.className = "jcmp-row";
+
+        // 胶囊一：对比模式（左 滑动对比 / 右 点击对比，默认滑动）
+        const capMode = cmpMkCapsule(
+            [
+                { value: "Slide", label: "滑动对比", tip: "鼠标在图像上移动时出现分界线（左A右B）" },
+                { value: "Click", label: "点击对比", tip: "按住鼠标显示图像B，松开恢复图像A" }
+            ],
+            () => this.comparerMode,
+            (v) => {
+                this.comparerMode = v;
+                node.properties.comparer_mode = v;
+                node.setDirtyCanvas(true, false);
             }
         );
+        root.appendChild(capMode.el);
 
-        // 适配开关宽度
-        toggle.computeSize = () => [this.node.size[0] - 24, 28];
+        // 胶囊二：适配方式（默认 / 等宽 / 等高，默认选中「默认」）
+        const capFit = cmpMkCapsule(
+            [
+                { value: "默认", label: "默认", tip: "每张图各自以完整可见的最大比例适配显示区（横图吃满宽度、竖图吃满高度）" },
+                { value: "等宽", label: "等宽", tip: "两图宽度相同，高度按各自宽高比" },
+                { value: "等高", label: "等高", tip: "以A为基准填满可用区，B缩放到与A同高（B更宽时超出部分被裁剪）" }
+            ],
+            () => this.fitMode,
+            (v) => {
+                this.fitMode = v;
+                node.properties.comparer_fit = v;
+                node.setDirtyCanvas(true, false);
+            }
+        );
+        root.appendChild(capFit.el);
 
-        // 开关提示文本（与最新文本一致）
-        toggle.tooltip =
-            "↔️ 滑动对比：鼠标在图像上移动时出现分界线（左A右B）\n" +
-            "🖱️ 点击对比：按住鼠标显示图像B，松开恢复图像A";
+        // 数字输入：混合 —— 上层图像B的不透明度（0=关闭；>0 时把B叠在A上，替代滑动/点击）
+        const numBlend = cmpMkNumber(
+            () => this.blend,
+            (v) => {
+                this.blend = v;
+                node.properties.comparer_blend = v;
+                node.setDirtyCanvas(true, false); // 实时重绘，无需重新执行节点
+            },
+            { label: "混合", step: 5, min: 0, max: 100 }
+        );
+        numBlend.title =
+            "混合：上层图像B以该不透明度叠在A上（0=关闭，100=完全覆盖）。\n" +
+            "大于 0 时替代滑动/点击对比；改动实时生效，无需重新执行节点。";
+        root.appendChild(numBlend);
+        this.numBlend = numBlend;
 
-        // 保存开关引用，用于加载工作流时同步状态
-        this.modeToggle = toggle;
+        // 面板上滚滚轮时把事件转交给画布，避免自定义 UI 吃掉画布缩放
+        root.addEventListener("wheel", (e) => {
+            e.preventDefault();
+            const c = app.canvas;
+            if (!c) return;
+            const handler = c.onMouseWheel || c.processMouseWheel || c._on_mouse_wheel;
+            if (handler) {
+                try { handler.call(c, e); } catch (err) {}
+            }
+        }, { passive: false });
+
+        // serialize:false —— 纯 UI 状态不进工作流 JSON（图像对比的输出才是真正的数据）
+        const domWidget = node.addDOMWidget("comparer_ui", "JOSIA_COMPARER_UI", root, { serialize: false });
+        domWidget.computeSize = () => [Math.max(0, node.size[0] - 24), CMP_ROW_H + 6];
+
+        // 保存引用，供加载工作流 / setProperty 时同步胶囊高亮
+        this.capMode = capMode;
+        this.capFit = capFit;
+        // 布局完成后才有真实尺寸 → 此刻才能正确定位色块。
+        // 多补几帧 + 延时：DOM widget 挂载 / 字体 / 节点尺寸都可能晚于首帧。
+        const syncCaps = () => {
+            try { capMode.sync(); capFit.sync(); } catch (e) {}
+        };
+        requestAnimationFrame(syncCaps);
+        [0, 60, 300].forEach((ms) => setTimeout(syncCaps, ms));
+
+        // 节点缩放后单元格尺寸变，重新量
+        const origResize = node.onResize;
+        node.onResize = function () {
+            try { origResize?.apply(this, arguments); } catch (e) {}
+            syncCaps();
+        };
     }
 
     // 初始化节点属性（兼容旧版数据）
@@ -291,7 +529,11 @@ class JosiaImageComparerNode {
         const node = this.node;
         if (!node.properties) node.properties = {};
         if (!node.properties.comparer_mode) node.properties.comparer_mode = "Slide";
+        if (!node.properties.comparer_fit) node.properties.comparer_fit = "默认";
+        if (node.properties.comparer_blend == null) node.properties.comparer_blend = 0;
         this.comparerMode = node.properties.comparer_mode;
+        this.fitMode = node.properties.comparer_fit;
+        this.blend = Number(node.properties.comparer_blend) || 0;
 
         // 重写setProperty方法，监听模式变化并同步开关状态
         const originalSetProperty = node.setProperty;
@@ -299,10 +541,16 @@ class JosiaImageComparerNode {
             originalSetProperty.call(node, name, value);
             if (name === "comparer_mode") {
                 this.comparerMode = value;
-                // 同步开关部件的状态，修复加载工作流时状态不一致的问题
-                if (this.modeToggle) {
-                    this.modeToggle.value = (value === "Click");
-                }
+                // 同步胶囊高亮，修复加载工作流时状态不一致的问题
+                try { this.capMode?.sync(); } catch (e) {}
+                node.setDirtyCanvas(true, false);
+            } else if (name === "comparer_fit") {
+                this.fitMode = value;
+                try { this.capFit?.sync(); } catch (e) {}
+                node.setDirtyCanvas(true, false);
+            } else if (name === "comparer_blend") {
+                this.blend = Math.max(0, Math.min(100, Number(value) || 0));
+                if (this.numBlend?._input) this.numBlend._input.value = this.blend;
                 node.setDirtyCanvas(true, false);
             }
         };
@@ -324,8 +572,13 @@ class JosiaImageComparerNode {
             }
         };
 
-        // 清空额外菜单（避免冲突）
-        node.getExtraMenuOptions = null;
+        // 🔴 不要再把 getExtraMenuOptions 置 null。
+        // 官方 litegraphService 会给每个节点类型的 prototype 挂上 getExtraMenuOptions
+        // （用于「打开图像 / 复制图像 / 保存图像」），第三方扩展也常在这条链上追加菜单项。
+        // 置 null 会掐断整条链：部分前端/扩展在拿到 null 后直接降级，右键菜单就只剩
+        // 「Save to system clipboard」一项且样式回退成旧版 litegraph 菜单。
+        // 对比节点的 A/B 图存在 Comparer 实例里（不是 node.imgs），本来就不会触发那些图像项，
+        // 所以这里什么都不做即可与其它节点完全一致。
     }
 
     // 节点执行完成后加载图像
@@ -390,52 +643,81 @@ class JosiaImageComparerNode {
         const imgA = this.imgs[0];
         const imgB = this.imgs[1] || imgA;
 
-        // 计算图像A的适配宽度（保持宽高比）
-        const imgAAspect = imgA.naturalWidth / imgA.naturalHeight;
-        let sharedW = w, drawHA = w / imgAAspect;
-        if (drawHA > h) { drawHA = h; sharedW = h * imgAAspect; }
+        // ---- 按「适配方式」计算绘制尺寸（切换后立刻重算 → 实时切换显示，无需重新跑图）----
+        const aAspect = imgA.naturalWidth / imgA.naturalHeight;
+        const bAspect = imgB.naturalWidth / imgB.naturalHeight;
+        const fit = this.fitMode || "默认";
 
-        // 图像B使用与图像A相同的宽度，高度按自身宽高比自适应
-        const imgBAspect = imgB.naturalWidth / imgB.naturalHeight;
-        let drawHB = sharedW / imgBAspect;
-        // 如果图像B高度超出显示区，则以容纳两者为准缩小宽度
-        if (drawHB > h) {
-            sharedW = h * imgBAspect;
-            drawHA = sharedW / imgAAspect;
-            drawHB = h;
+        let drawWA, drawHA, drawWB, drawHB;
+        if (fit === "等宽") {
+            // 等宽：两图宽度相同，高度按各自宽高比（都保证不超出显示区）
+            let sharedW = Math.min(w, h * aAspect, h * bAspect);
+            sharedW = Math.max(1, sharedW);
+            drawWA = drawWB = sharedW;
+            drawHA = sharedW / aAspect;
+            drawHB = sharedW / bAspect;
+        } else if (fit === "等高") {
+            // 等高：以 A 为基准填满可用区，B 缩放到与 A 同高（B 更宽时超出部分由显示区裁剪）
+            let ha = h, wa = h * aAspect;
+            if (wa > w) { wa = w; ha = w / aAspect; }
+            drawHA = drawHB = ha;
+            drawWA = wa;
+            drawWB = ha * bAspect;
+        } else {
+            // 默认：每张图**各自**以「完整可见的最大比例」适配显示区（独立 contain）——
+            // 横版图吃满宽度、竖版图吃满高度，互不拖累，各自居中。
+            const sa = Math.min(w / imgA.naturalWidth, h / imgA.naturalHeight) || 1;
+            const sb = Math.min(w / imgB.naturalWidth, h / imgB.naturalHeight) || 1;
+            drawWA = Math.max(1, imgA.naturalWidth * sa);
+            drawHA = Math.max(1, imgA.naturalHeight * sa);
+            drawWB = Math.max(1, imgB.naturalWidth * sb);
+            drawHB = Math.max(1, imgB.naturalHeight * sb);
         }
 
-        // 两图宽度一致，水平位置相同；垂直各自居中
-        const drawW = sharedW;
-        const offsetXA = x + (w - drawW) / 2;
+        // 垂直统一（同高时必然一致），水平各自居中（宽度可能不同）
         const offsetYA = y + (h - drawHA) / 2;
-        const offsetXB = offsetXA; // 与A水平对齐
         const offsetYB = y + (h - drawHB) / 2;
+        const offsetXA = x + (w - drawWA) / 2;
+        const offsetXB = x + (w - drawWB) / 2;
 
-        // Click模式：按住显示B图，松开显示A图
+        // 限制在显示区内绘制（「等高」模式下 B 可能更宽，避免画到节点外）
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(x, y, w, h);
+        ctx.clip();
+
+        // 混合层（常驻）：先画 A，再把 B 以 blend 不透明度叠在 A 上作为底层预览。
+        // 🔴 它永远不替代滑动/点击对比——只是叠加预览，滑动/点击时由下方清晰对比层覆盖。
+        const blend = Math.max(0, Math.min(100, Number(this.blend) || 0));
+        ctx.drawImage(imgA, offsetXA, offsetYA, drawWA, drawHA);
+        if (blend > 0 && imgB.complete) {
+            ctx.save();
+            ctx.globalAlpha = blend / 100;
+            ctx.drawImage(imgB, offsetXB, offsetYB, drawWB, drawHB);
+            ctx.restore();
+        }
+
+        // Click模式：按住显示清晰B图（覆盖在混合层之上），松开恢复 A（混合层仍在）
         if (this.comparerMode === "Click") {
             const isDown = this.node.mouse_down || app.canvas.pointer_is_down || false;
             if (isDown && imgB.complete) {
-                ctx.drawImage(imgB, offsetXB, offsetYB, drawW, drawHB);
-            } else {
-                ctx.drawImage(imgA, offsetXA, offsetYA, drawW, drawHA);
+                ctx.drawImage(imgB, offsetXB, offsetYB, drawWB, drawHB);
             }
+            ctx.restore(); // 配平显示区裁剪
             return;
         }
 
-        // Slide模式：默认显示A图，鼠标位置右侧显示B图
-        ctx.drawImage(imgA, offsetXA, offsetYA, drawW, drawHA);
-
+        // Slide模式：默认显示 A（含混合层），鼠标位置右侧显示清晰 B 图
         if (this.isPointerOver && imgB.complete) {
-            // 分界线位置（两图宽度一致，直接用同一坐标裁剪）
-            let dividerX = Math.max(offsetXA, Math.min(offsetXA + drawW, this.pointerPos[0]));
+            // 分界线位置（基于B图自身区域裁剪；两图同高，纵向范围一致）
+            let dividerX = Math.max(offsetXB, Math.min(offsetXB + drawWB, this.pointerPos[0]));
 
             // 绘制B图（仅分界线右侧）
             ctx.save();
             ctx.beginPath();
-            ctx.rect(dividerX, offsetYB, offsetXA + drawW - dividerX, drawHB);
+            ctx.rect(dividerX, offsetYB, offsetXB + drawWB - dividerX, drawHB);
             ctx.clip();
-            ctx.drawImage(imgB, offsetXB, offsetYB, drawW, drawHB);
+            ctx.drawImage(imgB, offsetXB, offsetYB, drawWB, drawHB);
             ctx.restore();
 
             // 绘制分界线（白色，贯穿两图高度范围）
@@ -444,9 +726,10 @@ class JosiaImageComparerNode {
             ctx.globalCompositeOperation = "difference";
             const lineWidth = 1 / (app.canvas.ds.scale || 1);
             ctx.fillStyle = "#ffffff";
-            ctx.fillRect(dividerX - lineWidth / 2, Math.min(offsetYA, offsetYB), lineWidth, Math.max(drawHA, drawHB));
+            ctx.fillRect(dividerX - lineWidth / 2, offsetYB, lineWidth, drawHB);
             ctx.restore();
         }
+        ctx.restore(); // 配平显示区裁剪
     }
 }
 
@@ -494,9 +777,12 @@ app.registerExtension({
         const comparer = node.josiaComparer;
         const savedMode = node.properties?.comparer_mode || "Slide";
         comparer.comparerMode = savedMode;
-        if (comparer.modeToggle) {
-            comparer.modeToggle.value = (savedMode === "Click");
-        }
+        try { comparer.capMode?.sync(); } catch (e) {}
+        const savedFit = node.properties?.comparer_fit || "默认";
+        comparer.fitMode = savedFit;
+        try { comparer.capFit?.sync(); } catch (e) {}
+        comparer.blend = Math.max(0, Math.min(100, Number(node.properties?.comparer_blend) || 0));
+        if (comparer.numBlend?._input) comparer.numBlend._input.value = comparer.blend;
         // 还原上次渲染结果（撤销 / 切换工作流 / 刷新页面后进入这里）
         comparer.scheduleRestore();
         node.setDirtyCanvas(true, false);

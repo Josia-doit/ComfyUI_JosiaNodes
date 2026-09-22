@@ -120,6 +120,35 @@ function injectStyles() {
     styleInjected = true;
 }
 
+// ═══ 输出端口收缩（模块级，供「原型 onConfigure」与「initNode 内」共用）═══
+// 🔴 为什么放模块级：从工作流载入时，节点类型声明的 51 个输出会先被渲染出来，而我们的收缩
+//    原本挂在 initNode 的异步链上（await node.loaded → rAF → N 次 /info）⇒ 中间约 1 秒里
+//    画面是「50 个图像端口全部涌出来」。onConfigure 是「widget 值已就位、且在图开始绘制前」
+//    的同步时机，**但 initNode 那时还卡在 await** ⇒ 钩子必须挂在原型上才能赶上这一拍。
+//    规则与 initNode 的 updateOutputPorts 一致：目标总数 = 图片数 count + 1（末位是 int 输出）。
+function shrinkOutputsTo(node, count) {
+    try {
+        if (!node || !node.outputs || !node.outputs.length) return false;
+        const target = Math.max(1, count + 1);
+        let changed = false;
+        while (node.outputs.length > target && node.outputs.length > 1) {
+            if (typeof node.removeOutput !== "function") break;
+            node.removeOutput(node.outputs.length - 1);
+            changed = true;
+        }
+        if (changed) node.setDirtyCanvas?.(true, true);
+        return changed;
+    } catch (e) { return false; }
+}
+
+// 已保存的图片路径条数（直接读 widget 值；与 initNode 的 parsePaths 同规则）
+function pathCountOf(node) {
+    try {
+        const w = node && node.widgets && node.widgets.find((x) => x && x.name === "image_paths");
+        return String((w && w.value) || "").split("\n").map((s) => s.trim()).filter(Boolean).length;
+    } catch (e) { return 0; }
+}
+
 app.registerExtension({
     name: "Josia.MultiImageLoader",
 
@@ -143,6 +172,19 @@ app.registerExtension({
                 if (!nodeType.searchKeywords.includes(k)) nodeType.searchKeywords.push(k);
             });
         }
+
+        // 🔴🔴 从工作流恢复时，端口数必须在**这一拍同步收敛**。
+        //    挂在原型上（而不是 initNode 里）是因为 onConfigure 触发时 initNode 还在 await
+        //    node.loaded，那时内部的 onConfigure 覆盖尚未安装 ⇒ 钩子赶不上这一拍。
+        const origProtoConfigure = nodeType.prototype.onConfigure;
+        nodeType.prototype.onConfigure = function (info) {
+            const r = origProtoConfigure ? origProtoConfigure.apply(this, arguments) : undefined;
+            try {
+                const n = pathCountOf(this);
+                if (n > 0) shrinkOutputsTo(this, n);
+            } catch (e) { /* 忽略 */ }
+            return r;
+        };
     },
 });
 
@@ -446,8 +488,32 @@ async function initNode(node) {
             }
         }
         bestS = Math.max(20, Math.floor(bestS));
-        grid.style.gridTemplateColumns = `repeat(${bestCols}, ${bestS}px)`;
-        grid.style.gridAutoRows = `${bestS}px`;
+        const rows = Math.ceil(N / bestCols);
+        // 🔴🔴 加固：格子尺寸不只写「JS 算出的理想值」，而是**再用 CSS 卡一遍**：
+        //    · 列宽 = min( 剩余宽度均分, bestS )
+        //    · 行高 = min( 剩余高度均分, bestS )
+        //    这样即便某次测量拿到的是旧值（启动时节点高度先缩、容器高度后定 ⇒ 缩略图仍按
+        //    上一轮的大尺寸排），浏览器也会把整格缩回容器里，**绝不会出现缩略图超出容器**；
+        //    以前必须拖动节点触发重新测量才恢复，现在 CSS 自身就是兜底。
+        grid.style.gridTemplateColumns =
+            `repeat(${bestCols}, min(calc((100% - ${(bestCols - 1) * gap}px) / ${bestCols}), ${bestS}px))`;
+        grid.style.gridAutoRows =
+            `min(calc((100% - ${(rows - 1) * gap}px) / ${rows}), ${bestS}px)`;
+    }
+
+    // 🔴 网格尺寸自愈：容器/节点尺寸变化后**多补几拍**重新量一次。
+    //    启动时「节点先缩、容器高度后定」的时序里，单次测量很容易量到旧值；
+    //    这里在 rAF + 60/300/800ms 各量一次（幂等：只读尺寸 + 写内联样式，不写 node.size）。
+    function scheduleGridFit() {
+        const fit = () => {
+            try {
+                const w = gridWrapper.clientWidth || gridWrapper.offsetWidth;
+                const h = gridWrapper.clientHeight || gridWrapper.offsetHeight;
+                if (w > 0 && h > 0) optimizeGrid(w, h);
+            } catch (e) { /* 忽略 */ }
+        };
+        requestAnimationFrame(fit);
+        for (const ms of [60, 300, 800]) setTimeout(fit, ms);
     }
 
     // ═══ 渲染图库 ═══
@@ -629,6 +695,11 @@ async function initNode(node) {
         // 1️⃣ 渲染图库（先渲染一次显示 placeholder）
         renderGallery();
 
+        // 1.5️⃣ 🔴🔴 端口数量**只依赖路径条数**，与图片分辨率无关 ⇒ 必须在做 N 次 /info 网络请求
+        //      **之前**就把端口同步好。否则切换工作流时会出现「50 个图像端口先全部涌出来、
+        //      约 1 秒后才缩回实际数量」的抖动（哥哥报的问题 6②）—— 那 1 秒正是在等 /info。
+        const portEarly = updateOutputPorts(imageItems.length);
+
         // 2️⃣ 加载图片信息后重新渲染（带分辨率标签）
         for (const it of imageItems) {
             const info = await loadImageInfo(it.path);
@@ -637,28 +708,21 @@ async function initNode(node) {
         }
         renderGallery();
 
-        // 3️⃣ 同步输出端口（获取 fresh 状态）
-        const portResult = updateOutputPorts(imageItems.length);
+        // 3️⃣ 再校一次端口（补齐信息期间路径可能又变了）；两次结果合并判断是否需要布局
+        const portLate = updateOutputPorts(imageItems.length);
+        const portResult = {
+            changed: portEarly.changed || portLate.changed,
+            wasFresh: portEarly.wasFresh || portLate.wasFresh,
+        };
 
-        // 4️⃣ ★ 对标节点关键：changed || wasFresh 时才触发布局更新
-        //    wasFresh=true 意味着首次从 51 个输出收缩到实际数量 → 需要 force-shrink
-        if (portResult.changed || portResult.wasFresh) {
-            requestAnimationFrame(() => {
-                updateLayout(portResult.wasFresh);
-                if (node.syncLayoutToNode) node.syncLayoutToNode();
-                if (gridWrapper.offsetWidth > 0) {
-                    optimizeGrid(gridWrapper.offsetWidth, gridWrapper.offsetHeight);
-                }
-            });
-        } else {
-            // 端口没变时仍然优化网格
-            requestAnimationFrame(() => {
-                if (node.syncLayoutToNode) node.syncLayoutToNode();
-                if (gridWrapper.offsetWidth > 0) {
-                    optimizeGrid(gridWrapper.offsetWidth, gridWrapper.offsetHeight);
-                }
-            });
-        }
+        // 4️⃣ ★ 对标节点关键：changed || wasFresh 时才触发 force-shrink 布局
+        //    wasFresh=true 意味着首次从 51 个输出收缩到实际数量
+        //    （非 fresh 时 updateLayout 内部只做「不低于最小值」的保底，不会把用户拉大的高度收掉）
+        requestAnimationFrame(() => {
+            updateLayout(portResult.wasFresh);
+            if (node.syncLayoutToNode) node.syncLayoutToNode();
+            scheduleGridFit();
+        });
         node.setDirtyCanvas(true, true);
     }
 
@@ -694,6 +758,7 @@ async function initNode(node) {
         requestAnimationFrame(() => {
             updateLayout(portResult.wasFresh);
             if (node.syncLayoutToNode) node.syncLayoutToNode();
+            scheduleGridFit();
         });
         node.setDirtyCanvas(true, true);
     }
@@ -858,6 +923,8 @@ async function initNode(node) {
             // 设置图库容器高度
             const availableGalleryHeight = targetH - galleryY - PB;
             container.style.height = availableGalleryHeight + "px";
+            // 容器高度刚变 ⇒ 网格立刻按新高度重排（+ 数拍兜底，见 scheduleGridFit）
+            scheduleGridFit();
         } finally {
             isLayouting = false;
         }
@@ -926,20 +993,25 @@ async function initNode(node) {
         const availableGalleryHeight = size[1] - galleryY - PB;
         container.style.height = availableGalleryHeight + "px";
 
-        // 延迟优化网格（等 DOM layout 稳定）
-        requestAnimationFrame(() => {
-            if (gridWrapper.offsetWidth > 0) {
-                optimizeGrid(gridWrapper.offsetWidth, gridWrapper.offsetHeight);
-            }
-        });
+        // 延迟优化网格（等 DOM layout 稳定）+ 多拍兜底：这正是「拖动节点后缩略图才自适应」的
+        // 那条路径 —— 现在不需要用户拖，尺寸一变就自己重排。
+        scheduleGridFit();
     };
 
     // ★ v6.6: 覆盖 onConfigure — 对标节点模式
+    // 🔴 端口同步已提前到**原型级** onConfigure（见 beforeRegisterNodeDef）：
+    //    从工作流载入时这一拍比 initNode 的 await 更早，才能真正消掉「50 个端口先涌现」的抖动。
+    //    这里只负责后续的布局与网格自愈。
     const origOnConfigure = node.onConfigure;
     node.onConfigure = function(info) {
         const out = origOnConfigure ? origOnConfigure.apply(this, arguments) : undefined;
         setTimeout(() => {
             if (this.syncLayoutToNode) this.syncLayoutToNode();
+            try {
+                const n = pathCountOf(this);
+                if (n > 0) shrinkOutputsTo(this, n);
+            } catch (e) { /* 忽略 */ }
+            scheduleGridFit();
         }, 0);
         return out;
     };
@@ -959,6 +1031,7 @@ async function initNode(node) {
                 if (app.graph) app.graph.setDirtyCanvas(true, true);
             }
             if (this.syncLayoutToNode) this.syncLayoutToNode();
+            scheduleGridFit();
         });
     };
 
@@ -982,9 +1055,7 @@ async function initNode(node) {
     // 窗口大小改变时重算
     window.addEventListener("resize", () => {
         if (node.syncLayoutToNode) node.syncLayoutToNode();
-        if (gridWrapper.offsetWidth > 0) {
-            optimizeGrid(gridWrapper.offsetWidth, gridWrapper.offsetHeight);
-        }
+        scheduleGridFit();
     });
 
     // ═══ 初始化（完全对标节点模式）═══
@@ -999,6 +1070,7 @@ async function initNode(node) {
         // ★ v7.2: 不再搜索 control_after_generate COMBO widget（已废弃该机制）
         if (node.syncLayoutToNode) node.syncLayoutToNode();
         try { refreshImageList(); } catch(e) { renderGallery(); }
+        scheduleGridFit();
     });
 
     // ★ 100ms 保险（对标节点的标准模式）
@@ -1006,5 +1078,6 @@ async function initNode(node) {
         try { refreshImageList(); } catch(e) {}
         if (node.syncLayoutToNode) node.syncLayoutToNode();
         getInputDir().catch(() => {});
+        scheduleGridFit();
     }, 100);
 }

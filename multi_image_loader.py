@@ -184,9 +184,11 @@ def resize_tensor_multi_step(tensor, target_w, target_h, upscale_method,
 def assemble_batch_v6(tensors):
     """
     v6.0: 将多个不同尺寸的 tensor 组装为 batch。
-    每张图已独立等比缩放，尺寸可能不同。
-    batch 需要统一尺寸 → 用黑边 letterbox 到最大画布。
-    注意：混合比例时 image_list 必然有黑边（数学限制），建议用单独端口 image_N。
+    每张图已独立等比缩放，尺寸可能不同 ⇒ batch 必须统一尺寸。
+    🔴 画布以**首图**为准：首图多大 batch 就多大，其余图等比缩放进画布、按需补黑边居中。
+    这样「图像批次 → 合成视频」时视频分辨率＝首图宽高（例：首图竖屏，后面横屏的图上下补黑边）。
+    （旧行为是补到所有图的「最大画布」⇒ 视频变成最大图尺寸，与首图无关。）
+    注意：混合比例时必然有黑边（数学限制），要完全原图请用「图像列表」模式逐张输出。
     """
     if len(tensors) == 0:
         return torch.zeros(1, 64, 64, 3)
@@ -195,25 +197,24 @@ def assemble_batch_v6(tensors):
     if len(set(shapes)) == 1:
         return torch.cat(tensors, dim=0)
 
-    max_h = max(s[0] for s in shapes)
-    max_w = max(s[1] for s in shapes)
+    canvas_h, canvas_w = shapes[0]          # 🔴 首图尺寸＝画布（不是最大图）
 
     aligned = []
     for t in tensors:
         h, w = t.shape[1], t.shape[2]
-        if h == max_h and w == max_w:
+        if h == canvas_h and w == canvas_w:
             aligned.append(t)
         else:
-            # letterbox: 等比缩放到画布内，再 pad 黑边居中
-            ratio = min(max_w / w, max_h / h)
+            # letterbox: 等比缩放进首图画布，再补黑边居中（比画布大的图会被缩到画布内）
+            ratio = min(canvas_w / w, canvas_h / h)
             nw = max(1, int(w * ratio))
             nh = max(1, int(h * ratio))
             samples = t.movedim(-1, 1)
             scaled = comfy.utils.common_upscale(samples, nw, nh, "lanczos", "disabled")
-            pad_left = (max_w - nw) // 2
-            pad_right = max_w - nw - pad_left
-            pad_top = (max_h - nh) // 2
-            pad_bottom = max_h - nh - pad_top
+            pad_left = (canvas_w - nw) // 2
+            pad_right = canvas_w - nw - pad_left
+            pad_top = (canvas_h - nh) // 2
+            pad_bottom = canvas_h - nh - pad_top
             if pad_left > 0 or pad_right > 0 or pad_top > 0 or pad_bottom > 0:
                 scaled = torch.nn.functional.pad(scaled, (pad_left, pad_right, pad_top, pad_bottom), value=0)
             aligned.append(scaled.movedim(1, -1))

@@ -17,6 +17,13 @@ try:  # ComfyUI 运行时环境
 except Exception:  # 脱离 ComfyUI 单独导入时降级
     folder_paths = None
 
+try:
+    # Windows 原生「选择文件夹」对话框（ctypes 调 shell32，进程内调用，零外部进程）。
+    # 不可用时降级为前端内置文件夹浏览器。
+    import native_picker
+except Exception:  # 模块缺失 / 非 Windows 环境
+    native_picker = None
+
 
 # ==================== 通配符解析 ====================
 def sanitize_filename(name):
@@ -262,6 +269,30 @@ try:
         except Exception as e:
             print(f"[JosiaTextSave] 打开文件夹失败: {e}")
             return web.json_response({"ok": False, "error": str(e)})
+
+    @PromptServer.instance.routes.post("/josia_text_save/pick_dir")
+    async def pick_dir(request):
+        """打开 **Windows 原生「选择文件夹」对话框**，返回选中的绝对路径。
+
+        ctypes 直调 shell32 的 IFileOpenDialog —— 进程内调用、**零外部进程**，
+        可随时退回「此电脑」顶层。非 Windows 或调用失败时返回 not_supported，
+        由前端自动退回内置文件夹浏览器。
+        """
+        if native_picker is None or not native_picker.available():
+            return web.json_response({"ok": False, "error": "not_supported"})
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        title = str(body.get("title") or "选择输出目录")
+        initial = str(body.get("initial") or "")
+        try:
+            path = await native_picker.pick_folder_async(title, initial)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)})
+        if not path:
+            return web.json_response({"ok": False, "error": "cancelled"})
+        return web.json_response({"ok": True, "path": path})
 
 except Exception:
     pass
