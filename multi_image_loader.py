@@ -623,11 +623,21 @@ def _resolve_thumbnail_path(raw_path):
     if output_dir != input_dir:
         candidates.append(os.path.join(output_dir, basename))
 
+    # 安全：仅允许解析结果落在 input / output 目录内（CWE-22 路径遍历防护）。
+    # 用 realpath 解析 .. 与符号链接，再以 normcase 做大小写不敏感的前缀校验，
+    # 阻断「绝对路径任意图像读取 / ../ 越界」类攻击面（路由无鉴权，暴露部署时尤甚）。
+    allowed_norm = [
+        os.path.normcase(os.path.realpath(d)) for d in (input_dir, output_dir)
+    ]
     for p in candidates:
-        if os.path.isfile(p):
-            return p, None
+        real_p = os.path.realpath(p)
+        if not os.path.isfile(real_p):
+            continue
+        rp = os.path.normcase(real_p)
+        if any(rp == a or rp.startswith(a + os.sep) for a in allowed_norm):
+            return real_p, None
 
-    return None, f"file not found: tried {candidates[:3]}"
+    return None, f"file not found or outside allowed dirs: tried {candidates[:3]}"
 
 
 # ─── API 路由：缩略图（v4.9 增强：多策略路径 + 占位图）───────────
