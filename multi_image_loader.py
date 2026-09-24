@@ -623,9 +623,13 @@ def _resolve_thumbnail_path(raw_path):
     if output_dir != input_dir:
         candidates.append(os.path.join(output_dir, basename))
 
+    allowed_roots = [os.path.realpath(input_dir), os.path.realpath(output_dir)]
     for p in candidates:
-        if os.path.isfile(p):
-            return p, None
+        real_p = os.path.realpath(p)
+        if os.path.isfile(real_p) and any(
+            real_p == root or real_p.startswith(root + os.sep) for root in allowed_roots
+        ):
+            return real_p, None
 
     return None, f"file not found: tried {candidates[:3]}"
 
