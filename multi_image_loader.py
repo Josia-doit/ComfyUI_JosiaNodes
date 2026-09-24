@@ -12,7 +12,6 @@ import os
 import math
 import torch
 import numpy as np
-import shutil
 from PIL import Image, ImageFile, ImageOps, ImageSequence
 import folder_paths
 import comfy.utils
@@ -699,115 +698,6 @@ async def get_thumbnail(request):
             content_type="image/png",
             status=200,
         )
-
-
-# ─── API 路由：自动拷贝外部图像到 input 目录 ───────────────────
-@PromptServer.instance.routes.post("/josia_multi_image/upload")
-async def upload_to_input(request):
-    """
-    将外部图像文件自动拷贝到 ComfyUI input 目录（参考原生 LoadImage 的行为）。
-
-    请求体: { "paths": ["/absolute/path/to/image1.png", ...] }
-    返回:   {
-        "results": [
-            {"original": "...", "input_path": "...", "status": "ok"|..."copied"|"error", "message": "..."},
-            ...
-        ]
-    }
-
-    规则：
-      - 文件已在 input/ 中 → 直接返回原路径 (status=ok)
-      - 文件在其他位置 → 拷贝到 input/，同名冲突则加序号 (status=copied)
-      - 文件不存在 → 返回错误 (status=error)
-    """
-    try:
-        data = await request.json()
-        raw_paths = data.get("paths", [])
-        if not isinstance(raw_paths, list):
-            raw_paths = [raw_paths]
-
-        input_dir = folder_paths.get_input_directory()
-        results = []
-
-        for raw_path in raw_paths:
-            if not raw_path:
-                results.append({"original": "", "input_path": "", "status": "error", "message": "empty path"})
-                continue
-
-            # 1. 检查是否已在 input 目录中
-            abs_path = os.path.abspath(raw_path) if not os.path.isabs(raw_path) else raw_path
-
-            # 标准化路径（消除 .. 和多余分隔符）
-            try:
-                abs_path = os.path.normpath(abs_path)
-                input_dir_norm = os.path.normpath(input_dir)
-            except Exception:
-                results.append({"original": raw_path, "input_path": "", "status": "error", "message": "invalid path"})
-                continue
-
-            # 判断是否已经在 input 目录下
-            if abs_path.lower().startswith(input_dir_norm.lower()):
-                # 已在 input 中
-                if os.path.isfile(abs_path):
-                    results.append({
-                        "original": raw_path,
-                        "input_path": abs_path,
-                        "status": "ok",
-                        "message": "already in input",
-                    })
-                else:
-                    results.append({"original": raw_path, "input_path": "", "status": "error",
-                                   "message": f"file not found in input: {os.path.basename(abs_path)}"})
-                continue
-
-            # 2. 文件不在 input 中，需要拷贝
-            if not os.path.isfile(abs_path):
-                # 尝试按文件名在 input 中查找（可能之前已拷贝过）
-                basename = os.path.basename(abs_path)
-                candidate = os.path.join(input_dir, basename)
-                if os.path.isfile(candidate):
-                    results.append({
-                        "original": raw_path,
-                        "input_path": candidate,
-                        "status": "ok",
-                        "message": "found in input by name",
-                    })
-                else:
-                    results.append({"original": raw_path, "input_path": "", "status": "error",
-                                   "message": f"source file not found: {raw_path}"})
-                continue
-
-            # 3. 执行拷贝 → input 目录
-            basename = os.path.basename(abs_path)
-            dest_path = os.path.join(input_dir, basename)
-
-            # 处理同名文件：添加 _copy N 后缀
-            if os.path.isfile(dest_path):
-                name, ext = os.path.splitext(basename)
-                counter = 1
-                while os.path.isfile(os.path.join(input_dir, f"{name}_copy{counter}{ext}")):
-                    counter += 1
-                dest_path = os.path.join(input_dir, f"{name}_copy{counter}{ext}")
-
-            try:
-                shutil.copy2(abs_path, dest_path)
-                results.append({
-                    "original": raw_path,
-                    "input_path": dest_path,
-                    "status": "copied",
-                    "message": f"copied to input as {os.path.basename(dest_path)}",
-                })
-            except PermissionError:
-                results.append({"original": raw_path, "input_path": "", "status": "error",
-                               "message": "permission denied when copying"})
-            except Exception as copy_err:
-                results.append({"original": raw_path, "input_path": "", "status": "error",
-                               "message": f"copy failed: {str(copy_err)}"})
-
-        return web.json_response({"results": results})
-    except Exception as e:
-        return web.json_response({"results": [], "error": str(e)}, status=500)
-
 
 # ─── API 路由：批量上传（前端拖拽/粘贴/选择文件时使用）─────────────
 @PromptServer.instance.routes.post("/josia_multi_image/upload_files")
