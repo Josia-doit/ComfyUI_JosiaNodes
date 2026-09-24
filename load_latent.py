@@ -23,6 +23,7 @@ import sys
 import torch
 import folder_paths
 import comfy.utils
+import comfy.nested_tensor as _comfy_nested  # 🔴 AV 混合潜空间重组必须用 ComfyUI 自己的类（见 _rebuild_av）
 
 try:
     import safetensors.torch as _st_torch
@@ -212,6 +213,37 @@ def _read_latent_file(path):
         return torch.load(path, map_location="cpu", weights_only=False)
 
 
+def _rebuild_av(sd):
+    """把「按路拆开保存」的**音视频混合**潜空间重组成 ComfyUI 的 NestedTensor。
+
+    🔴 safetensors 拒收 NestedTensor（实测 torch 2.13 报 “You are trying to save a
+       sparse tensors …”），所以「Josia媒体保存」落盘时把联合 AV 潜空间拆成
+       `latent_av_part_0..N` 存储。这里必须**原样拼回 ComfyUI 自己的
+       `comfy.nested_tensor.NestedTensor`** —— 它只是个包了 `.tensors` 列表的壳，
+       下游（VAEDecode / 音频解码 / nodes_minimax_h3 等）全程靠 `.is_nested` /
+       `.unbind()` / `.tensors` 这套接口。
+
+       🔴 不能用 `torch.nested.nested_tensor(..., layout="jagged")` 替代：真实 AV 潜空间
+       是「视频 5D + 音频 3D（维度数都不同）」，torch 原生构造会直接抛
+       `RuntimeError: all tensors must have the same dim`，被 except 吞掉后静默退回第一路
+       ⇒ 音频路丢失（正好复现了本想修的 bug）。已实测必须用 ComfyUI 这个类。
+    """
+    if not isinstance(sd, dict) or sd.get("josia_av_nested") is None:
+        return None
+    try:
+        count = int(sd["josia_av_count"].item())
+    except Exception:
+        return None
+    parts = [sd.get(f"latent_av_part_{i}") for i in range(count)]
+    if count < 1 or any(p is None for p in parts):
+        return None
+    try:
+        return _comfy_nested.NestedTensor(parts)
+    except Exception as e:
+        print(f"[Josia加载Latent] ⚠️ 音视频混合潜空间重组失败：{e}")
+        return None
+
+
 def _extract_tensor(sd):
     """从读回的字典里取潜空间张量（优先 latent_tensor，其次首个张量/嵌套张量）。"""
     if not isinstance(sd, dict):
@@ -323,7 +355,11 @@ class JosiaLoadLatent:
             except Exception as e:
                 raise ValueError(f"Josia加载Latent：读取「{name}」失败：{e}")
 
-            samples = _extract_tensor(sd)
+            # 🔴 先试恢复「音视频混合」形态：这类文件里没有 latent_tensor 键，
+            #    若直接走 _extract_tensor 会拿到工具性标量张量（josia_av_count）。
+            samples = _rebuild_av(sd)
+            if samples is None:
+                samples = _extract_tensor(sd)
             if samples is None:
                 raise ValueError(f"Josia加载Latent：「{name}」里没有可用的 latent 张量。")
             if torch.is_tensor(samples):
@@ -383,7 +419,9 @@ def _register_routes():
         info = {"ok": True, "name": _safe_name(name), "size": os.path.getsize(path)}
         try:
             sd = _read_latent_file(path)
-            t = _extract_tensor(sd)
+            t = _rebuild_av(sd)
+            if t is None:
+                t = _extract_tensor(sd)
             if getattr(t, "is_nested", False):
                 parts = list(t.unbind())
                 info["kind"] = "音视频混合潜空间"

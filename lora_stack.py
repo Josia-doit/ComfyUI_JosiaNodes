@@ -93,14 +93,14 @@ class JosiaLoraStack:
             })
             required[f"strength_model_{i}"] = ("FLOAT", {
                 "default": 0.8,
-                "min": -10.0,
-                "max": 10.0,
+                "min": -20.0,
+                "max": 20.0,
                 "step": 0.01,
             })
             required[f"strength_clip_{i}"] = ("FLOAT", {
                 "default": 0.0,
-                "min": -10.0,
-                "max": 10.0,
+                "min": -20.0,
+                "max": 20.0,
                 "step": 0.01,
             })
 

@@ -76,6 +76,12 @@ __all__ = [
     "NODE_PACKAGE_DIR"
 ]
 
+# ==================== 依赖安装器只读检测路由（方案 A+，不自动装包，规避注册表风险） ====================
+try:
+    import dep_check  # 注册 GET /josia_dep/check（探测可选格式依赖是否已装）
+except Exception as _e:
+    print(f"[JosiaNodes] ⚠️ 依赖检测路由注册失败：{_e}")
+
 # ==================== 最终验证输出 ====================
 if NODE_CLASS_MAPPINGS:
     print(f"[JosiaNodes] ✅ JosiaNodes 加载成功，注册节点数：{len(NODE_CLASS_MAPPINGS)}"

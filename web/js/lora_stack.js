@@ -15,11 +15,16 @@ const LH = 28, SH = 24, LG = 2, SG = 10;
 const MW = 500;
 const AW = 18, BH = 22, SW = 50, SHh = 22;
 const RR = 4, DT = 5;
+// 滑块行程：拖动 / 轨道定位用的量程，手动输入不跟随它
+const SLD_MIN = -3, SLD_MAX = 3;
+// 手动输入（✏️）与箭头微调的量程
+const MAN_MIN = -20, MAN_MAX = 20;
 
 const Cmod = "#4a9eff", Cclip = "#ff6b9d";
 const Cbg = "rgba(255,255,255,0.1)", CbgOff = "rgba(255,255,255,0.06)";
 const Cblk = "#3a7bd5", CblkOff = "#555";
 const Ctx = "#ddd", Cdim = "#666", Cdiv = "rgba(255,255,255,0.06)";
+const Cwarn = "#ffb24d"; // 超滑块行程(±3)时的警示色：手动/箭头写入 ±3 之外时滑块与数值变橙
 const CSync = "#4a9eff";
 
 function rr(c, x, y, w, h, r) {
@@ -186,13 +191,14 @@ function trunc(c, t, mw) {
 /** 滑块轨道 */
 function drawSld(c, x, y, h, w, val, mn, mx, color, ena, lbl, gd) {
     const oh = BH, oy = y + (h - oh) / 2; const show = ena && !gd;
+    const over = val < mn || val > mx;   // 超滑块行程(±3) → 警示
     c.save(); c.fillStyle = show ? Cbg : CbgOff;
     c.beginPath(); rr(c, x, oy, w, oh, RR); c.fill(); c.restore();
     if (show) {
         const norm = (mx > mn) ? (val - mn) / (mx - mn) : 0.5;
         const fw = cl(Math.round(norm * w), 0, w);
         if (fw > 0) {
-            c.save(); c.fillStyle = color; c.beginPath();
+            c.save(); c.fillStyle = over ? Cwarn : color; c.beginPath();
             const rr2 = Math.min(RR, fw / 2, oh / 2);
             if (rr2 > 0 && fw > rr2) {
                 c.moveTo(x + fw, oy); c.lineTo(x + rr2, oy);
@@ -204,7 +210,7 @@ function drawSld(c, x, y, h, w, val, mn, mx, color, ena, lbl, gd) {
         }
     }
     const txt = `${lbl} ${val.toFixed(2)}`;
-    c.save(); c.fillStyle = "rgba(255,255,255,0.95)";
+    c.save(); c.fillStyle = over ? Cwarn : "rgba(255,255,255,0.95)";
     c.font = "bold 11px sans-serif"; c.textAlign = "center"; c.textBaseline = "middle";
     c.fillText(txt, x + w / 2, oy + oh / 2);
     if (!show) {
@@ -251,12 +257,12 @@ function drawSldR(c, n, W, y, idx, s, gd) {
         const ncL = { x: ncSX - gap - AW, y: ay, w: AW, h: BH };
 
         drawAr(c, mL.x, mL.y, mL.w, mL.h, "left");
-        const ma = drawSld(c, mSX, y, SH, newW, s.sm, -3, 3, Cmod, ena, "模型强度", gd);
+        const ma = drawSld(c, mSX, y, SH, newW, s.sm, SLD_MIN, SLD_MAX, Cmod, ena, "模型强度", gd);
         drawEdit(c, nmEX, ay, editW, BH);
         drawAr(c, nmR.x, nmR.y, nmR.w, nmR.h, "right");
         drawSync(c, nSyncX, ay, syncW, BH, s.sync);
         drawAr(c, ncL.x, ncL.y, ncL.w, ncL.h, "left");
-        const ca = drawSld(c, ncSX, y, SH, newW, s.sc, -3, 3, Cclip, ena, "CLIP强度", gd);
+        const ca = drawSld(c, ncSX, y, SH, newW, s.sc, SLD_MIN, SLD_MAX, Cclip, ena, "CLIP强度", gd);
         drawEdit(c, ncEX, ay, editW, BH);
         drawAr(c, ncR.x, ncR.y, ncR.w, ncR.h, "right");
         return {
@@ -266,12 +272,12 @@ function drawSldR(c, n, W, y, idx, s, gd) {
         };
     }
     drawAr(c, mL.x, mL.y, mL.w, mL.h, "left");
-    const ma = drawSld(c, mSX, y, SH, sldW, s.sm, -3, 3, Cmod, ena, "模型强度", gd);
+    const ma = drawSld(c, mSX, y, SH, sldW, s.sm, SLD_MIN, SLD_MAX, Cmod, ena, "模型强度", gd);
     drawEdit(c, mEX, ay, editW, BH);
     drawAr(c, mR.x, mR.y, mR.w, mR.h, "right");
     drawSync(c, syncX, ay, syncW, BH, s.sync);
     drawAr(c, cL.x, cL.y, cL.w, cL.h, "left");
-    const ca = drawSld(c, cSX, y, SH, sldW, s.sc, -3, 3, Cclip, ena, "CLIP强度", gd);
+    const ca = drawSld(c, cSX, y, SH, sldW, s.sc, SLD_MIN, SLD_MAX, Cclip, ena, "CLIP强度", gd);
     drawEdit(c, cEX, ay, editW, BH);
     drawAr(c, cR.x, cR.y, cR.w, cR.h, "right");
     return {
@@ -382,41 +388,43 @@ function drawNode(n, c) {
 // ═════════════════════════════════════════════
 function getLst(n) { const w = n._hw.lora_name_1; return (w && w.options && w.options.values) ? w.options.values : ["None"]; }
 
-function upd(n, gi, ty, val) {
+function upd(n, gi, ty, val, lo, hi) {
     const s = n._st[gi]; if (!s) return;
-    const v = rd(cl(val, -3, 3), 0.05);
+    const a = (typeof lo === "number") ? lo : SLD_MIN;
+    const b = (typeof hi === "number") ? hi : SLD_MAX;
+    const v = rd(cl(val, a, b), 0.05);
     if (ty === "model") { s.sm = v; if (s.sync) s.sc = v; }
     else { s.sc = v; if (s.sync) s.sm = v; }
     writeSt(n); app.graph?.setDirtyCanvas?.(true, false);
 }
 
-function openEdit(n, gi, ty) {
+function openEdit(n, gi, ty, ev) {
     const s = n._st[gi]; if (!s) return;
     const cur = ty === "model" ? s.sm : s.sc;
     const label = ty === "model" ? "模型强度" : "CLIP强度";
-    try {
-        LiteGraph.prompt(`输入${label} (-10 ~ 10)`, String(cur.toFixed(2)), function(val) {
-            if (val === null || val === undefined || val === "") return;
-            const p = parseFloat(val);
-            if (isNaN(p)) return;
-            const v = rd(cl(p, -10, 10), 0.01);
-            const s2 = n._st[gi]; if (!s2) return;
-            if (ty === "model") { s2.sm = v; if (s2.sync) s2.sc = v; }
-            else { s2.sc = v; if (s2.sync) s2.sm = v; }
-            writeSt(n); app.graph?.setDirtyCanvas?.(true, false);
-        }, "text");
-    } catch(e) {
-        // fallback
-        const inp = prompt(`输入${label} (-10 ~ 10)`, cur.toFixed(2));
-        if (inp == null) return;
-        const p = parseFloat(inp);
+    const apply = function (val) {
+        if (val === null || val === undefined) return;
+        const str = String(val).trim();
+        if (str === "") return;
+        const p = parseFloat(str);
         if (isNaN(p)) return;
-        const v = rd(cl(p, -10, 10), 0.01);
+        const v = rd(cl(p, MAN_MIN, MAN_MAX), 0.01);
         const s2 = n._st[gi]; if (!s2) return;
         if (ty === "model") { s2.sm = v; if (s2.sync) s2.sc = v; }
         else { s2.sc = v; if (s2.sync) s2.sm = v; }
         writeSt(n); app.graph?.setDirtyCanvas?.(true, false);
+    };
+    // 画布内输入浮层：与原生 widget 的铅笔是同一套提示框（LGraphCanvas 的实例方法）。
+    // 签名 prompt(title, value, callback, event, multiline)：第 4 位是鼠标事件，仅用于定位。
+    const cv = app.canvas || (typeof LGraphCanvas !== "undefined" ? LGraphCanvas.active_canvas : null);
+    if (cv && typeof cv.prompt === "function") {
+        try {
+            cv.prompt(`输入${label} (${MAN_MIN} ~ ${MAN_MAX})`, cur.toFixed(2), apply, ev);
+            return;
+        } catch (_e) { /* 画布不可用时落到下面的兜底 */ }
     }
+    const inp = window.prompt(`输入${label} (${MAN_MIN} ~ ${MAN_MAX})`, cur.toFixed(2));
+    apply(inp);
 }
 
 function onMD(n, e, lp) {
@@ -478,7 +486,7 @@ function onMD(n, e, lp) {
     // 编辑按钮
     for (const ed of h.ed) {
         if (ht(mx, my, ed)) {
-            openEdit(n, ed.gi, ed.type);
+            openEdit(n, ed.gi, ed.type, e);
             return true;
         }
     }
@@ -488,8 +496,9 @@ function onMD(n, e, lp) {
             const aa = a[side]; if (!aa) continue;
             const st = n._st[aa.gi]; if (!st) continue;
             const v = side === "model" ? st.sm : st.sc;
-            if (ht(mx, my, aa.left)) { upd(n, aa.gi, side, v - 0.05); return true; }
-            if (ht(mx, my, aa.right)) { upd(n, aa.gi, side, v + 0.05); return true; }
+            // 箭头微调跟随手动量程：手工输入 15 后再按箭头不会被拉回滑块行程内
+            if (ht(mx, my, aa.left)) { upd(n, aa.gi, side, v - 0.05, MAN_MIN, MAN_MAX); return true; }
+            if (ht(mx, my, aa.right)) { upd(n, aa.gi, side, v + 0.05, MAN_MIN, MAN_MAX); return true; }
         }
     }
     // 滑块轨道：立即定位，捕获输入确保收到 onMouseUp
@@ -499,8 +508,8 @@ function onMD(n, e, lp) {
             if (ht(mx, my, tt.area)) {
                 // 立即定位到点击位置
                 const norm = (mx - tt.area.x) / tt.area.w;
-                const val = -3 + norm * 6;
-                upd(n, tt.gi, side, rd(cl(val, -3, 3), 0.05));
+                const val = SLD_MIN + norm * (SLD_MAX - SLD_MIN);
+                upd(n, tt.gi, side, rd(cl(val, SLD_MIN, SLD_MAX), 0.05));
                 // 标记拖拽开始 + 捕获输入（确保收到 onMouseUp）
                 n._dr = { gi: tt.gi, type: side };
                 try { n.captureInput(true); } catch(_ex) {}
@@ -529,7 +538,7 @@ function onMM(n, e, lp) {
         const tr = n._ha.tr[n._dr.gi]; if (!tr) return false;
         const tk = tr[n._dr.type]; if (!tk || !tk.area) return false;
         const norm = (mx - tk.area.x) / tk.area.w;
-        upd(n, n._dr.gi, n._dr.type, rd(cl(-3 + norm * 6, -3, 3), 0.05));
+        upd(n, n._dr.gi, n._dr.type, rd(cl(SLD_MIN + norm * (SLD_MAX - SLD_MIN), SLD_MIN, SLD_MAX), 0.05));
         return true;
     }
     return false;
