@@ -699,53 +699,6 @@ async def get_thumbnail(request):
             status=200,
         )
 
-# ─── API 路由：批量上传（前端拖拽/粘贴/选择文件时使用）─────────────
-@PromptServer.instance.routes.post("/josia_multi_image/upload_files")
-async def upload_files_to_input(request):
-    """
-    批量上传：接收 multipart 表单中的多个文件，保存到 input 目录。
-    前端通过 FormData 上传原始文件数据时使用。
-
-    返回: { "paths": ["/path/to/input/file1.png", ...] }
-    """
-    try:
-        reader = await request.multipart()
-        input_dir = folder_paths.get_input_directory()
-        saved_paths = []
-
-        async for part in reader:
-            if part.name != "files":
-                continue
-
-            # 读取文件数据
-            data = await part.read()
-            original_filename = part.filename or "unnamed.png"
-
-            # 确保文件名安全（防止路径遍历攻击）
-            safe_name = os.path.basename(original_filename)
-            if not safe_name:
-                safe_name = "uploaded_image.png"
-
-            dest_path = os.path.join(input_dir, safe_name)
-
-            # 处理同名冲突
-            if os.path.isfile(dest_path):
-                name, ext = os.path.splitext(safe_name)
-                counter = 1
-                while os.path.isfile(os.path.join(input_dir, f"{name}_{counter}{ext}")):
-                    counter += 1
-                dest_path = os.path.join(input_dir, f"{name}_{counter}{ext}")
-
-            with open(dest_path, "wb") as f:
-                f.write(data)
-
-            saved_paths.append(dest_path)
-
-        return web.json_response({"paths": saved_paths})
-    except Exception as e:
-        return web.json_response({"paths": [], "error": str(e)}, status=500)
-
-
 # ─── 节点注册 ───────────────────────────────────────────────
 NODE_CLASS_MAPPINGS = {"JosiaMultiImageLoader": JosiaMultiImageLoader}
 NODE_DISPLAY_NAME_MAPPINGS = {"JosiaMultiImageLoader": NODE_DISPLAY_NAME_MULTI_IMAGE}
