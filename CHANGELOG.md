@@ -2,8 +2,63 @@
 
 所有项目的重要变更都会记录在这个文件中。
 
-格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，  
+格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
+
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
+
+---
+
+## [1.8.1] - 2026-09-24
+
+### ✨ 新增功能
+
+#### 设置页品牌展示 · 大标题与关于页徽章（version_banner.js）
+
+- 设置 → ⚡️JosiaNodes 分类页**最上方新增「⚡️JosiaNodes vX.Y.Z」大标题**（节点名 + 版本号；版本号由后端 `/josia_dep/version` 异步补齐，重启后自动更新，前端不再写死）。
+- 设置 → **关于** 页面徽章行新增「JosiaNodes vX.Y.Z」徽章，点击跳转作者 B 站空间。
+- 版本号唯一事实源在 `pyproject.toml`，设置页大标题与关于页徽章共用同一份请求，两边永远一致。
+
+#### 依赖安装面板与后端检测（settings_dependency_install.js + dep_check.py）
+
+- **全新设置面板**：设置 → ⚡️JosiaNodes → 依赖安装，提供 AVIF / HEIF / JPEG XL / PyAV 四项可选依赖的一键安装。
+  - **竖排布局**（标签在上、选项在下），信息密度更高、不再挤成一行。
+  - **打开页面自动检测**已装状态并应用结果，无需手动点按钮即可看到哪些格式可用；附带「重新检测」按钮可随时刷新。
+  - **生成内嵌 ComfyUI 专用 Python 绝对路径 + 阿里云镜像的安装命令**：任意目录复制执行都只装进 ComfyUI 的 Python 环境，不污染系统 Python。
+- 后端新增只读路由 `/josia_dep/check`（能力级检测，区分「未安装 / 装了但没注册保存器」）与 `/josia_dep/version`（读 `pyproject.toml` 版本号）。
+
+### 🎨 界面 / 交互变更（Josia媒体保存）
+
+- **格式下拉改为常驻全部格式、不支持的选项改为灰化不可选状态**（不再隐藏），避免切换格式时控件尺寸突变。
+- **新增「不保存图像 / 不保存视频 / 不保存音频」三选项**（各分类下拉绝对末项）：选中后**不解码、也不对 Latent 做额外处理**，直接落盘 `.latent` 并锁定保存 Latent，避免三路全关导致工作流空转。
+- **信息窗改进**：不保存媒体文件时显示「仅保存 Latent（无损）」而非质量；开启「保存潜空间」时额外显示「＋ 保存 Latent」、开启「写入元数据」时额外显示「＋ 元数据」；视频模式输入 / 输出帧率用「·」分隔；生成后单位统一为「N 个媒体文件」（不再用「图」，适配视频 / 音频）。
+- **默认文件名前缀 `Pic_` → `Media_`**：生成视频 / 音频时文件名不再带 `Pic`。
+
+### 🐛 Bug 修复
+
+#### 媒体保存 · HEIF 装了却报「已装但没生效」
+
+- **根因**：`pillow-heif` ≥ 0.5 起**不再 import 即注册**保存器，必须显式调用 `register_heif_opener()`；原探测只做了 `__import__`，导致 HEIF 真实可用却检测不到、下拉里也没有。
+- 新增 `pillow_plugins.py` 作为**唯一注册 / 探测入口**，统一扫模块里的 `register_*_opener` 并调用（幂等、向下兼容旧版）；媒体保存下拉与依赖检测面板共用同一口径，两端不再对不上。AVIF / JPEG XL 仍为 import 即注册。
+
+#### 依赖检测接口偶发 500
+
+- `/josia_dep/check` 返回结构里漏写 `result` / `detail` 初始化，特定分支会抛 `NameError` → 500；已补回。
+
+#### PyAV 检测口径对齐
+
+- 依赖检测从「`find_spec` 命中即算已装」升级为**能力级校验**（真 import + 校验 Pillow 保存器注册），与媒体保存节点实际能力一致，不再出现「设置说已装、节点没有」的错位。
+
+### ♻️ 变更
+
+#### 移除媒体保存的「关」选项
+
+- 「关」与「不保存媒体文件」语义重合，且会绕过「图像 / 音频 / 视频三路全不保存媒体文件时强制落盘 `.latent`」的防空转规则；现统一由「不保存媒体文件」承接，确保任何情况下工作流都不会空转。
+- **老工作流兼容**：残留的「关」值载入时自动升级为对应的「不保存媒体文件」，无需手动改。
+
+### 📝 文档更新
+
+- 更新 `README.md`：文件结构补充新增模块（model_registry / native_picker / dep_check / pillow_plugins / version_banner / settings_dependency_install）；媒体保存章节同步格式灰化、不保存媒体文件、信息窗、默认前缀 `Media_` 等；移除「关」相关说明。
+- 更新 `pyproject.toml` 版本号 1.8.0 → 1.8.1。
 
 ---
 
@@ -68,11 +123,16 @@
 
 #### 风格选择节点 · HTTP 路由路径穿越加固
 
-> **来源与复核**：GitHub PR #5（自动安全扫描机器人 OrbisAI 提交）。复核后确认——**风险真实存在，>   
-> 但报告点名的位置（`_save_user_config` 里临时文件 `tmp` 的那一行）是误报**：该路径由模块常量拼出，>   
-> POST 请求体只影响写入的 JSON 内容（仅接受 `favorites` / `order` 两个键），路径不可控；补丁在该处>   
-> 加的 `startswith` 守卫恒为真，不解决任何问题。真正的问题在下面这三条 `{theme}` 路由。>   
-> **处置**：未合并该 PR，按同一思路自行修复，并顺带修掉原补丁的两处副作用（每次请求都 `os.listdir`>   
+> **来源与复核**：GitHub PR #5（自动安全扫描机器人 OrbisAI 提交）。复核后确认——\*\*风险真实存在，
+>
+> 但报告点名的位置（`_save_user_config` 里临时文件 `tmp` 的那一行）是误报\*\*：该路径由模块常量拼出，
+>
+> POST 请求体只影响写入的 JSON 内容（仅接受 `favorites` / `order` 两个键），路径不可控；补丁在该处
+>
+> 加的 `startswith` 守卫恒为真，不解决任何问题。真正的问题在下面这三条 `{theme}` 路由。
+>
+> **处置**：未合并该 PR，按同一思路自行修复，并顺带修掉原补丁的两处副作用（每次请求都 `os.listdir`
+>
 > 的重复 IO；白名单口径绑 `styles.json` 会导致只有 gallery/thumbs 的主题被误拒 404）。
 
 - 三条含动态段的接口（`/josia_style/{theme}/styles`、`/josia_style/{theme}/thumb`、`/josia_style/{theme}/gallery`）此前只做字符串前缀校验，挡不住构造过的 `theme`：
@@ -138,6 +198,7 @@
   - 第 2 行：🎲 随机生成一个新种子
   - 第 3 行：♻️ 使用上一次种子（执行后显示上次种子的具体数值）
 - 按钮配色取自 ComfyUI 主题变量，深浅色主题下均正常；底部预留固定边距，**新增节点时最下方按钮不再贴边**。
+
 
 #### 图像缩放节点（JosiaImageScaling）· 参数改名与悬停提示
 
@@ -381,6 +442,7 @@
 
   **根因**：误把 PyPI/仓库命名规范套到了 ComfyUI 注册表上。ComfyUI 节点 ID 故意采用小写连字符格式（与 GitHub 仓库名解耦），    
   仓库展示名仍可为 `ComfyUI_JosiaNodes`，与 Registry node ID 无关。修正方式：`name` 回滚为 `comfyui-josianodes`。
+
 
 ### ℹ️ 说明
 
@@ -712,6 +774,7 @@
   - `/josia_multi_image/thumbnail` — 缩略图服务（多策略路径解析 + 占位图）
   - `/josia_multi_image/upload` — 拷贝外部图像到 input 目录
   - `/josia_multi_image/upload_files` — 批量上传 multipart 文件
+
 
 ### 🐛 Bug 修复
 

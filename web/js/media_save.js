@@ -67,8 +67,8 @@ const VAE1_PLACEHOLDER = "🎨 请选择模型…";      // VAE1 默认占位符
 const PLACEHOLDER_VAE2 = "🎵 请选择模型…";      // VAE2（音频 VAE）的默认项
 // 🔴 必须与后端 media_save.py 的 DEFAULT_PREFIX 逐字一致。
 // `JosiaMedia\` ＝ output 下的子目录；`%001%` ＝ 3 位序号占位（写在哪替换在哪）。
-const DEFAULT_PREFIX = "JosiaMedia\\Pic_%001%";
-const DEFAULT_NAME = "Pic_%001%";               // 只有文件名那一段（兜底用）
+const DEFAULT_PREFIX = "JosiaMedia\\Media_%001%";
+const DEFAULT_NAME = "Media_%001%";               // 只有文件名那一段（兜底用）
 
 /* ================================== CSS ================================== */
 const STYLE_ID = "josia-media-save-style";
@@ -183,6 +183,12 @@ div.dom-widget:has(> .jms-root){pointer-events:none !important;}
 .jms-drop{padding:0 4px 0 7px;gap:5px;cursor:pointer;min-width:84px;position:relative;
   flex:0 0 auto;white-space:nowrap;}
 .jms-drop.disabled{opacity:.45;pointer-events:none;}
+/* 🔴「不支持的选项一律灰化、绝不隐藏」（哥哥要求）：隐藏会让胶囊宽度忽宽忽窄、
+   切格式时整行突然跳一下 —— 灰化禁用则尺寸恒定，视觉不割裂。
+   胶囊 / 数字控件 / 圆点开关同样套用，与下拉保持同一观感。 */
+.jms-capsule.disabled{opacity:.45;pointer-events:none;}
+.jms-numwrap.disabled{opacity:.45;pointer-events:none;}
+.jms-dot.disabled{opacity:.45;pointer-events:none;}
 .jms-drop-lab{flex:0 0 auto;opacity:.55;font-size:10px;white-space:nowrap;}
 /* 🔴 选中值文本在「文本容器」内居中（哥哥要求：左对齐/右对齐版面不美观）：
       btn 改 flex:1 1 auto 吃掉标签与箭头之间的全部剩余宽度 ⇒ 定宽胶囊（视频行 118px、
@@ -304,6 +310,39 @@ function comboValues(w, node) {
 }
 
 function mkRow() { return el("div", "jms-row"); }
+
+/* 🔴「不保存」三兄弟：图像 / 视频 / 音频各有一个，值由后端 INPUT_TYPES 提供。
+   规则：恒排在各下拉的**最后一项**（以后新增格式一律插在它前面）；
+   选中它 ⇒ 该路不落盘，同时「保存Latent」强制开启（本节点必须有产物，禁止空转）。 */
+const NONE_IMAGE = "不保存图像";
+const NONE_VIDEO = "不保存视频";
+const NONE_AUDIO = "不保存音频";
+
+// 下拉排序：把「不保存X」顶到最后；weight 用于同时保留其它既定排序（如视频 GIF 排倒数第二）
+function noneWeight(v, noneVal, extraLast) {
+  if (String(v) === noneVal) return 2;
+  if (extraLast && String(v) === extraLast) return 1;
+  return 0;
+}
+function sortNoneLast(items, noneVal, extraLast) {
+  return items.slice().sort(
+    (a, b) => noneWeight(a.value, noneVal, extraLast) - noneWeight(b.value, noneVal, extraLast));
+}
+
+/**
+ * 灰化（禁用）一个控件，而不是隐藏它。
+ * 支持三种形态：mkDrop 的包装对象 {el}、mkNumber/mkText 的 DOM、mkCapsule 的包装对象 {el}。
+ */
+function grayCtl(ctl, on, tipWhenGray, tipNormal) {
+  const e = ctl && ctl.el ? ctl.el : ctl;
+  if (!e) return;
+  if (e.dataset.jmsTitle === undefined) e.dataset.jmsTitle = tipNormal || e.title || "";
+  e.classList.toggle("disabled", !!on);
+  e.title = on ? tipWhenGray : e.dataset.jmsTitle;
+  // 数字控件的输入框要真的禁用（避免还能键盘输入）
+  const inp = e.querySelector ? e.querySelector("input") : null;
+  if (inp) inp.disabled = !!on;
+}
 
 /* ============================ 下拉浮层 + 遮罩 ============================ */
 let _openLayer = null;
@@ -791,17 +830,22 @@ app.registerExtension({
         const changed = (v !== tab);
         tab = v;
         if (changed) {
-          // 🔴 只有「视频」分类才会输出视频 —— 切到非视频分类一律把「视频格式」置「关」。
-          //    以前切回「图像」只是隐藏该下拉、**不重置它的值** ⇒ 上一轮在「视频」分类里
-          //    选过的 MP4 会静默生效，多图批次被合成 MP4（用户报的「居然生成了 mp4」）。
+          // 🔴 只有「视频」分类才会输出视频 —— 切到非视频分类一律把「视频格式」置
+          //    「不保存视频」（以前这儿的值是「关」，现已下线）。
+          //    早点不重置会让上一轮在「视频」分类里选过的 MP4 静默生效，
+          //    多图批次被擅自合成 MP4（用户报的「居然生成了 mp4」）。
+          const _vBefore = String(W["视频容器"]?.value ?? NONE_VIDEO);
           if (tab === "video") {
-            if (String(W["视频容器"]?.value ?? "关") === "关") {
-              setWidgetValue(node, W["视频容器"], DEF_VIDEO);
+            // 切回视频分类：悄悄还原上一次真正选过的容器（首次则回落到默认容器）。
+            //    🔴 用户显式选过「不保存视频」时不还原 —— 那是他自己的选择，不能偷偷改掉
+            //    （标记记在 node.properties.jms_vid_none，随工作流一起存）。
+            const _noneByChoice = node.properties?.jms_vid_none === true;
+            if ((_vBefore === NONE_VIDEO && !_noneByChoice) || _vBefore === "关") {
+              setWidgetValue(node, W["视频容器"], lastVideoContainer || DEF_VIDEO);
             }
           } else {
-            if (String(W["视频容器"]?.value ?? "关") !== "关") {
-              setWidgetValue(node, W["视频容器"], "关");
-            }
+            if (_vBefore !== NONE_VIDEO && _vBefore !== "关") lastVideoContainer = _vBefore;
+            setWidgetValue(node, W["视频容器"], NONE_VIDEO);
             if (tab === "audio") setWidgetValue(node, W["音频格式"], "FLAC");
           }
           try { node.properties.jms_tab = tab; } catch (e) { /* 忽略 */ }
@@ -962,7 +1006,11 @@ app.registerExtension({
       const row2 = mkRow();
 
       const imgBox = el("span", "jms-row"); imgBox.style.flex = "1 1 100%"; imgBox.style.gap = "6px";
-      const dropImg = mkDrop(node, W["图像格式"], { label: "文件格式" });
+      // 🔴「不保存图像」恒排最后（新增格式插在它前面）—— 由 sortNoneLast 保证，与后端字典顺序解耦
+      const dropImg = mkDrop(node, W["图像格式"], { label: "文件格式",
+        items: () => sortNoneLast((comboValues(W["图像格式"], node) || [])
+          .map((v) => ((v && typeof v === "object") ? v : { value: String(v), label: String(v) })),
+          NONE_IMAGE) });
       // 🔴 自适应节点宽度：文件格式下拉吃本行余宽，
       //    与视频行「视频格式」、行 4「解码方式」同一套做法 ⇒ 一行铺满节点、不留空档。
       dropImg.el.style.flex = "1 1 130px";
@@ -993,14 +1041,23 @@ app.registerExtension({
       // 🔴 动图类型在菜单里明确标记「动图」（GIF/APNG/WebP），与真视频容器区分开；
       //    GIF 排到最后（哥哥要求），「动图WebP」显示名改「WebP（动图）」（值不变，后端契约不动）。
       const VID_ANIM_LABELS = { "GIF": "GIF（动图）", "APNG": "APNG（动图）", "动图WebP": "WebP（动图）" };
+      // 🔴 下拉里没有任何「关」：不想落盘就选「不保存视频」（它会撑起「必须落盘 .latent」
+      //    的强制规则，不像当年的「关」那样让工作流空转）。老工作流存的「关」由 _jmsSyncTab
+      //    自动升级成「不保存视频」，用户看不到、也选不到它。
       const dropVid = mkDrop(node, W["视频容器"], { label: "视频格式",
-        // 🔴 下拉里不再出现「关」：视频分类一旦选中，永远是真实容器（老工作流存的「关」
-        //    后端仍认，但用户不再手选）。切回图像/音频分类时仍由 _jmsSyncTab 内部置「关」。
-        items: () => (comboValues(W["视频容器"], node) || [])
-          .map((v) => (v && typeof v === "object") ? v : { value: String(v), label: VID_ANIM_LABELS[String(v)] || String(v) })
-          .filter((it) => String(it.value) !== "关")
-          .sort((a, b) => ((String(a.value) === "GIF") ? 1 : 0) - ((String(b.value) === "GIF") ? 1 : 0)),
-        decorate: (v, l) => ((metaOk.video.size && metaOk.video.has(String(v))) ? "⭐ " : "") + l });
+        items: () => sortNoneLast((comboValues(W["视频容器"], node) || [])
+          .map((v) => (v && typeof v === "object") ? v : { value: String(v), label: VID_ANIM_LABELS[String(v)] || String(v) }),
+          NONE_VIDEO, "GIF"),
+        decorate: (v, l) => ((metaOk.video.size && metaOk.video.has(String(v))) ? "⭐ " : "") + l,
+        onChange: (v) => {
+          // 记住在视频分类下真正选过的容器；显式选「不保存视频」时打标记，
+          // 供切走分类再切回来时判断要不要还原（用户的选择不被偷偷改掉）。
+          try {
+            node.properties.jms_vid_none = (String(v) === NONE_VIDEO);
+          } catch (e) { /* 忽略 */ }
+          if (String(v) !== NONE_VIDEO) lastVideoContainer = String(v);
+          node._jmsRefresh?.();
+        } });
       dropVid.el.title = "由图像批次合成视频 / 动图；接 VIDEO 输入时按此容器转存。\n"
         + "🔴 只有切到「视频」分类时本项才生效 —— 切回「图像」/「音频」分类时视频输出自动暂停"
         + "（图像批次改存逐张静图）。GIF / APNG / WebP（动图）是动图容器（单文件循环播放），"
@@ -1085,8 +1142,34 @@ app.registerExtension({
 
       const audBox = el("span", "jms-row"); audBox.style.flex = "1 1 100%"; audBox.style.gap = "6px";
       const dropAud = mkDrop(node, W["音频格式"], { label: "音频格式",
-        decorate: (v, l) => ((metaOk.audio.size && metaOk.audio.has(String(v))) ? "⭐ " : "") + l });
+        decorate: (v, l) => ((metaOk.audio.size && metaOk.audio.has(String(v))) ? "⭐ " : "") + l,
+        items: () => sortNoneLast((comboValues(W["音频格式"], node) || [])
+          .map((v) => ((v && typeof v === "object") ? v : { value: String(v), label: String(v) })),
+          NONE_AUDIO) });
       dropAud.el.title = "接入音频时按此格式落盘。⭐ = 可写元数据（FLAC/MP3/Opus 支持，WAV 不支持）。";
+      // 🔴 固定宽度（哥哥要求：**不随选项自动变化**）：以「⭐ FLAC」的实测宽度为基准 +20% 写死
+      //    ⇒ 切到「不保存音频」这类长选项时胶囊不会撑宽、切回也不缩，整行视觉不跳。
+      //    隐藏（display:none）时 offsetWidth 为 0 ⇒ 量不到就等切到音频分类时再量（见 refreshInner）。
+      let audWidthFixed = false;
+      function sizeAudDrop() {
+        if (audWidthFixed) return;
+        try {
+          const btn = dropAud.el.querySelector(".jms-drop-btn");
+          if (!btn) return;
+          const old = btn.textContent;
+          btn.textContent = "⭐ FLAC";
+          dropAud.el.style.flex = "0 0 auto";
+          dropAud.el.style.width = "auto";
+          const w = dropAud.el.offsetWidth;
+          btn.textContent = old;
+          if (!(w > 0)) return;
+          dropAud.el.style.width = Math.ceil(w * 1.2) + "px";
+          dropAud.el.style.minWidth = "0";
+          dropAud.el.style.overflow = "hidden";
+          audWidthFixed = true;
+        } catch (e) { /* 量宽失败就保持自适应，不致命 */ }
+      }
+      node._jmsSizeAudRow = sizeAudDrop;
       const dropAQ = mkDrop(node, W["音频质量"], { label: "音质" });
       dropAQ.el.title = "有损音频码率；FLAC/WAV 为无损，本项灰化显示「无损」。";
       audBox.appendChild(dropAud.el);
@@ -1257,8 +1340,26 @@ app.registerExtension({
         "开启＝额外把潜空间另存一份 .latent 原始张量文件（与原生 Save Latent 同格式）到输出目录。\n" +
         "• 只是「多存一个本地文件」，与下游的 Latent 输出端口无关。\n" +
         "• 「Video Latent / Audio Latent」输出端口是把混合的 AV Latent 拆成单独两路输出，和本开关是两回事。";
+      // 🔴 锁定态「保存Latent」胶囊：选中「不保存图像 / 不保存视频 / 不保存音频」时，
+      //    用它**替换**真开关胶囊（真胶囊的 widget 值原封不动 ⇒ 取消「不保存」后自动恢复
+      //    用户原先的开启/关闭状态）。外观与开关一致、恒显示开启、不可点击、不灰化
+      //    （灰化会被误读成「关闭」），悬浮提示说明被强制开启的原因。
+      const dotLatentLock = (() => {
+        const wrap = el("div", "jms-dot");
+        const txt = el("span", "jms-dot-txt");
+        const mark = el("span", "jms-dot-mark");
+        wrap.appendChild(txt);
+        wrap.appendChild(mark);
+        wrap.classList.add("on");
+        txt.textContent = "🔒 落盘 .latent";
+        wrap.title =
+          "已选中「不保存」—— 本节点必须留下产物，否则工作流接入本节点等于空转。\n" +
+          "因此保存Latent 被强制开启且不可关闭；选回其它格式后，会恢复你原来的开关状态。";
+        return { el: wrap, sync() {} };
+      })();
       row6.appendChild(dotMeta.el);
       row6.appendChild(dotLatent.el);
+      row6.appendChild(dotLatentLock.el);
 
       // 🔴 「恢复默认」（哥哥要求）：一键把**所有**参数拉回「刚载入节点时的默认值」，并释放
       //    预览缓存 —— 参数被调乱时不用逐个回忆默认值；预览窗错乱时等于做一次软复位。
@@ -1275,11 +1376,13 @@ app.registerExtension({
             try { w.callback?.(w.value); } catch (e2) { /* 忽略 */ }
           }
         } catch (e) { /* 单个控件失败不影响其余 */ }
-        // 分类回到「图像」；非视频分类必须把「视频格式」置「关」（既定规则）
+        // 分类回到「图像」；非视频分类必须停在「不保存视频」（既定规则）
         try {
           tab = "image";
           try { node.properties.jms_tab = tab; } catch (e2) { /* 忽略 */ }
-          if (String(W["视频容器"]?.value ?? "关") !== "关") setWidgetValue(node, W["视频容器"], "关");
+          setWidgetValue(node, W["视频容器"], NONE_VIDEO);
+          lastVideoContainer = null;                       // 记忆一并清空，回到出厂默认
+          try { node.properties.jms_vid_none = false; } catch (e2) { /* 忽略 */ }
         } catch (e) { /* 忽略 */ }
         // 释放预览缓存 + 预览通道状态（治偶发的预览窗错乱 / 旧播放器残留）
         try { clearPreviewCache("all"); } catch (e) { /* 忽略 */ }
@@ -1353,6 +1456,9 @@ app.registerExtension({
       let tab = TAB_VALUES.includes(String(node.properties?.jms_tab))
         ? String(node.properties.jms_tab) : "image";
       let prevTab = null;
+      // 记住用户上一次真正选过的视频容器：切走分类时会被置成「不保存视频」，
+      // 切回来时用它还原，避免「切回视频分类却停在不保存、还得重新挑一遍容器」。
+      let lastVideoContainer = null;
 
       async function loadMetaTables() {
         try {
@@ -1373,14 +1479,16 @@ app.registerExtension({
       }
 
       function currentFormat() {
-        if (tab === "video") return String(W["视频容器"]?.value ?? "关");
-        if (tab === "audio") return String(W["音频格式"]?.value ?? "关");
+        if (tab === "video") return String(W["视频容器"]?.value ?? NONE_VIDEO);
+        if (tab === "audio") return String(W["音频格式"]?.value ?? NONE_AUDIO);
         return String(W["图像格式"]?.value ?? "");
       }
       function metaSupported() {
         const f = currentFormat();
-        if (tab === "video") return metaOk.video.size ? metaOk.video.has(f) : (f !== "关" && f !== "GIF");
-        if (tab === "audio") return metaOk.audio.size ? metaOk.audio.has(f) : (f !== "关");
+        // 「不保存X」不落盘 ⇒ 谈不上写元数据
+        if (f === NONE_IMAGE || f === NONE_VIDEO || f === NONE_AUDIO) return false;
+        if (tab === "video") return metaOk.video.size ? metaOk.video.has(f) : (f !== NONE_VIDEO && f !== "关" && f !== "GIF");
+        if (tab === "audio") return metaOk.audio.size ? metaOk.audio.has(f) : (f !== NONE_AUDIO && f !== "关");
         return metaOk.image.size ? metaOk.image.has(f) : true;
       }
 
@@ -1416,14 +1524,13 @@ app.registerExtension({
       function refreshInner() {
         const fmt = String(W["图像格式"]?.value ?? "");
         const lossless = !!W["无损"]?.value;
-        // 🔴 视频分类下「视频容器」永不处于「关」：下拉里已去掉「关」，老工作流/恢复默认
-        //    遗留的「关」在视频分类下自动落到 MP4（图像/音频分类仍由 _jmsSyncTab 内部置「关」
-        //    来暂停视频输出 —— 只是用户再也看不到、也选不到「关」了）。
-        if (tab === "video" && String(W["视频容器"]?.value ?? "关") === "关") {
+        // 🔴 视频分类下「视频容器」不会停在空值：老工作流遗留的「关」自动落到 MP4，
+        //    用户主动选的「不保存视频」则原样保留（不能偷偷替用户改掉选择）。
+        if (tab === "video" && String(W["视频容器"]?.value ?? NONE_VIDEO) === "关") {
           setWidgetValue(node, W["视频容器"], "MP4");
         }
-        const vid = String(W["视频容器"]?.value ?? "关");
-        const aud = String(W["音频格式"]?.value ?? "关");
+        const vid = String(W["视频容器"]?.value ?? NONE_VIDEO);
+        const aud = String(W["音频格式"]?.value ?? NONE_AUDIO);
         const dec = String(W["解码方式"]?.value ?? "自动");
         const v1 = String(W["VAE1"]?.value ?? "");
         const v2 = String(W["VAE2"]?.value ?? "");
@@ -1436,64 +1543,59 @@ app.registerExtension({
         // 🔴 视频行刚被显示出来 ⇒ 立刻量一次宽度：隐藏（display:none）时 offsetWidth 恒为 0，
         //    量不到就不能定宽；改成可见后读 offsetWidth 会强制同步布局，这里能拿到真实宽度。
         if (tab === "video") { try { node._jmsSizeVidRow?.(); } catch (e) { /* 忽略 */ } }
+        // 音频下拉刚显示出来 ⇒ 立刻量一次固定宽度（隐藏时 offsetWidth 为 0，量不到）
+        if (tab === "audio") { try { node._jmsSizeAudRow?.(); } catch (e) { /* 忽略 */ } }
 
-        // 图像细项
-        capLossless.el.style.display = LOSSLESS_CAPABLE.test(fmt) ? "inline-flex" : "none";
-        capCompress.el.style.display = PNGISH.test(fmt) ? "inline-flex" : "none";
-        // 绝对无损格式（PNG 等）：质量无意义 ⇒ 灰化并固定显示 100；同时灰化「无损」开关。
+        // 图像细项：🔴 **一律常驻显示**，不支持的项只灰化禁用（隐藏会让本行胶囊宽度突变，
+        //    切格式时整行突然跳一下 —— 哥哥明确要求尺寸恒定、不要视觉割裂）。
+        capLossless.el.style.display = "inline-flex";
+        capCompress.el.style.display = "inline-flex";
         const fmtBase = fmt.replace(/^⭐\s*/, "").trim();
         const alwaysLossless = ALWAYS_LOSSLESS.has(fmtBase);
+        const imgNone = fmt === NONE_IMAGE;
         if (alwaysLossless) {
           // 记住切走前的真实质量值，切回普通格式时还原；再把控件固定到 100。
           if (W["质量"] && W["质量"].value !== 100) prevQ = W["质量"].value;
           if (W["质量"]) W["质量"].value = 100;
           numQ._input.value = "100";
-          numQ._input.disabled = true;
-          numQ.style.opacity = ".45";
-          capLossless.el.style.opacity = ".45";
-          capLossless.el.style.pointerEvents = "none";
-        } else if (LOSSLESS_CAPABLE.test(fmt) && lossless) {
-          // 🔴 无损模式下**绝不能**把输入框的值改写成 100：
-          //    那只改了显示、没改 widget 值 ⇒ 节点上写着 100、信息窗里读到的还是 90，
-          //    而且切回质量模式后输入框再也回不到真实值（用户报的「质量对不上」）。
-          //    正确做法＝只灰化 + 禁用，输入框始终如实显示 widget 值。
-          numQ._input.value = String(W["质量"]?.value ?? numQ._input.value);
-          numQ._input.disabled = true;
-          numQ.style.opacity = ".45";
-          capLossless.el.style.opacity = "1";
-          capLossless.el.style.pointerEvents = "auto";
         } else {
-          // 普通（有损）格式：恢复可交互；若之前被绝对无损格式改成 100，这里还原到记忆值。
+          // 普通（有损）格式：若之前被绝对无损格式改成 100，这里还原到记忆值。
           if (W["质量"] && prevQ !== undefined && W["质量"].value === 100) {
             W["质量"].value = prevQ;
           }
           numQ._input.value = String(W["质量"]?.value ?? numQ._input.value);
-          numQ._input.disabled = false;
-          numQ.style.opacity = "1";
-          capLossless.el.style.opacity = "1";
-          capLossless.el.style.pointerEvents = "auto";
         }
-        // 视频细项
-        dropCodec.el.style.display = isAV ? "inline-flex" : "none";
-        // 🔴 mkNumber 返回的就是 DOM 元素本身（不是 {el,sync} 那种包装对象）——
-        //    这里曾经把它当包装对象去取 `.el.style` ⇒ 每次 refresh 都在此处抛
-        //    "Cannot read properties of undefined (reading 'style')"，整段显隐联动作废。
-        numCrf.style.display = isAV ? "inline-flex" : "none";
-        // 「输出帧率」与 CRF 同显隐：只有视频/动图容器（AV 容器）才需要。
-        numOutFps.style.display = isAV ? "inline-flex" : "none";
-        // 音频音质：无损格式灰化显示「无损」
+        grayCtl(capLossless, imgNone || alwaysLossless || !LOSSLESS_CAPABLE.test(fmt),
+          imgNone ? "已选「不保存图像」—— 不落盘图像，本项无意义。"
+            : (alwaysLossless ? `${fmtBase} 恒为无损，本开关无意义。`
+              : `${fmtBase} 不支持无损编码，本开关无意义。`));
+        grayCtl(numQ, imgNone || alwaysLossless || (LOSSLESS_CAPABLE.test(fmt) && lossless),
+          imgNone ? "已选「不保存图像」—— 不落盘图像，本项无意义。"
+            : (alwaysLossless ? `${fmtBase} 恒为无损，质量固定 100。`
+              : "当前处于「无损模式」，质量由无损编码决定。"));
+        grayCtl(capCompress, imgNone || !PNGISH.test(fmt),
+          imgNone ? "已选「不保存图像」—— 不落盘图像，本项无意义。"
+            : `${fmtBase} 不走 PNG 压缩，本项无意义。`);
+        // 🔴 无损模式下**绝不能**把输入框的值改写成 100（那是改显示、不改 widget 值，
+        //    会造成「节点显示 100 / 信息窗读到 90」的错位）—— 现在统一只灰化禁用。
+
+        // 视频细项：常驻显示、不适用则灰化（编码 / CRF 只对真视频容器有意义；输出帧率动图也吃）
+        const vidNone = vid === NONE_VIDEO;
+        grayCtl(dropCodec, vidNone || !isAV,
+          vidNone ? "已选「不保存视频」—— 不落盘视频，本项无意义。"
+            : "GIF / APNG / 动图WebP 是动图容器，没有视频编码器可选。");
+        grayCtl(numCrf, vidNone || !isAV,
+          vidNone ? "已选「不保存视频」—— 不落盘视频，本项无意义。"
+            : "动图容器不用 CRF（画质由调色板 / 无损决定）。");
+        grayCtl(numOutFps, vidNone, "已选「不保存视频」—— 不落盘视频，本项无意义。");
+
+        // 音频音质：常驻显示；无损格式 / 不落盘音频 ⇒ 灰化（保留「无损」字样）
         const audLossless = AUDIO_LOSSLESS.has(aud);
-        if (audLossless) {
-          dropAQ.el.classList.add("disabled");
-          dropAQ.btn.textContent = "无损";     // 灰化时显示「无损」，不再显示码率
-        } else {
-          dropAQ.el.classList.remove("disabled");
-        }
-        // 🔴 悬浮提示只讲功能，不回显取值（取值就写在控件上，重复弹一遍毫无信息量）
-        dropAQ.el.title = audLossless
-          ? `${aud} 是无损格式，码率对它没有意义 —— 所以这一项灰化。`
-          : "有损音频的码率；FLAC / WAV 为无损格式时本项会灰化显示「无损」。";
-        dropAQ.el.style.display = (aud !== "关") ? "inline-flex" : "none";
+        const audOff = aud === NONE_AUDIO || aud === "关";   // 「关」＝老工作流遗留值
+        if (audLossless) dropAQ.btn.textContent = "无损";
+        grayCtl(dropAQ, audOff || audLossless,
+          audOff ? "已选「不保存音频」—— 不落盘音频，本项无意义。"
+            : `${aud} 是无损格式，码率对它没有意义 —— 所以这一项灰化。`);
 
         // 分块参数显隐（哥哥更正）：**一律显示、不再隐藏**（隐藏会把「解码方式」胶囊拉长），
         // 仅「直接解码」时灰化禁用（它不使用分块）；「自动」「分块解码」正常可交互。
@@ -1507,8 +1609,17 @@ app.registerExtension({
             : d.el.dataset.jmsTitle;
         }
 
-        // 元数据圆点：当前分类不支持则隐藏
-        dotMeta.el.style.display = metaSupported() ? "inline-flex" : "none";
+        // 元数据圆点：常驻显示，不支持则灰化（隐藏会让底栏宽度跳一下）
+        grayCtl(dotMeta, !metaSupported(), "当前格式不支持写入工作流元数据 —— 本开关灰化。");
+
+        // 🔴「不保存图像 / 不保存视频 / 不保存音频」⇒ 保存Latent 强制开启：
+        //    用锁定胶囊**替换**真开关胶囊（真胶囊的 widget 值一个字节都不动 ⇒
+        //    取消「不保存」后自动恢复用户原来的开启/关闭状态）。
+        const latentLocked = (tab === "image" && fmt === NONE_IMAGE)
+          || (tab === "video" && vid === NONE_VIDEO)
+          || (tab === "audio" && aud === NONE_AUDIO);
+        dotLatent.el.style.display = latentLocked ? "none" : "inline-flex";
+        dotLatentLock.el.style.display = latentLocked ? "inline-flex" : "none";
 
         // 预览/保存：预览时灰化文件名前缀 + 选目录
         const preview = !!W["临时预览"]?.value;
@@ -1573,8 +1684,20 @@ app.registerExtension({
       // 并保证「非视频分类 ⇒ 视频格式=关」（旧工作流里遗留的 MP4 在这里被清掉）。
       node._jmsSyncTab = (v) => {
         tab = TAB_VALUES.includes(String(v)) ? String(v) : "image";
-        if (tab !== "video" && String(W["视频容器"]?.value ?? "关") !== "关") {
-          setWidgetValue(node, W["视频容器"], "关");
+        // 🔴 老工作流里存的「关」已被「不保存X」取代，这里一次性升级：
+        //    视频分类下沿用它当年对等的落盘行为（落到 MP4），其余分类升级为「不保存视频」；
+        //    音频一律升级为「不保存音频」（不落盘音频 ⇒ 自动强制落盘 .latent）。
+        const _v0 = String(W["视频容器"]?.value ?? NONE_VIDEO);
+        const _a0 = String(W["音频格式"]?.value ?? NONE_AUDIO);
+        if (_v0 === "关") {
+          setWidgetValue(node, W["视频容器"], tab === "video" ? DEF_VIDEO : NONE_VIDEO);
+        }
+        if (_a0 === "关") setWidgetValue(node, W["音频格式"], NONE_AUDIO);
+        // 🔴 离开视频分类 ⇒ 视频输出暂停（置「不保存视频」），但已在「不保存视频」的原样保留
+        //    （那正是用户自己的选择，不能偷偷改回别的值）。
+        const _v = String(W["视频容器"]?.value ?? NONE_VIDEO);
+        if (tab !== "video" && _v !== NONE_VIDEO) {
+          setWidgetValue(node, W["视频容器"], NONE_VIDEO);
         }
       };
 
@@ -1639,7 +1762,11 @@ app.registerExtension({
       }
       function extOfFormat() {
         const f = clean(currentFormat());
-        if (!f || f === "关") return "";
+        if (!f) return "";
+        // 老工作流遗留的「关」＝不落盘 ⇒ 与「不保存X」同解
+        if (f === "关") return "latent";
+        // 「不保存X」：该路不落盘 ⇒ 信息窗显示 latent（唯一的产物是潜空间文件）
+        if (f === NONE_IMAGE || f === NONE_VIDEO || f === NONE_AUDIO) return "latent";
         if (tab === "image") return extMap[f] || "";
         if (tab === "video") return VIDEO_EXT[f] || f.toLowerCase();
         return AUDIO_EXT[f] || f.toLowerCase();
@@ -1649,6 +1776,9 @@ app.registerExtension({
         try {
           const f = clean(currentFormat());
           if (!f || f === "关") return "";
+          // 🔴「不保存X」：该路不落盘，唯一产物就是潜空间文件，质量/编码对它无意义
+          //    ⇒ 不显示「质量 90」这种误导信息，改为明确说明仅落盘无损潜空间（哥哥要求）。
+          if (f === NONE_IMAGE || f === NONE_VIDEO || f === NONE_AUDIO) return "仅保存 Latent（无损）";
           if (tab === "image") {
             // 🔴 按「本格式在面板上的**实际属性**」显示，绝不拿隐藏选项的残留值说话
             //    （哥哥要求，Round 19 问题 2）：后端 JPEG 分支只吃 quality、完全忽略无损开关，
@@ -1679,7 +1809,7 @@ app.registerExtension({
             const inFps = String(inFpsRaw ?? "");
             const outFpsNum = Number(W["输出帧率"]?.value);
             const outChanged = isFinite(outFpsNum) && outFpsNum > 0;
-            const fpsSegs = ["输入帧率 " + inFps];
+            const fpsSegs = [RX("输入帧率 " + inFps), RX(" · ")];
             if (outChanged) fpsSegs.push(RHW("输出帧率 " + outFpsNum));
             else fpsSegs.push("输出帧率 " + (inFps !== "" ? inFps : "—"));
             const groups = ["编码 " + String(W["视频编码"]?.value ?? ""), fpsSegs];
@@ -1706,12 +1836,21 @@ app.registerExtension({
         const cur = String(W["filename_prefix"]?.value ?? "");
         const absDir = absFolderOf(cur);
         const dir = (lastRun && lastRun.dir) ? lastRun.dir : (absDir || "output（默认）");
-        // 🔴 第二格＝「文件格式：.jpg」，**不再显示文件名**（哥哥明确要求）。
-        //    文件名归最下面的「状态行」负责 —— 运行后那里会按 1/2/≥3 收敛列出本次全部产物。
         const ext = extOfFormat();
-        // 🔴 返回「片段数组」而不是纯字符串：视频模式下「输出帧率」被改动时要标黄，
-        //    需要一行内混排颜色（见 RS / setLine）。
-        return RS(" ｜ ", [dir, "文件格式：" + (ext ? "." + ext : "（未选格式）"), formatDetail()]);
+        const detail = formatDetail();                 // 质量 / 编码 / 「仅保存 Latent（无损）」等
+        const outBits = [dir, "文件格式：" + (ext ? "." + ext : "（未选格式）")];
+        if (detail) outBits.push(detail);
+        // 🔴「不保存X」时 latent 就是产物本身（detail 已写明），无需再标；
+        //    其余情况「保存潜空间」开启 ⇒ 明确标出「同时还落盘 .latent」（哥哥要求：产物 + Latent 并存可见）。
+        const f = clean(currentFormat());
+        if (f !== NONE_IMAGE && f !== NONE_VIDEO && f !== NONE_AUDIO && !!W["保存潜空间"]?.value) {
+          outBits.push("＋ 保存 Latent");
+        }
+        // 🔴「写入元数据」开启且本格式支持写元数据 ⇒ 信息窗标明（哥哥要求）。
+        if (metaSupported() && !!W["写入元数据"]?.value) {
+          outBits.push("＋ 元数据");
+        }
+        return RS(" ｜ ", outBits);
       }
 
       function extraInfoText() {
@@ -1961,7 +2100,7 @@ app.registerExtension({
         return absFolderOf(cur) || cur.replace(/[^\\/]*$/, "").replace(/[\\/]+$/, "") || "";
       }
       // 前缀里的「目录部分」＝最后一个分隔符之前的内容（未点「选择目录」时，
-      // 它就是 output 下的子层级，如 `JosiaMedia\Pic_%001%` ⇒ `JosiaMedia`）。
+      // 它就是 output 下的子层级，如 `JosiaMedia\Media_%001%` ⇒ `JosiaMedia`）。
       function relSubOf(p) {
         const s = String(p || "");
         const i = Math.max(s.lastIndexOf("\\"), s.lastIndexOf("/"));
@@ -2014,7 +2153,7 @@ app.registerExtension({
         btnOpen.disabled = true;
         try {
           // 🔴 没点「选择目录」时也要能定位到 output 的**子层级**：
-          //    `JosiaMedia\Pic_%001%` ⇒ 打开 output\JosiaMedia（后端会在目录还不存在时建出来）。
+          //    `JosiaMedia\Media_%001%` ⇒ 打开 output\JosiaMedia（后端会在目录还不存在时建出来）。
           const body = absDir
             ? { dir: absDir }
             : { type: !!W["临时预览"]?.value ? "temp" : "output", subfolder: relSubOf(cur) };
@@ -2064,7 +2203,7 @@ app.registerExtension({
           const auds = message?.audio || [];
           const lat = message?.latents || [];
           const parts = [];
-          if (imgs.length) parts.push(`${imgs.length} 图`);
+          if (imgs.length) parts.push(`图片 ${imgs.length}`);
           if (auds.length) parts.push(`音频 ${auds.length}`);
           if (lat.length) parts.push(`Latent ${lat.length}`);
           // 🔴 状态行必须列出**本次全部**落盘文件名（1 个＝名字 / 2 个＝A、B / ≥3＝A ~ C）。
@@ -2119,7 +2258,7 @@ app.registerExtension({
             lastSaved = allNames.length === 1 ? allNames[0]
               : allNames.length === 2 ? (allNames[0] + "、" + allNames[1])
                 : (allNames[0] + " ~ " + allNames[allNames.length - 1]);
-            setStatus(`✅ 已保存 ${parts.join(" / ")}（共 ${allNames.length} 个）：${lastSaved}${fpsSuffix}`);
+            setStatus(`✅ 已保存 ${allNames.length} 个媒体文件（${parts.join(" / ")}）：${lastSaved}${fpsSuffix}`);
           } else if (parts.length) {
             lastSaved = parts.join(" / ");
             setStatus(`✅ 已保存：${lastSaved}${fpsSuffix}`);
@@ -2306,7 +2445,7 @@ app.registerExtension({
       // 由工作流 / 复制粘贴恢复出来的节点：保留用户自己保存的宽度，不再套用默认宽
       node._jmsFromWorkflow = true;
       node._jmsDropStaleInputs?.();
-      // 恢复工作流里保存的「分类」；非视频分类顺手把遗留的「视频格式」置「关」
+      // 恢复工作流里保存的「分类」；非视频分类顺手把遗留的视频容器置「不保存视频」
       // （旧工作流可能在「图像」分类下留着 MP4 ⇒ 多图批次会被擅自合成视频）
       node._jmsSyncTab?.(node.properties?.jms_tab);
       if (node._jmsRefresh) requestAnimationFrame(() => {
