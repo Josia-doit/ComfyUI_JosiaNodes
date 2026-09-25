@@ -210,7 +210,15 @@ function drawSld(c, x, y, h, w, val, mn, mx, color, ena, lbl, gd) {
         }
     }
     const txt = `${lbl} ${val.toFixed(2)}`;
-    c.save(); c.fillStyle = over ? Cwarn : "rgba(255,255,255,0.95)";
+    // 超量程文字配色（非对称，保证可读）：
+    //  · 高于上限(>3)：橙底白字 —— 否则橙字橙底看不见；
+    //  · 低于下限(<-3)：保留现有橙字（深底上可见，填充宽度 0 无橙底）；
+    //  · 正常量程：白字。
+    let txtColor;
+    if (over && val > mx) txtColor = "#ffffff";
+    else if (over && val < mn) txtColor = Cwarn;
+    else txtColor = "rgba(255,255,255,0.95)";
+    c.save(); c.fillStyle = txtColor;
     c.font = "bold 11px sans-serif"; c.textAlign = "center"; c.textBaseline = "middle";
     c.fillText(txt, x + w / 2, oy + oh / 2);
     if (!show) {

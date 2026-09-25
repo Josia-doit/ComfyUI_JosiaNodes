@@ -325,6 +325,7 @@ function drawIdentifyingState(ctx, bx, by, bw, bh) {
 
 function drawIdentifiedState(ctx, bx, by, bw, bh, info, node) {
     const mt = info.modelType || MT.AIO;
+    const noMain = info.noMain || false;
     const fileName    = info.fileName || "";
     const fileSizeMB  = info.fileSizeMB || 0;
     const clipSizeMB  = info.clipSizeMB || 0;
@@ -334,43 +335,51 @@ function drawIdentifiedState(ctx, bx, by, bw, bh, info, node) {
     const ggufQuant   = info.ggufQuant || null;
     const lockUnet    = info.lockUnet ?? true;
 
-    // ── 第一行：[Tag] 文件名… → 类型描述 ──
+    // ── 第一行 ──
     const row1Y = by + 14;
     let x = bx + 10;
 
-    // Tag
-    const { tag, tagColor, tagLabel } = getTypeTag(mt, ggufQuant);
-    if (tag && tagColor) {
-        ctx.font = "bold 9px sans-serif";
-        const tagW = ctx.measureText(tag).width + 10;
-        ctx.fillStyle = tagColor;
-        ctx.beginPath(); roundRect(ctx, x, row1Y - 8, tagW, 16, 3); ctx.fill();
-        ctx.fillStyle = "#fff";
+    if (noMain) {
+        // 未选主模型，但已选 CLIP/VAE 等附属模型：信息窗第一行提示，第二行显示其体积
+        ctx.fillStyle = C_DIM;
+        ctx.font = "11px sans-serif";
         ctx.textAlign = "left"; ctx.textBaseline = "middle";
-        ctx.fillText(tag, x + 5, row1Y);
-        x += tagW + 6;
-    }
-
-    // 文件名
-    const rightDescW = ctx.measureText(tagLabel).width + 10;
-    const maxNameW = bw - (x - bx) - rightDescW - 12;
-    ctx.fillStyle = "#ddd";
-    ctx.font = "11px sans-serif";
-    ctx.textAlign = "left"; ctx.textBaseline = "middle";
-    let dispName = fileName || "?";
-    if (ctx.measureText(dispName).width > maxNameW) {
-        while (dispName.length > 6 && ctx.measureText(dispName + "…").width > maxNameW) {
-            dispName = dispName.slice(0, -1);
+        ctx.fillText("未选主模型 · 附属模型体积", x, row1Y);
+    } else {
+        // Tag
+        const { tag, tagColor, tagLabel } = getTypeTag(mt, ggufQuant);
+        if (tag && tagColor) {
+            ctx.font = "bold 9px sans-serif";
+            const tagW = ctx.measureText(tag).width + 10;
+            ctx.fillStyle = tagColor;
+            ctx.beginPath(); roundRect(ctx, x, row1Y - 8, tagW, 16, 3); ctx.fill();
+            ctx.fillStyle = "#fff";
+            ctx.textAlign = "left"; ctx.textBaseline = "middle";
+            ctx.fillText(tag, x + 5, row1Y);
+            x += tagW + 6;
         }
-        dispName += "…";
-    }
-    ctx.fillText(dispName, x, row1Y);
 
-    // 类型描述
-    ctx.fillStyle = C_DIM;
-    ctx.font = "9.5px sans-serif";
-    ctx.textAlign = "right";
-    ctx.fillText(tagLabel, bx + bw - 10, row1Y);
+        // 文件名
+        const rightDescW = ctx.measureText(tagLabel).width + 10;
+        const maxNameW = bw - (x - bx) - rightDescW - 12;
+        ctx.fillStyle = "#ddd";
+        ctx.font = "11px sans-serif";
+        ctx.textAlign = "left"; ctx.textBaseline = "middle";
+        let dispName = fileName || "?";
+        if (ctx.measureText(dispName).width > maxNameW) {
+            while (dispName.length > 6 && ctx.measureText(dispName + "…").width > maxNameW) {
+                dispName = dispName.slice(0, -1);
+            }
+            dispName += "…";
+        }
+        ctx.fillText(dispName, x, row1Y);
+
+        // 类型描述
+        ctx.fillStyle = C_DIM;
+        ctx.font = "9.5px sans-serif";
+        ctx.textAlign = "right";
+        ctx.fillText(tagLabel, bx + bw - 10, row1Y);
+    }
 
     // ── 第二行：模型尺寸（左）→ UNET保活状态（右）──
     const row2Y = by + 38;
@@ -378,7 +387,14 @@ function drawIdentifiedState(ctx, bx, by, bw, bh, info, node) {
     ctx.textAlign = "left"; ctx.textBaseline = "middle";
 
     let sizeStr = "";
-    if (mt === MT.AIO) {
+    if (noMain) {
+        // 未选主模型：只显示已选附属模型（CLIP/VAE1/VAE2）的体积，不显示 UNET 占位
+        const parts = [];
+        if (clipSizeMB > 0) parts.push(`CLIP ${formatSize(clipSizeMB)}`);
+        if (vaeSizeMB > 0)  parts.push(`VAE1 ${formatSize(vaeSizeMB)}`);
+        if (hasVae2) parts.push(vae2SizeMB > 0 ? `VAE2 ${formatSize(vae2SizeMB)}` : "VAE2 -");
+        sizeStr = parts.join("  |  ");
+    } else if (mt === MT.AIO) {
         sizeStr = fileSizeMB > 0 ? formatSize(fileSizeMB) : "";
     } else {
         const parts = [];
@@ -479,8 +495,9 @@ function setNodePhase(node, phase, info = {}) {
 // ─── 当用户选择模型后：文件夹预判 → API精确确认 ───
 async function onModelSelected(node, modelName) {
     if (!modelName || modelName === PLACEHOLDER_MODEL) {
-        setNodePhase(node, PHASE.IDLE);
         applyModelTypeLinkage(node, MT.UNKNOWN);
+        // 未选主模型：若已选 CLIP/VAE 等附属模型，信息窗仍显示其体积
+        refreshAllSizes(node);
         return;
     }
 
@@ -638,19 +655,39 @@ async function refreshAllSizes(node) {
     const vaeW   = findWidget(node, "vae_name");
     const vae2W  = findWidget(node, "vae2_name");
     const modelVal = modelW?.value;
-    if (!modelVal || modelVal === PLACEHOLDER_MODEL) return;
-
     const clipVal = clipW?.value || "";
     const vaeVal  = vaeW?.value || "";
     const vae2Val = vae2W?.value || "";
-    const result = await fetchModelType(modelVal, clipVal, vaeVal, vae2Val);
-    if (!result) return;
 
-    const mt = node._stateInfo?.modelType || mapApiType(result.model_type);
+    const hasMain = !!(modelVal && modelVal !== PLACEHOLDER_MODEL);
+    const hasSecondary = (clipVal && clipVal !== PLACEHOLDER_CLIP)
+                       || (vaeVal && vaeVal !== PLACEHOLDER_VAE)
+                       || (vae2Val && vae2Val !== PLACEHOLDER_VAE2);
+
+    // 既无主模型也无附属模型：回到空闲态
+    if (!hasMain && !hasSecondary) {
+        setNodePhase(node, PHASE.IDLE, { noMain: false });
+        return;
+    }
+
+    const result = await fetchModelType(hasMain ? modelVal : "", clipVal, vaeVal, vae2Val);
+    if (!result) {
+        // API 失败：无主模型时无法兜底，退回空闲；有主模型则交由调用方原逻辑
+        if (!hasMain) {
+            setNodePhase(node, PHASE.IDLE, { noMain: false });
+        }
+        return;
+    }
+
+    const mt = hasMain
+        ? (node._stateInfo?.modelType || mapApiType(result.model_type))
+        : MT.UNKNOWN;
+
     setNodePhase(node, PHASE.IDENTIFIED, {
         ...(node._stateInfo || {}),
         modelType: mt,
-        fileName: modelVal.split("/").pop() || modelVal,
+        noMain: !hasMain,                       // 未选主模型但有附属模型：信息窗显示其体积
+        fileName: hasMain ? (modelVal.split("/").pop() || modelVal) : "",
         fileSizeMB: result.file_size_mb || 0,
         clipSizeMB: result.clip_size_mb || 0,
         vaeSizeMB: result.vae_size_mb || 0,
@@ -694,7 +731,8 @@ function initNode(node) {
     const modelVal = modelW?.value;
 
     if (!modelVal || modelVal === PLACEHOLDER_MODEL) {
-        setNodePhase(node, PHASE.IDLE);
+        // 无主模型：若已选 CLIP/VAE 等附属模型，启动后主动拉取其体积显示
+        refreshAllSizes(node);
     } else {
         // 立即用已保存的类型/文件名显示，避免空白
         const savedType = node._confirmedModelType || node.properties?.model_type;
@@ -716,6 +754,59 @@ function initNode(node) {
     enforceMinSize(node);
 }
 
+// ─── 父级类别前缀（💻 cat/）：仅作用于 JosiaCheckpointPlus 的 main_model ───
+// 后端 checkpoint_plus.py 的 _MODEL_CAT_MAP（相对路径 → checkpoints/diffusion_models/
+// unet_gguf）经 /josia/model_categories 暴露。本层只把 cat 当显示前缀，绝不改动
+// combo 的 value（与 model_folder_colors「只改显示不改值」原则一致，老工作流零影响）。
+// 着色：cat 段由 model_folder_colors 拆成浅灰 span 弱化存在感（图标 💻 与子级 📂 区分层级）；
+// 彩色段仍是 📂 子文件夹，不占用其 12 色环。
+let _catMap = {};
+let _catMapLoaded = false;
+
+async function loadCatMap() {
+    if (_catMapLoaded) return;
+    _catMapLoaded = true;
+    try {
+        const resp = await fetch("/josia/model_categories");
+        if (resp.ok) {
+            _catMap = await resp.json();
+            // 拉到后强制重绘，确保已创建的 main_model 也补上 💻 前缀
+            try {
+                const nodes = app.graph?._nodes;
+                if (Array.isArray(nodes)) {
+                    for (const n of nodes) {
+                        if (n?.widgets) n.setDirtyCanvas?.(true, false);
+                    }
+                }
+            } catch (e) {}
+        }
+    } catch (e) {
+        _catMap = {};
+    }
+}
+
+/** 给 main_model 包一层 getOptionLabel，拼出「💻 cat/」中性前缀；命中不了则回退不带前缀。 */
+function decorateMainModelCat(w) {
+    if (!w || w.type !== "combo" || w.name !== "main_model" || w._josiaCatWrapped) return false;
+    const prev = w.options.getOptionLabel;
+    w._josiaCatPrev = prev;
+    w._josiaCatWrapped = function (value) {
+        let base;
+        try {
+            base = typeof prev === "function" ? prev(value) : value;
+        } catch (e) {
+            base = value;
+        }
+        base = base == null ? "" : String(base);
+        if (!_catMapLoaded) return base; // 还没拉到类别表 → 先不带前缀，绝不破坏选择
+        const cat = _catMap[value];
+        if (!cat) return base; // 命中不了（动态/外部/云端映射）→ 回退不带前缀
+        return "💻 " + cat + "/" + base;
+    };
+    w.options.getOptionLabel = w._josiaCatWrapped;
+    return true;
+}
+
 // ─── 注册扩展 ───
 app.registerExtension({
     name: "JosiaCheckpointPlus",
@@ -729,6 +820,12 @@ app.registerExtension({
             const r = origCreated?.apply(this, arguments);
             this.size[0] = DEFAULT_NODE_WIDTH;
             this._josiaSized = true;
+            // 父级类别前缀：main_model 加 💻 cat/（同步一次 + 微任务兜底，应对候选项延迟补齐）
+            const wrapCat = () => {
+                try { decorateMainModelCat(findWidget(this, "main_model")); } catch (e) {}
+            };
+            wrapCat();
+            queueMicrotask(wrapCat);
             setTimeout(() => {
                 initNode(this);
                 if (!this._statePhase) setNodePhase(this, PHASE.IDLE);
@@ -867,5 +964,10 @@ app.registerExtension({
             initNode(node);
             if (!node._statePhase) setNodePhase(node, PHASE.IDLE);
         }, 100);
+    },
+
+    // ── setup：启动即拉取父级类别映射表（💻 cat/ 前缀用） ──
+    async setup() {
+        loadCatMap();
     },
 });

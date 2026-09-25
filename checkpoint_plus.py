@@ -148,44 +148,72 @@ def _get_gguf_class(class_name: str):
         return None
 
 
-def _get_all_checkpoints() -> list:
+# ── 父级类别（ComfyUI 模型类别目录）显示顺序：checkpoints < diffusion_models < unet_gguf ──
+_CAT_ORDER = {"checkpoints": 0, "diffusion_models": 1, "unet_gguf": 2}
+
+def _list_with_cat(folder_key):
+    """取某类别目录的文件列表，并打上类别标签（如 "checkpoints"）。失败时返回空。"""
     try:
-        return folder_paths.get_filename_list("checkpoints")
+        return [(n, folder_key) for n in folder_paths.get_filename_list(folder_key)]
     except Exception:
         return []
 
+def _list_unet_gguf_walk_with_cat():
+    """兜底：直接遍历 diffusion_models / unet_gguf 文件夹（兼容插件未注册 / 自定义路径）。"""
+    out = []
+    for fk in ("diffusion_models", "unet_gguf"):
+        folders = []
+        try:
+            folders += list(folder_paths.get_folder_paths(fk))
+        except Exception:
+            pass
+        for folder in folders:
+            if not os.path.isdir(folder):
+                continue
+            for root, _, files in os.walk(folder):
+                for f in files:
+                    if f.lower().endswith(".gguf"):
+                        rel = os.path.relpath(os.path.join(root, f), folder).replace("\\", "/")
+                        out.append((rel, fk))
+    return out
 
-def _get_all_unets() -> list:
-    candidates = []
-    # 常规 diffusion_models 列表（已含 .gguf，因 GGUF 插件把 .gguf 注册进了扩展名）
-    try:
-        candidates += list(folder_paths.get_filename_list("diffusion_models"))
-    except Exception:
-        pass
-    # GGUF UNET：优先使用 ComfyUI-GGUF 插件注册的 unet_gguf 列表
-    try:
-        candidates += list(folder_paths.get_filename_list("unet_gguf"))
-    except Exception:
-        pass
-    # 兜底：直接遍历文件夹（兼容插件未注册 / 自定义路径的极端情况）
-    folders = []
-    try:
-        folders += list(folder_paths.get_folder_paths("diffusion_models"))
-    except Exception:
-        pass
-    try:
-        folders += list(folder_paths.get_folder_paths("unet_gguf"))
-    except Exception:
-        pass
-    for folder in folders:
-        if not os.path.isdir(folder):
+def _get_combined_model_list_with_cat():
+    """合并 checkpoints + diffusion_models + unet_gguf，给每个模型打上父级类别，
+    并按三级键排序（类别 → 子文件夹优先于根目录 → 子文件夹/文件名）。
+
+    同时刷新模块级 `_MODEL_CAT_MAP`（供前端显示 📁 父级前缀用）。
+    排序键保证：同一类别连续成块；同类内子文件夹连续；根目录模型落在各自类别段末尾，
+    不再散落到别的类别模型中间。
+    """
+    raw = (
+        _list_with_cat("checkpoints")
+        + _list_with_cat("diffusion_models")
+        + _list_with_cat("unet_gguf")
+        + _list_unet_gguf_walk_with_cat()
+    )
+    # 绝对路径精确去重：保留首个命中的类别（优先级 checkpoints→diffusion_models→unet_gguf）
+    seen = {}
+    for name, cat in raw:
+        if not name:
             continue
-        for root, _, files in os.walk(folder):
-            for f in files:
-                if f.lower().endswith(".gguf"):
-                    rel = os.path.relpath(os.path.join(root, f), folder).replace("\\", "/")
-                    candidates.append(rel)
-    return _dedupe_and_sort(candidates)
+        abs_p = _resolve_full_path(name)
+        key = abs_p if abs_p else ("rel:" + name)
+        if key not in seen:
+            seen[key] = (name, cat)
+    # 三级排序键：(类别序, 是否有子文件夹[无则排末尾], 子文件夹, 文件名小写)
+    def sort_key(item):
+        name, cat = item
+        has_sub = "/" in name
+        sub = name.rsplit("/", 1)[0].lower() if has_sub else ""
+        return (_CAT_ORDER.get(cat, 999), 0 if has_sub else 1, sub, name.lower())
+    result = list(seen.values())
+    result.sort(key=sort_key)
+    # 刷新类别映射表（前端靠它显示 📁 父级前缀；不命中时回退不带前缀）
+    global _MODEL_CAT_MAP
+    _MODEL_CAT_MAP = {name: cat for name, cat in result}
+    return result
+
+_MODEL_CAT_MAP = {}
 
 
 def _resolve_full_path(rel_name: str):
@@ -268,13 +296,6 @@ def _get_all_vaes_extended() -> list:
         return folder_paths.get_filename_list("vae")
     except Exception:
         return []
-
-
-def _get_combined_model_list() -> list:
-    """合并 checkpoint + unet 列表（绝对路径去重 + 统一排序）"""
-    checkpoints = _get_all_checkpoints()
-    unets = _get_all_unets()
-    return _dedupe_and_sort(checkpoints + unets)
 
 
 def _safe_empty_cache():
@@ -480,6 +501,16 @@ def _register_api_routes():
 
         print("[JosiaCheckpointPlus] ✅ API端点已注册 → /josia/detect_model_type")
 
+        @routes.get("/josia/model_categories")
+        async def handle_model_categories(request):
+            """暴露模块级 _MODEL_CAT_MAP（相对路径 → 父级类别），供前端给 main_model 加 📁 前缀。"""
+            try:
+                return web.json_response(_MODEL_CAT_MAP)
+            except Exception:
+                return web.json_response({}, status=500)
+
+        print("[JosiaCheckpointPlus] ✅ API端点已注册 → /josia/model_categories")
+
     except Exception as e:
         print(f"[JosiaCheckpointPlus] ⚠️ API端点注册失败（ComfyUI版本可能过旧）：{e}")
 
@@ -501,7 +532,10 @@ class JosiaCheckpointPlus:
 
     @classmethod
     def INPUT_TYPES(cls):
-        model_list_raw = _get_combined_model_list()
+        # 合并列表带类别：刷新模块级 _MODEL_CAT_MAP（供前端显示 📁 父级前缀）；
+        # main_model 的 value 仍是纯相对路径，老工作流零影响。
+        combined_with_cat = _get_combined_model_list_with_cat()
+        model_list_raw = [name for name, _cat in combined_with_cat]
         model_list = [PLACEHOLDER_MODEL] + model_list_raw if model_list_raw else [PLACEHOLDER_MODEL]
         all_clips = [PLACEHOLDER_CLIP] + _get_all_clips()
         all_vaes  = [PLACEHOLDER_VAE] + _get_all_vaes()

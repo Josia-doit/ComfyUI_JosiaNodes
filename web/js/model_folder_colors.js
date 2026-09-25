@@ -26,6 +26,7 @@
  *      · 1.0 下拉菜单：`div.litemenu-entry`（菜单挂在 document.body 上）
  *      · 2.0 Vue：`[data-testid="widget-select-default-trigger|overlay"]`
  *    两处都用同一个「拆文本节点」函数：把 `📂 子文件夹` 拆成一个带色 span，
+ *    把 `💻 父级/`（JosiaCheckpointPlus 父级前缀）拆成浅灰 span 弱化显示，
  *    剩下的 `/文件名` 留在原文本节点里。
  *
  * ③ 为什么不用「patch LiteGraph.ContextMenu.prototype」：ComboWidget 引用的是
@@ -71,6 +72,9 @@ import { app } from "/scripts/app.js";
 const SETTING_ID = "JosiaNodes.ModelFolderColors";
 const HL_SETTING_ID = "JosiaNodes.ComboSelectedHighlight";
 const MARK = "📂 ";
+/** JosiaCheckpointPlus 父级类别前缀（checkpoint_plus.js 注入）：整段浅灰弱化，不占 12 色环 */
+const PARENT_MARK = "💻 ";
+const DIR_GRAY = "#8a8a8a";
 
 // ─────────────────────────── 颜色引擎 ───────────────────────────
 // 12 色环：色相等距展开，饱和度/亮度统一压到深浅主题都能读的区间
@@ -409,41 +413,116 @@ const SEL_VUE_OVERLAY = '[data-testid="widget-select-default-overlay"]';
 const SEL_VUE_TRIGGER = '[data-testid="widget-select-default-trigger"]';
 const SEL_SCAN = `${SEL_MENU}, ${SEL_VUE_OVERLAY}, ${SEL_VUE_TRIGGER}`;
 
-/** 从「📂 子文件夹/文件名」文本里切出三段信息 */
+/**
+ * 从下拉项文本里切出着色分段。兼容三种形态：
+ *   ① 「📂 子文件夹/文件名」                    → pre="" gray="" head="📂 子文件夹" rest="/文件名"
+ *   ② 「💻 父级/📂 子文件夹/文件名」            → pre="" gray="💻 父级/" head="📂 子文件夹" rest="/文件名"
+ *   ③ 「💻 父级/文件名」（着色关/根目录模型）    → pre="" gray="💻 父级/" head="" rest="文件名"
+ * 📂 / 💻 允许出现在文本任意位置（前面有其他前缀时切进 pre，保持原色）。
+ */
 function parseLabel(text) {
-  if (typeof text !== "string" || !text.startsWith(MARK)) return null;
-  const body = text.slice(MARK.length).replace(/\\/g, "/");
-  const i = body.lastIndexOf("/");
-  if (i <= 0) return null;
-  return {
-    key: body.slice(0, i).toLowerCase(),
-    head: MARK + body.slice(0, i), // 「📂 子文件夹」整段上色
-    rest: body.slice(i), // 「/文件名」保持原色
-  };
+  if (typeof text !== "string") return null;
+  const subIdx = text.indexOf(MARK);
+  const dirIdx = text.indexOf(PARENT_MARK);
+  if (subIdx < 0 && dirIdx < 0) return null;
+
+  let pre = "";
+  let gray = "";
+  let head = "";
+  let key = null;
+  let rest = "";
+
+  if (dirIdx >= 0 && (subIdx < 0 || dirIdx < subIdx)) {
+    pre = dirIdx > 0 ? text.slice(0, dirIdx) : "";
+    if (subIdx >= 0) {
+      gray = text.slice(dirIdx, subIdx);
+      const body = text.slice(subIdx + MARK.length).replace(/\\/g, "/");
+      const i = body.lastIndexOf("/");
+      if (i <= 0) return null;
+      head = MARK + body.slice(0, i);
+      key = body.slice(0, i).toLowerCase();
+      rest = body.slice(i);
+    } else {
+      // 没有 📂（着色关闭或根目录模型）：灰段只覆盖「💻 父级/」，文件名保持原色
+      const rel = text.slice(dirIdx + PARENT_MARK.length);
+      const slash = rel.indexOf("/");
+      if (slash < 0) return null;
+      gray = PARENT_MARK + rel.slice(0, slash + 1);
+      rest = rel.slice(slash + 1);
+    }
+  } else {
+    pre = subIdx > 0 ? text.slice(0, subIdx) : "";
+    const body = text.slice(subIdx + MARK.length).replace(/\\/g, "/");
+    const i = body.lastIndexOf("/");
+    if (i <= 0) return null;
+    head = MARK + body.slice(0, i);
+    key = body.slice(0, i).toLowerCase();
+    rest = body.slice(i);
+  }
+
+  return { pre, gray, head, key, rest };
 }
 
-const isColorSpan = (el) =>
-  el && el.nodeType === 1 && el.dataset && el.dataset.josiaMfc === "1";
-
 /**
- * 就地拆一个文本节点：`📂 sub/model.bin` → [带色 span「📂 sub」][文本「/model.bin」]
- * 复用左边已有的色 span，所以可以被反复调用而不重复插入。
+ * 就地拆一个文本节点为最多三段（均在文本节点前，顺序固定）：
+ *   [pre 纯文本段（极少见）][dir 浅灰「💻 父级/」段][sub 彩色「📂 子文件夹」段][文本「/文件名」]
+ * 复用已存在的 span（按 data-josia-mfc 角色识别），可被反复调用而不重复插入，
+ * Vue 改写文本节点 nodeValue 后再拆一次即可收敛。
  */
 function splitTextNode(tn, info, hex) {
   if (!info) return false;
-  const prev = tn.previousSibling;
-  let span;
-  if (isColorSpan(prev)) {
-    span = prev; // Vue 刚把整串写回来，复用我们原来的 span
-  } else {
-    span = document.createElement("span");
-    span.dataset.josiaMfc = "1";
-    tn.parentNode.insertBefore(span, tn);
+  const map = { pre: null, dir: null, sub: null };
+  let cur = tn.previousSibling;
+  while (cur && cur.nodeType === 1 && cur.dataset && cur.dataset.josiaMfc) {
+    map[cur.dataset.josiaMfc] = cur;
+    cur = cur.previousSibling;
   }
-  if (span.textContent !== info.head) span.textContent = info.head;
-  span.style.color = hex; // 用 textContent 写入，天然免疫 HTML 注入
+  const parent = tn.parentNode;
 
-  // 写 nodeValue 会再触发一次 characterData；此时已不带 📂，会自然收敛
+  // ③ 彩色 📂 子文件夹段 —— 已选项高亮靠 selector [data-josia-mfc="1"] 取它的颜色
+  let sub = map.sub;
+  if (info.head) {
+    if (!sub) {
+      sub = document.createElement("span");
+      sub.dataset.josiaMfc = "1";
+      parent.insertBefore(sub, tn);
+    }
+    if (sub.textContent !== info.head) sub.textContent = info.head;
+    sub.style.color = hex; // 用 textContent/style 写入，天然免疫 HTML 注入
+  } else if (sub) {
+    sub.remove();
+    sub = null;
+  }
+
+  // ② 浅灰父级目录段（弱化存在感，只提示层级作用）
+  let dir = map.dir;
+  if (info.gray) {
+    if (!dir) {
+      dir = document.createElement("span");
+      dir.dataset.josiaMfc = "dir";
+      parent.insertBefore(dir, sub || tn);
+    }
+    if (dir.textContent !== info.gray) dir.textContent = info.gray;
+    dir.style.color = DIR_GRAY;
+  } else if (dir) {
+    dir.remove();
+    dir = null;
+  }
+
+  // ① 更前面的纯文本前缀（保持原色）
+  let pre = map.pre;
+  if (info.pre) {
+    if (!pre) {
+      pre = document.createElement("span");
+      pre.dataset.josiaMfc = "pre";
+      parent.insertBefore(pre, dir || sub || tn);
+    }
+    if (pre.textContent !== info.pre) pre.textContent = info.pre;
+  } else if (pre) {
+    pre.remove();
+  }
+
+  // 写 nodeValue 会再触发一次 characterData；此时已不带标记，会自然收敛
   if (tn.nodeValue !== info.rest) tn.nodeValue = info.rest;
   return true;
 }
@@ -468,13 +547,14 @@ function colorizeContainer(el) {
   const entries = [];
   let node;
   while ((node = walker.nextNode())) {
-    if (isColorSpan(node.parentElement)) continue; // 我们自己插入的色 span → 跳过
+    if (node.parentElement?.dataset?.josiaMfc) continue; // 我们自己插入的拆分段 → 跳过
     const info = parseLabel(node.nodeValue);
     if (info) entries.push({ tn: node, info });
   }
   if (!entries.length) return;
 
-  const keys = new Set(entries.map((e) => e.info.key));
+  const keys = new Set();
+  for (const e of entries) if (e.info.key) keys.add(e.info.key);
   const multi = keys.size > 1; // 多个文件夹同框 ⇒ 这是一份真正的下拉列表
   let best = null;
   let bestScore = -1;
@@ -488,27 +568,29 @@ function colorizeContainer(el) {
   }
 
   for (const { tn, info } of entries) {
-    const full = info.head + info.rest;
     let hex = null;
-    if (!multi) {
-      hex = LABEL_CACHE.get(full); // ① 用户真的展开过列表 → 直接沿用那一行的颜色
-      if (!hex) {
-        // ② 没缓存（例如刚打开工作流、还没点开下拉）→ 找任一含该 key 的色表，
-        //    优先最近登记的（更可能是当前节点自己的那张表），避免退化成裸哈希色。
-        for (let i = MAPS.length - 1; i >= 0; i--) {
-          const c = MAPS[i].get(info.key);
-          if (c) {
-            hex = c;
-            break;
+    if (info.head) {
+      const full = info.head + info.rest;
+      if (!multi) {
+        hex = LABEL_CACHE.get(full); // ① 用户真的展开过列表 → 直接沿用那一行的颜色
+        if (!hex) {
+          // ② 没缓存（例如刚打开工作流、还没点开下拉）→ 找任一含该 key 的色表，
+          //    优先最近登记的（更可能是当前节点自己的那张表），避免退化成裸哈希色。
+          for (let i = MAPS.length - 1; i >= 0; i--) {
+            const c = MAPS[i].get(info.key);
+            if (c) {
+              hex = c;
+              break;
+            }
           }
         }
       }
-    }
-    if (!hex && best) hex = best.get(info.key); // ③ 同框多行 → 用覆盖键最多的表，天然去重
-    if (!hex) hex = primaryColor(info.key); // ④ 兜底
-    if (multi) {
-      if (LABEL_CACHE.size > 4096) LABEL_CACHE.clear();
-      LABEL_CACHE.set(full, hex);
+      if (!hex && best) hex = best.get(info.key); // ③ 同框多行 → 用覆盖键最多的表，天然去重
+      if (!hex) hex = primaryColor(info.key); // ④ 兜底
+      if (multi) {
+        if (LABEL_CACHE.size > 4096) LABEL_CACHE.clear();
+        LABEL_CACHE.set(full, hex);
+      }
     }
     try {
       splitTextNode(tn, info, hex);
@@ -536,7 +618,10 @@ function isInteresting(n) {
   if (!n) return false;
   if (n.nodeType === 3) {
     const v = n.nodeValue;
-    return typeof v === "string" && v.indexOf(MARK) >= 0;
+    return (
+      typeof v === "string" &&
+      (v.indexOf(MARK) >= 0 || v.indexOf(PARENT_MARK) >= 0)
+    );
   }
   if (n.nodeType !== 1) return false;
   if (n.matches?.(SEL_SCAN)) return true;
@@ -575,10 +660,10 @@ function installObserver() {
   else document.addEventListener("DOMContentLoaded", start, { once: true });
 }
 
-/** 关闭开关时把已上色的 DOM 还原（文本并回去、去掉色 span） */
+/** 关闭开关时把已上色的 DOM 还原（文本并回去、去掉所有拆分段 span） */
 function clearDomColors() {
   LABEL_CACHE.clear();
-  for (const span of document.querySelectorAll('span[data-josia-mfc="1"]')) {
+  for (const span of document.querySelectorAll('span[data-josia-mfc]')) {
     const next = span.nextSibling;
     if (next && next.nodeType === 3) {
       next.nodeValue = span.textContent + next.nodeValue;

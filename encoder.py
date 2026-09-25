@@ -8,7 +8,15 @@ Josia 文本编码节点【稳定版】
 
 说明：参考 Latent 方法内部固定为 index_timestep_zero（Flux/Krea2 必需，且为
       Qwen-Image-Edit-2511 的原生默认 ref method，适配单图编辑强参考、避免像素偏移），
-      不暴露 UI。模板保持硬编码 Qwen 图生图逻辑，本文件保持稳定行为。
+      不暴露 UI。
+      编码模式（视觉塔开关 vision_tower_mode）：
+        · 开启（默认）= Qwen 视觉塔模式：沿用硬编码 Qwen 图生图模板 + 视觉 token，
+          适用于 Qwen-Image-Edit 系列（自带视觉塔，可在条件里混合图像信息）。
+        · 关闭 = 标准文本模式：纯 clip.tokenize 文本编码、不注入视觉 token，
+          适用于 FLUX.2 Kontext / Klein / Krea2 原生等无视觉塔模型——这类模型
+          仅靠 reference_latents 接收多参考图，强行塞视觉 token 会污染文本条件。
+      参考 Latent（reference_latents）注入与编码模式解耦：两种模式都按 reference_latent_mode
+      注入，便于 Klein 类在「采样器 Latent 留空」时仍靠 reference_latents 提供图像。
 """
 import torch
 import math
@@ -28,9 +36,10 @@ QWEN_IMAGE_EDIT_TEMPLATE = "<|im_start|>system\nDescribe the key features of the
 class JosiaEncoder:
     CATEGORY = "⚡️JosiaNodes"
     DESCRIPTION = """🖊️ Josia 文本编码
-支持文生图与图生图一体化 CLIP/VAE 编码，最多融合 5 张参考图。
+支持文生图与图生图一体化 CLIP/VAE 编码，最多融合 10 张参考图。
 
-• 图像接口：默认仅显示「图像1」，接入后自动展开「图像2」…依次最多 5 张
+• 图像接口：默认仅显示「图像1」，接入后自动展开「图像2」…依次最多 10 张
+• 视觉塔编码模式：开启=Qwen视觉塔（默认，适用 Qwen-Image-Edit）；关闭=标准文本（适用 FLUX.2 Kontext / Klein / Krea2 原生等无视觉塔模型）
 • 图像参考模式：开启时参考图像生成Latent，关闭时输出空Latent
 • 负向提示词开关：关闭时自动将负向条件归零
 • 参考 Latent 模式：开启时注入参考Latent条件，关闭时仅使用文本条件
@@ -42,6 +51,12 @@ class JosiaEncoder:
         return {
             "required": {
                 "clip": ("CLIP", {"display_name": "CLIP"}),
+                "vision_tower_mode": ("BOOLEAN", {
+                    "default": True,
+                    "label_on": "✅ Qwen视觉塔",
+                    "label_off": "❎ 标准文本(Flux/Krea2/Klein)",
+                    "display_name": "视觉塔编码模式"
+                }),
                 "image_reference_switch": ("BOOLEAN", {
                     "default": True,
                     "label_on": "✅ 图生图模式",
@@ -77,7 +92,7 @@ class JosiaEncoder:
             },
             "optional": {
                 "vae": ("VAE", {"display_name": "VAE"}),
-                # 图像接口：name 必须是后端 kwarg 键 image1..image5（执行层按名取参），不可改成中文。
+                # 图像接口：name 必须是后端 kwarg 键 image1..image10（执行层按名取参），不可改成中文。
                 # 中文展示走 renderer 的 localized_name：后端这里声明的 display_name 会在
                 # 「节点重建」时被官方建节点代码换算成 localized_name（两者都是显示层，不影响执行）。
                 # 前端运行期动态 addInput 不走这条换算链路，须自行传 {localized_name:"图像N"}。
@@ -86,6 +101,11 @@ class JosiaEncoder:
                 "image3": ("IMAGE", {"display_name": "图像3"}),
                 "image4": ("IMAGE", {"display_name": "图像4"}),
                 "image5": ("IMAGE", {"display_name": "图像5"}),
+                "image6": ("IMAGE", {"display_name": "图像6"}),
+                "image7": ("IMAGE", {"display_name": "图像7"}),
+                "image8": ("IMAGE", {"display_name": "图像8"}),
+                "image9": ("IMAGE", {"display_name": "图像9"}),
+                "image10": ("IMAGE", {"display_name": "图像10"}),
             }
         }
 
@@ -93,9 +113,10 @@ class JosiaEncoder:
     RETURN_NAMES = ("正向条件", "负向条件", "Latent")
     FUNCTION = "encode"
 
-    def encode(self, clip, image_reference_switch, reference_latent_mode,
+    def encode(self, clip, vision_tower_mode, image_reference_switch, reference_latent_mode,
                positive_prompt, negative_switch, negative_prompt, vae=None,
-               image1=None, image2=None, image3=None, image4=None, image5=None):
+               image1=None, image2=None, image3=None, image4=None, image5=None,
+               image6=None, image7=None, image8=None, image9=None, image10=None):
         """
         核心编码逻辑
 
@@ -106,23 +127,21 @@ class JosiaEncoder:
         4. 有图像 + 开关1开 + 开关2开 → VAE编码Latent，参考Latent条件（参考图生图）
         """
 
-        images = [image1, image2, image3, image4, image5]
+        images = [image1, image2, image3, image4, image5, image6, image7, image8, image9, image10]
+        use_image = any(img is not None for img in images)
+
+        # ==============================================
+        # 【视觉编码（可选，受视觉塔开关约束）】
+        # 仅当 视觉塔模式开启 + 图生图开关开启 + 确实接图 三者同时满足，才构建千问
+        # 视觉 token；其余情况（标准文本模式 / 文生图 / 无图）一律纯文本，
+        # 不传 llama_template / images —— 否则模板文本或残留视觉 token 会被编进条件，
+        # 导致无视觉塔模型（Flux/Krea2/Klein）生成乱码或图像理解失败。
+        # ==============================================
+        build_vision = bool(vision_tower_mode and image_reference_switch and use_image)
         images_vl = []
         image_prompt = ""
-
-        # Llama模板（千问模型原生逻辑）
-        llama_template = QWEN_IMAGE_EDIT_TEMPLATE
-
-        # ==============================================
-        # 【CLIP视觉编码 - 处理所有参考图像】
-        # 真正进入「图生图」编码的条件 = 开关开启 且 确实接了图。
-        #   - 开关关（文生图模式）：即便接了图也严禁图像信息进入条件。
-        #   - 开关开但未接图：等价于文生图（纯文本条件，注入任何模板/视觉 token 都会脏）。
-        # 两种非图生图情况都必须与原生 CLIP 文本编码器行为一致：不传 llama_template、
-        # 不传 images，否则模板文本会被编进条件 → 生成图出现乱码文字/图标。
-        # ==============================================
-        use_image_mode = bool(image_reference_switch and any(img is not None for img in images))
-        if use_image_mode:
+        if build_vision:
+            llama_template = QWEN_IMAGE_EDIT_TEMPLATE
             for i, image in enumerate(images):
                 if image is not None:
                     samples = image.movedim(-1, 1)
@@ -135,91 +154,74 @@ class JosiaEncoder:
                     image_prompt += "Picture {}: <|vision_start|><|image_pad|><|vision_end|>".format(i + 1)
 
         # ==============================================
-        # 【Latent生成】
+        # 【参考 Latent 列表（与编码模式解耦）】
+        # 所有已接图像统一 VAE 编码成 reference_latents，仅受 reference_latent_mode、
+        # 是否接图、是否接 VAE 约束 —— 与「视觉塔开关」「图生图开关」均无关。
+        #   · Klein 类（无视觉塔）即便把「采样器 Latent」留空（文生图模式），
+        #     也能仅靠 reference_latents 把图像喂给模型（参考生成）；
+        #   · Qwen 类多图参考走同一份列表，视觉 token 与 reference_latents 并存不冲突。
         # ==============================================
+        ref_latents = None
+        if use_image and reference_latent_mode and vae is not None:
+            ref_latents = []
+            for img in images:
+                if img is not None:
+                    ref_latents.append(vae.encode(img[:, :, :, :3]))
 
-        # 情况1：无图像输入 → 1024x1024空Latent（复刻原生EmptyLatentImage）
-        if image1 is None:
+        # ==============================================
+        # 【采样器 Latent（图生图开关控制）】
+        #   无图 / 文生图 → 空 Latent（文生图按原图尺寸；无图固定 1024）；
+        #   图生图       → image1 单图 VAE 编码（复刻原生 VAEEncode）。
+        # 图生图时 image1 既作采样器 Latent 又作 reference_latents[0]，这是
+        # FLUX Kontext / Qwen 编辑的标准「源图即噪声起点且作参考」形态。
+        # ==============================================
+        if not use_image:
             latent = torch.zeros([1, 4, 128, 128],
                                 device=comfy.model_management.intermediate_device(),
                                 dtype=comfy.model_management.intermediate_dtype())
-            latent_output = {
-                "samples": latent,
-                "downscale_ratio_spacial": 8,
-            }
-            vae_encoded_latent = None
-            ref_latents = None
-
-        # 情况2：有图像但开关1关闭 → 原图尺寸空Latent（复刻原生EmptyLatentImage）
+            latent_output = {"samples": latent, "downscale_ratio_spacial": 8}
         elif not image_reference_switch:
             pixel_width = image1.shape[2]
             pixel_height = image1.shape[1]
             batch_size = image1.shape[0]
             width = (pixel_width // 8) * 8
             height = (pixel_height // 8) * 8
-
             latent = torch.zeros([batch_size, 4, height // 8, width // 8],
                                 device=comfy.model_management.intermediate_device(),
                                 dtype=comfy.model_management.intermediate_dtype())
-            latent_output = {
-                "samples": latent,
-                "downscale_ratio_spacial": 8,
-            }
-            vae_encoded_latent = None
-            ref_latents = None
-
-        # 情况3和4：有图像且开关1开启（图生图模式）
+            latent_output = {"samples": latent, "downscale_ratio_spacial": 8}
         else:
             if vae is not None:
-                # 主输出 Latent：image1 单图编码（复刻原生VAEEncode，格式不变）
-                vae_encoded_latent = vae.encode(image1[:, :, :, :3])
-                latent_output = {"samples": vae_encoded_latent}
-
-                # 多参考 Latent 列表：image1 已编码，再补 image2..image5，
-                # 拼成 reference_latents（对齐 Flux Kontext / Qwen 多参考）。
-                ref_latents = [vae_encoded_latent]
-                for img in images[1:]:
-                    if img is not None:
-                        ref_latents.append(vae.encode(img[:, :, :, :3]))
+                latent_output = {"samples": vae.encode(image1[:, :, :, :3])}
             else:
-                # VAE未接入，降级为空Latent
                 pixel_width = image1.shape[2]
                 pixel_height = image1.shape[1]
                 batch_size = image1.shape[0]
                 width = (pixel_width // 8) * 8
                 height = (pixel_height // 8) * 8
-
                 latent = torch.zeros([batch_size, 4, height // 8, width // 8],
                                     device=comfy.model_management.intermediate_device(),
                                     dtype=comfy.model_management.intermediate_dtype())
-                latent_output = {
-                    "samples": latent,
-                    "downscale_ratio_spacial": 8,
-                }
-                vae_encoded_latent = None
-                ref_latents = None
+                latent_output = {"samples": latent, "downscale_ratio_spacial": 8}
 
         # ==============================================
         # 【正向条件编码】
-        # 文生图模式（use_image_mode=False）：与原生 CLIP 文本编码器完全一致，
-        # 仅 clip.tokenize(纯提示词)，不传 llama_template / images —— 否则模板文本
-        # 会被编进条件，生成图出现乱码文字。
-        # 图生图模式（use_image_mode=True）：使用千问原生 llama_template + 视觉 token。
+        #   build_vision=True  → 千问 llama_template + 视觉 token（Qwen 视觉塔模式）；
+        #   build_vision=False → 纯 clip.tokenize(提示词)（标准文本模式）。
         # ==============================================
-        if use_image_mode:
+        if build_vision:
             tokens = clip.tokenize(image_prompt + positive_prompt, images=images_vl, llama_template=llama_template)
         else:
             tokens = clip.tokenize(positive_prompt)
         positive_conditioning = clip.encode_from_tokens_scheduled(tokens)
 
         # ==============================================
-        # 【参考Latent条件 - 仅图生图+开关2开+有VAE编码】
-        # 多参考：把 ref_latents（image1..imageN 的 VAE latent 列表）整体注入
-        #         reference_latents；Flux / Krea2 系模型据此读取多张参考图。
-        #         reference_latents_method 内部固定为 index_timestep_zero（不暴露 UI）。
+        # 【参考 Latent 条件注入（与视觉塔模式解耦）】
+        # 只要开了 reference_latent_mode 且确实编码出 ref_latents 就注入，两种编码
+        # 模式通用：Qwen 多图参考 / Klein 仅靠 reference_latents 提供图像。
+        # reference_latents_method 内部固定 index_timestep_zero（不暴露 UI）。
         # ==============================================
-        if use_image_mode and reference_latent_mode and ref_latents is not None:
-            # 注入多参考 Latent 列表（复刻原生 ReferenceLatent / MultiReferenceLatent 节点）
+        if reference_latent_mode and ref_latents is not None:
             positive_conditioning = node_helpers.conditioning_set_values(positive_conditioning, {
                 "reference_latents": ref_latents
             }, append=True)
@@ -229,18 +231,17 @@ class JosiaEncoder:
 
         # ==============================================
         # 【负向条件编码】
-        # 负向开关开启：负向=负向提示词；同时把参考 Latent 也注入负向条件
-        #   （对齐社区 MultiReferenceLatent 行为，Flux 多参考更稳）。
-        # 负向开关关闭：负向归零；不注入参考 Latent（严格遵守负向开关规则）。
+        #   负向开关开启：负向=负向提示词（是否带视觉 token 由 build_vision 决定）；
+        #   负向开关关闭：负向归零（空文本，视觉 token 跟随 build_vision）。
+        #   参考 Latent 注入（仅负向开启时）与正向一致。
         # ==============================================
         if negative_switch:
-            if use_image_mode:
+            if build_vision:
                 neg_tokens = clip.tokenize(negative_prompt, images=images_vl, llama_template=llama_template)
             else:
                 neg_tokens = clip.tokenize(negative_prompt)
             negative_conditioning = clip.encode_from_tokens_scheduled(neg_tokens)
-            # 负向也注入参考 Latent（仅在此处 negative_switch=True 分支，遵守开关）
-            if use_image_mode and reference_latent_mode and ref_latents is not None:
+            if reference_latent_mode and ref_latents is not None:
                 negative_conditioning = node_helpers.conditioning_set_values(negative_conditioning, {
                     "reference_latents": ref_latents
                 }, append=True)
@@ -248,7 +249,7 @@ class JosiaEncoder:
                     "reference_latents_method": REFERENCE_LATENTS_METHOD
                 })
         else:
-            if use_image_mode:
+            if build_vision:
                 empty_tokens = clip.tokenize("", images=images_vl, llama_template=llama_template)
             else:
                 empty_tokens = clip.tokenize("")

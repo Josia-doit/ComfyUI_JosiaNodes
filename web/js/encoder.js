@@ -9,8 +9,8 @@ import { app } from "../../../scripts/app.js";
 import { ComfyWidgets } from "../../../scripts/widgets.js";
 
 // ── 动态图像输入 ─────────────────────────────────────────────
-// 默认只显示 image1；接入 imageN 后自动出现 image(N+1)，最多 image5。
-// 依赖后端 INPUT_TYPES 已声明 image1..image5（encoder.py），且均带 display_name 图像N。
+// 默认只显示 image1；接入 imageN 后自动出现 image(N+1)，最多 image10。
+// 依赖后端 INPUT_TYPES 已声明 image1..image10（encoder.py），且均带 display_name 图像N。
 //
 // 🔴 接口显示名的正确字段是 localized_name，不是 display_name：
 //   前端两套渲染器解析插槽文本的链路都是 `label || localized_name || name`
@@ -25,9 +25,9 @@ import { ComfyWidgets } from "../../../scripts/widgets.js";
 //     只传 display_name 会被忽略 → 回落成裸键名（显示 Image N），
 //     直到刷新页面节点重建、由后端 display_name 重新算出 localized_name 才变中文。
 // ⚠️ 前端绝不可改写 input.name：input.name 是执行时传给后端 encode(**inputs) 的
-//    kwarg 键名，必须是后端声明的英文键 image1..image5。改写 .name 会导致
+//    kwarg 键名，必须是后端声明的英文键 image1..image10。改写 .name 会导致
 //    TypeError: encode() got an unexpected keyword argument '图像1'。
-const MAX_IMAGES = 5;
+const MAX_IMAGES = 10;
 const IMG_DISPLAY_PREFIX = "图像";
 
 function getImageInputs(node) {
@@ -48,7 +48,7 @@ function getImageInputs(node) {
 // 按「链式」规则刷新可见图像接口：image1 永远存在；imageN 存在 ⇔ 1..N-1 全部已连接。
 // 仅移除未连接的尾部接口，已连接的接口任何情况下都保留。
 //
-// ⚠️ 防重复关键：绝不为 image1 调用 addInput。后端 INPUT_TYPES 已声明 image1..image5，
+// ⚠️ 防重复关键：绝不为 image1 调用 addInput。后端 INPUT_TYPES 已声明 image1..image10，
 // 若再 add 一个「图像1」，会与后端那个重名 → 出现两个「图像1」，且二者位置映射错乱
 // （一个喂 image1、一个错位喂 image2），表现为「接入第一个无法使用，却多出接口」。
 // 判定「是否已存在」一律用编号(末尾数字)，不用中文名——因为部分 ComfyUI 版本
