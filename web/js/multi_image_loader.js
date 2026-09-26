@@ -893,6 +893,23 @@ async function initNode(node) {
         }
     };
 
+    // ★ 按当前节点尺寸重算容器高度（幂等：只在偏差 >1px 时写入）。
+    //    updateLayout / onResize 各自算高度容易在「工作流载入」这条路径上漏掉 ——
+    //    onConfigure 只同步宽度，容器就挂着创建时的旧高度过界。这里收敛成一处公式，
+    //    供 onConfigure 与逐帧守卫（onDrawBackground）共用。
+    node.applyGalleryHeight = function() {
+        if (!container) return false;
+        const sizeH = this.size?.[1];
+        if (!sizeH || sizeH <= 0) return false;
+        const galleryY = galleryWidget.last_y || 40;
+        const { PB } = LAYOUT;
+        const availableGalleryHeight = Math.max(40, sizeH - galleryY - PB);
+        const current = parseFloat(container.style.height);
+        if (Number.isFinite(current) && Math.abs(current - availableGalleryHeight) <= 1) return false;
+        container.style.height = availableGalleryHeight + "px";
+        return true;
+    };
+
     // ★ 完全对标 updateLayout — 统一的高度计算公式
     function updateLayout(forceShrink = false) {
         if (isLayouting) return;
@@ -998,6 +1015,16 @@ async function initNode(node) {
         scheduleGridFit();
     };
 
+    // ★ 逐帧守卫 — 任何时候容器高度与节点高度脱钩都自动纠正（启动载入 / 撤销 / 端口增减 / 主题切换等）。
+    //    onDrawBackground 每帧调用：只读 size 与 last_y 做一次数值比对，偏差 ≤1px 时零写入，开销可忽略。
+    //    真正写样式时顺带 scheduleGridFit（内部幂等，多拍兜底）让网格跟着新高度重排。
+    const origDrawBackground = node.onDrawBackground;
+    node.onDrawBackground = function(ctx) {
+        if (origDrawBackground) origDrawBackground.apply(this, arguments);
+        if (this.flags?.collapsed) return;
+        if (this.applyGalleryHeight && this.applyGalleryHeight()) scheduleGridFit();
+    };
+
     // ★ v6.6: 覆盖 onConfigure — 对标节点模式
     // 🔴 端口同步已提前到**原型级** onConfigure（见 beforeRegisterNodeDef）：
     //    从工作流载入时这一拍比 initNode 的 await 更早，才能真正消掉「50 个端口先涌现」的抖动。
@@ -1007,10 +1034,15 @@ async function initNode(node) {
         const out = origOnConfigure ? origOnConfigure.apply(this, arguments) : undefined;
         setTimeout(() => {
             if (this.syncLayoutToNode) this.syncLayoutToNode();
+            // ★ 容器高度也必须按恢复后的节点尺寸重算 —— 否则启动时容器挂旧高度过界，
+            //    要等用户手动拖一下尺寸才触发 onResize 纠正。last_y 此时可能还没量准，
+            //    再补两拍；期间由 onDrawBackground 逐帧守卫兜底。
+            if (this.applyGalleryHeight) this.applyGalleryHeight();
             try {
                 const n = pathCountOf(this);
                 if (n > 0) shrinkOutputsTo(this, n);
             } catch (e) { /* 忽略 */ }
+            setTimeout(() => { if (this.applyGalleryHeight) this.applyGalleryHeight(); scheduleGridFit(); }, 100);
             scheduleGridFit();
         }, 0);
         return out;
