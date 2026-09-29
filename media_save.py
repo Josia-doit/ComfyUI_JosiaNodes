@@ -53,6 +53,16 @@ from fractions import Fraction
 import numpy as np
 import torch
 from PIL import Image
+
+# 🔁 批量进度回写（批量解码循环用）：解码成功/失败 → 写回 manifest，供加载Latent test 信息窗续跑。
+#    __init__ 已把包目录塞进 sys.path，绝对导入即可。
+try:
+    from batch_shared import set_status
+except Exception:
+    try:
+        from .batch_shared import set_status
+    except Exception:
+        set_status = None
 from PIL.PngImagePlugin import PngInfo
 
 import folder_paths
@@ -82,7 +92,8 @@ except Exception:          # pragma: no cover - 环境缺 PyAV 时降级
 
 NODE_DISPLAY_NAME_MEDIA_SAVE = "Josia媒体保存"
 
-# ⭐ = 该格式支持写入工作流元数据（PNG 用私有 chunk；其余用 EXIF UserComment）
+# ⭐ = 该格式的文件**拖回 ComfyUI 能还原工作流**（前端 1.52.7 有对应解析器且写入格式匹配）：
+#   PNG / APNG 用私有 tEXt 块；WebP / AVIF（含动图 WebP）用 EXIF ASCII 条目（见 _exif_bytes）。
 STAR = "⭐ "
 
 # 这些格式**只有**无损模式（没有有损分支），「质量」对它无意义 ⇒ 节点内部一律按 100 处理，
@@ -92,17 +103,21 @@ ALWAYS_LOSSLESS = {"PNG", "TIFF", "BMP", "TGA", "PPM", "PBM", "ICO", "DDS", "PCX
 # ------------------------------------------------------------------
 # 图像格式目录
 # key         : 下拉里的显示名（可含 ⭐ 前缀）
-# (PIL格式名, 扩展名, 可写元数据, 支持无损, 需要插件)
+# (PIL格式名, 扩展名, 拖回可还原工作流, 支持无损, 需要插件)
+# 可还原 = 前端有该格式解析器 + 我们的写入格式与其契约匹配（实测见
+# backup/_test_metadata_formats.py）。JPEG / HEIF / JXL / TIFF / JPEG2000
+# 前端根本没有解析器，写得再好也拖不回 ⇒ 不打星。
 # ------------------------------------------------------------------
+# 🔴 排序规则：有星（拖回可还原工作流）在前，无星在后；组内按常用度。
 IMAGE_FORMATS = {
     "PNG":       ("PNG",      "png",  True,  True,  False),
-    "JPEG":      ("JPEG",     "jpg",  True,  False, False),
     "WebP":      ("WEBP",     "webp", True,  True,  False),
     "AVIF":      ("AVIF",     "avif", True,  True,  True),
-    "HEIF":      ("HEIF",     "heif", True,  True,  True),
-    "JPEG XL":   ("JXL",      "jxl",  True,  True,  True),
-    "TIFF":      ("TIFF",     "tif",  True,  True,  False),
-    "JPEG 2000": ("JPEG2000", "jp2",  True,  True,  False),
+    "JPEG":      ("JPEG",     "jpg",  False, False, False),
+    "HEIF":      ("HEIF",     "heif", False, True,  True),
+    "TIFF":      ("TIFF",     "tif",  False, True,  False),
+    "JPEG XL":   ("JXL",      "jxl",  False, True,  True),
+    "JPEG 2000": ("JPEG2000", "jp2",  False, True,  False),
     "BMP":       ("BMP",      "bmp",  False, True,  False),
     "TGA":       ("TGA",      "tga",  False, True,  False),
     "PPM":       ("PPM",      "ppm",  False, True,  False),
@@ -130,13 +145,14 @@ NONE_AUDIO = "不保存音频"
 # 视频容器：显示名 -> (扩展名, 实现, 说明)
 #   实现 "av"   = PyAV（与原生 SaveWEBM / SaveVideo 同路）
 #   实现 "pillow" = Pillow（GIF / APNG / 动图WebP）
+# 🔴 排序规则同图像：有星（拖回可还原工作流）在前，无星在后；组内按常用度。
 VIDEO_CONTAINERS = {
     "MP4":      ("mp4",  "av",     "H.264 / H.265 / AV1"),
-    "MKV":      ("mkv",  "av",     "H.264 / H.265 / AV1"),
     "WebM":     ("webm", "av",     "VP9 / AV1"),
-    "GIF":      ("gif",  "pillow", "无元数据 · 256 色"),
     "APNG":     ("png",  "pillow", "动图 PNG · 支持元数据"),
     "动图WebP": ("webp", "pillow", "动图 WebP · 支持元数据"),
+    "MKV":      ("mkv",  "av",     "H.264 / H.265 / AV1"),
+    "GIF":      ("gif",  "pillow", "无元数据 · 256 色"),
 }
 VIDEO_CONTAINERS[NONE_VIDEO] = (None, None, "")   # 恒在最后（见 NONE_* 说明）
 
@@ -166,21 +182,29 @@ OFF_AUDIO = ("关", NONE_AUDIO)
 # 供「不保存XX」的**免解码直通**判定使用（见 save_media）。
 VIDEO_OUTPUT_CONTAINERS = ("MP4", "MKV", "WebM", "GIF", "APNG", "动图WebP")
 
+# 能承载音轨的真视频容器（动图 GIF/APNG/动图WebP 装不下音轨）：
+# 潜空间里有音频路且要出这几种容器 ⇒ 音频要解码出来**封装成音轨**（对齐原生「创建视频」）。
+AUDIO_MUX_CONTAINERS = ("MP4", "MKV", "WebM")
+
+# 🔴 排序规则同图像：有星在前、无星在后，组内按常用度（MP3 最常用）。
 AUDIO_FORMATS = {
-    "FLAC": ("flac", "flac"),
-    "WAV":  ("wav",  "wav"),
     "MP3":  ("mp3",  "mp3"),
+    "FLAC": ("flac", "flac"),
     "Opus": ("opus", "opus"),
+    "WAV":  ("wav",  "wav"),
 }
 AUDIO_FORMATS[NONE_AUDIO] = (None, None)          # 恒在最后（见 NONE_* 说明）
 
-# 能写入工作流元数据的容器（判定依据＝保存实现里**真的会写**）：
-#   视频 —— MP4 / MKV / WebM 走 PyAV 容器级 metadata；APNG / 动图WebP 走 PNG 私有块 / EXIF；
+# 能写入工作流元数据且拖回 ComfyUI 可还原的容器（实测见 backup/_test_metadata_formats.py）：
+#   视频 —— MP4 走 ffmpeg use_metadata_tags（keys/ilst 盒）；WebM 走 EBML SimpleTag；
+#           APNG 走 PNG tEXt；动图 WebP 走 EXIF ASCII 条目；
+#           MKV 前端没有解析器（分发只认 video/webm，不认 x-matroska）⇒ 不打星；
 #           GIF 是 256 色调色板格式、没有元数据容器，故不打星。
-#   音频 —— 三者都走 PyAV 容器级 metadata（FLAC / Opus 落 Vorbis Comment，MP3 落 ID3）。
+#   音频 —— FLAC 落 Vorbis Comment、MP3 落 ID3 TXXX、Opus（.opus 在浏览器归 audio/ogg）
+#           走 Ogg comment，三者前端均有解析器。
 # 注意：这两个集合**只用于「下拉加星 + 元数据开关显隐」**，不参与参数取值，
 #       所以不会影响已保存的工作流。
-VIDEO_META_OK = {"MP4", "MKV", "WebM", "APNG", "动图WebP"}
+VIDEO_META_OK = {"MP4", "WebM", "APNG", "动图WebP"}
 AUDIO_META_OK = {"FLAC", "MP3", "Opus"}
 
 # 原生 AudioSaveHelper 的 opus 采样率白名单与质量档位
@@ -189,6 +213,26 @@ Q_OPUS = {"64k": 64000, "96k": 96000, "128k": 128000, "192k": 192000, "320k": 32
 Q_MP3 = {"64k": 64000, "96k": 96000, "128k": 128000, "192k": 192000, "320k": 320000}
 
 WATERMARK = "[Josia媒体保存]"
+
+
+def _notify_progress(nid, file, idx, total, phase, ok, fail):
+    """批量循环的实时进度 ⇒ WebSocket 广播（事件 `josia_batch_progress`）。
+
+    消费方：
+      · 加载Latent 面板 —— 每个文件开始/完成时立即刷新任务池（解码中 → 已完成实时跳动）；
+      · 媒体保存状态行 —— 显示「⏳ 批量解码中 i/N：文件名」，解视频不用傻等。
+    PromptServer 不存在（离线 / 单测）时静默跳过。
+    """
+    try:
+        from server import PromptServer
+        ps = PromptServer.instance
+        if ps is not None:
+            ps.send_sync("josia_batch_progress", {
+                "nid": str(nid or ""), "file": str(file or ""),
+                "idx": int(idx), "total": int(total),
+                "phase": str(phase), "ok": int(ok), "fail": int(fail)})
+    except Exception:
+        pass
 
 # 默认文件名前缀：`JosiaMedia\Media_%001%`
 #   · `JosiaMedia\` ＝ output 下的子目录（不用点「选择目录」也能自动分层）
@@ -203,6 +247,8 @@ DEFAULT_PREFIX = "JosiaMedia\\Media_%001%"
 USE_JOSIA_VAE = "使用Josia模型加载VAE"     # VAE1 检测到 Josia 模型加载节点时自动选中的项
 VAE1_PLACEHOLDER = "🎨 请选择模型…"        # VAE1 的默认占位符（未检测到 Josia 模型加载节点时）
 PLACEHOLDER_VAE2 = "🎵 请选择模型…"        # VAE2 的默认项（占位符与模型加载节点保持一致）
+# 「Josia模型加载」节点的 class_type（与前端 JOSIA_LOADER_TYPES 同名同义）。
+LOADER_CLASS_TYPES = ("JosiaCheckpointPlus", "JosiaModelLoader")
 
 
 def _vae_choices():
@@ -255,30 +301,94 @@ def _load_vae_by_name(name):
         return None
 
 
-def _resolve_vae(wired, choice, which="vae1"):
-    """决定用哪个 VAE。优先级：端口接线 > Josia 共享注册表 / models/vae。
+def _loader_vae_names(prompt):
+    """从本次执行的 API 工作流里取「Josia模型加载」节点选中的 VAE 文件名。
 
-    wired : 该端口接进来的 VAE（可为 None）
-    choice: VAE1 / VAE2 下拉的当前值
-    which : "vae1" | "vae2"，用于取共享注册表
+    🔴 为什么需要它：`使用Josia模型加载VAE` 原先只认**进程内存注册表**（后又补了磁盘
+    标签回退），而两者都只在「Josia模型加载」**真正执行过**才有值 —— 用户把模型加载
+    节点摆进工作流、选好 VAE，但它的输出没接给任何下游（或只跑「加载Latent → 媒体保存」
+    这条解码链）时，ComfyUI 根本不会执行它 ⇒ 内存与磁盘全空 ⇒ 解码直接判「没有 VAE」。
+    而 hidden 输入 `prompt` 里带着**整张工作流的节点参数**，正好能直接读到用户在模型
+    加载节点上选的是哪个 VAE ⇒ 按文件名加载即可，与执行顺序彻底解耦。
+
+    返回 {"vae1": 文件名或 "", "vae2": 文件名或 ""}；解析不出返回空串，绝不抛。
     """
+    out = {"vae1": "", "vae2": ""}
+    try:
+        graph = json.loads(prompt) if isinstance(prompt, str) else prompt
+        if not isinstance(graph, dict):
+            return out
+        for node in graph.values():
+            if not isinstance(node, dict):
+                continue
+            if str(node.get("class_type") or "") not in LOADER_CLASS_TYPES:
+                continue
+            ins = node.get("inputs") or {}
+            for key, slot in (("vae_name", "vae1"), ("vae2_name", "vae2")):
+                v = ins.get(key)
+                # 被转成连线输入时值是 ["node_id", slot] 列表；占位符「🎨/🎵 请选择模型…」不算选择
+                if isinstance(v, str) and v.strip() and "请选择" not in v:
+                    out[slot] = v.strip()
+    except Exception:
+        pass
+    return out
+
+
+def _resolve_vae(wired, choice, which="vae1", loader_name="", out=None):
+    """决定用哪个 VAE。优先级：端口接线 > 模型加载节点共享 > models/vae 目录。
+
+    wired       : 该端口接进来的 VAE（可为 None）
+    choice      : VAE1 / VAE2 下拉的当前值
+    which       : "vae1" | "vae2"，用于取共享注册表
+    loader_name : 工作流里「Josia模型加载」节点当前选中的 VAE 文件名（可空）
+    out         : 可选 dict，命中的 VAE 来源标签会写进 out[which]（供落盘元数据记录）
+    """
+    def _done(v, label):
+        if isinstance(out, dict):
+            out[which] = label
+        return v
+
     if wired is not None:
-        return wired                        # 接线最优先（前端会把下拉灰化提示）
+        return _done(wired, "端口接线")                 # 接线最优先（前端会把下拉灰化提示）
     if choice in (VAE1_PLACEHOLDER, PLACEHOLDER_VAE2):
-        return None                         # 占位符 = 未选择，不解码
+        return _done(None, "")                          # 占位符 = 未选择，不解码
     if choice == USE_JOSIA_VAE:
         # 🔴 VAE1 / VAE2 都走这一支（VAE2 取注册表里的音频 VAE），否则 VAE2 永远联动不上。
         key = "vae2" if which == "vae2" else "vae1"
+        reg_label = ""
+        try:
+            if _model_registry is not None:
+                reg_label = (_model_registry.get_labels() or {}).get(key) or ""
+        except Exception:
+            reg_label = ""
         v = _model_registry.get_vae(key) if _model_registry is not None else None
+        # ① 工作流里选的就是已载入的那个 ⇒ 直接用现成对象（省一次重载）
+        if v is not None and (not loader_name or loader_name == reg_label):
+            return _done(v, reg_label)
+        # ② 图里选了新的（或内存里根本没有）⇒ 按工作流里的选择加载：这才叫「联动」，
+        #    与「模型加载节点有没有被执行」无关。
+        if loader_name:
+            v2 = _load_vae_by_name(loader_name)
+            if v2 is not None:
+                print(f"{WATERMARK} 📦 已按工作流里「Josia模型加载」的选择加载 VAE：{loader_name}")
+                return _done(v2, loader_name)
         if v is not None:
-            return v
+            return _done(v, reg_label)
+        # ③ 兜底：模型加载节点执行过、把文件名登记到磁盘了 ⇒ 按登记文件名重载
+        if reg_label:
+            v3 = _load_vae_by_name(reg_label)
+            if v3 is not None:
+                print(f"{WATERMARK} 📦 共享 VAE 对象不在内存（模型加载节点本次未运行），"
+                      f"已按登记文件名重新加载：{reg_label}")
+                return _done(v3, reg_label)
         # 🔴 VAE2（音频 VAE）**缺失是正常的**（单 VAE 模型本来就没有音频路）⇒ 静默返回 None，
         #    别每次运行都刷一条警告；VAE1 缺失则是真问题，明确提示。
         if key == "vae1":
-            print(f"{WATERMARK} ⚠️ VAE1 选了「{USE_JOSIA_VAE}」，但「Josia模型加载」还没有载入过 VAE —— "
-                  f"请先运行一次模型加载节点，或在本节点给「Video_VAE」端口接线。")
-        return None
-    return _load_vae_by_name(choice)
+            print(f"{WATERMARK} ⚠️ VAE1 选了「{USE_JOSIA_VAE}」，但工作流里没有「Josia模型加载」节点"
+                  f"（或它没有选 VAE）—— 请给「Video_VAE」端口接线，或在模型加载节点上选中 VAE。")
+        return _done(None, "")
+    v = _load_vae_by_name(choice)
+    return _done(v, choice if v is not None else "")
 
 
 # ------------------------------------------------------------------
@@ -721,20 +831,25 @@ def _png_metadata(prompt, extra_pnginfo, write_meta):
 
 
 def _exif_bytes(prompt, extra_pnginfo, write_meta):
-    """非 PNG 格式的元数据载体：EXIF UserComment（0x9286，EXIF 规范要求 UNICODE 前缀）。"""
+    """非 PNG 格式的元数据载体，对标前端解析器契约（pnginfo.ts / metadata/avif.ts）：
+    EXIF IFD0 两条 **type2(ASCII)** 条目，值形如 `prompt:{json}` / `workflow:{json}`，
+    前端按 ASCII 值第一个':'切键名。tag 用 0x010F(Make) / 0x0110(Model) 作载体 ——
+    解析器不关心 tag 编号，只要求条目是 ASCII 类型且键名匹配。
+    🔴 JSON 必须 ensure_ascii=True（默认）：ASCII 条目经 latin-1 编码，塞 UTF-8 原文会炸。
+    """
     if not write_meta or args.disable_metadata:
         return None
-    payload = {}
-    if prompt is not None:
-        payload["prompt"] = prompt
+    workflow = None
     if extra_pnginfo is not None:
-        for x in extra_pnginfo:
-            payload[x] = extra_pnginfo[x]
-    if not payload:
+        workflow = extra_pnginfo.get("workflow")
+    if prompt is None and workflow is None:
         return None
     try:
         ex = Image.Exif()
-        ex[0x9286] = b"UNICODE\x00" + json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        if prompt is not None:
+            ex[0x010F] = "prompt:" + json.dumps(prompt)
+        if workflow is not None:
+            ex[0x0110] = "workflow:" + json.dumps(workflow)
         return ex.tobytes()
     except Exception as e:
         print(f"{WATERMARK} ⚠️ EXIF 元数据构造失败（继续保存，不带元数据）：{e}")
@@ -803,6 +918,59 @@ def _to_save_tensor(t):
 # ==================================================================
 # 节点
 # ==================================================================
+# ==================================================================
+# 🔁 内置 for 循环（批量自循环）辅助
+# ==================================================================
+def _pool_pending(nid):
+    """取某节点任务池里所有「未完成」的文件名（按队列顺序；done 不含）。
+
+    供 save_media 的内置 for 循环使用：首项消费本次接入的 Latent 之后，
+    循环从这里继续取文件，直到清空任务池。
+    """
+    try:
+        from batch_shared import node_data
+        b = node_data(nid)
+    except Exception:
+        return []
+    out = []
+    for f in (b.get("queue") or []):
+        st = ((b.get("files") or {}).get(str(f)) or {}).get("status", "pending")
+        if st != "done":
+            out.append(str(f))
+    return out
+
+
+def _pool_load_latent(name):
+    """内置 for 循环用：把任务池里的 .latent 读成 Latent 字典。
+
+    复用「Josia加载Latent」节点的读盘逻辑（魔数分派 safetensors / torch.save、
+    音视频混合潜空间重组），保证两条路径对同一文件的行为完全一致。
+    返回 (latent_dict, "") 或 (None, 错误信息)。
+    """
+    try:
+        import load_latent as _llt
+    except Exception as _e:
+        return None, f"无法加载 load_latent 模块：{_e}"
+    path = _llt._resolve_path(name)
+    if not path:
+        return None, "文件已从磁盘消失"
+    try:
+        sd = _llt._read_latent_file(path)
+    except Exception as e:
+        return None, f"读取失败：{e}"
+    samples = _llt._rebuild_av(sd)
+    if samples is None:
+        samples = _llt._extract_tensor(sd)
+    if samples is None:
+        return None, "没有可用的 latent 张量"
+    if torch.is_tensor(samples):
+        samples = samples.to(torch.float32)
+    return {"samples": samples}, ""
+
+
+
+
+
 class JosiaMediaSave:
     """🗂️ Josia 媒体保存
 
@@ -835,7 +1003,7 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
 · 音频：AUDIO → FLAC / MP3 / Opus
 · Latent：可选把 .latent 一起落地（Video_Latent / Audio_Latent 单独输出音视频潜空间）
 
-格式名前的 ⭐ 表示该格式能写入工作流元数据（PNG 私有块 / EXIF UserComment）。
+格式名前的 ⭐ 表示该格式拖回 ComfyUI 能还原工作流（PNG 私有块 / EXIF ASCII 条目 / 容器级 metadata）。
 「清理缓存」只在解码前或保存后回收无引用张量与 CUDA 空闲块，**绝不卸载已加载模型**，
 所以重复运行工作流不会变慢。
 
@@ -911,8 +1079,9 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
                 "音频格式": (list(AUDIO_FORMATS.keys()), {
                     "default": NONE_AUDIO,
                     "tooltip": "接入音频时按此格式落盘：FLAC（无损）/ MP3 / Opus。"
-                               "选「不保存音频」表示不输出音频：音频路不加载 VAE、不解码。"
-                               "注意：选它时不会再去加载音频 VAE，也不会提示「缺音频 VAE」。",
+                               "选「不保存音频」＝不**单独**输出音频文件；"
+                               "但视频容器是 MP4/MKV/WebM 时，潜空间里的音频仍会作为音轨"
+                               "封装进视频（与原生「创建视频」一致，码率用「音频质量」）。",
                 }),
                 "音频质量": (list(Q_OPUS.keys()), {
                     "default": "128k",
@@ -961,7 +1130,7 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
                 "写入元数据": ("BOOLEAN", {
                     "default": True,
                     "label_on": "✅ 写入", "label_off": "❎ 不写",
-                    "tooltip": "把工作流写入文件（PNG 私有块 / 其他格式的 EXIF UserComment）。",
+                    "tooltip": "把工作流写入文件，保存的成品拖回 ComfyUI 可还原工作流（无星格式写入后无法读回）。",
                 }),
                 "临时预览": ("BOOLEAN", {
                     "default": False,
@@ -984,8 +1153,9 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
                     "default": PLACEHOLDER_VAE2,
                     "tooltip":
                         "解码**音频路**潜空间用的 VAE（LTX / MiniMax H3 等双 VAE 模型）。\n"
-                        "• 默认「🎵 请选择模型…」= 不使用音频 VAE，音频路不会解码。\n"
-                        "• 想同时保存音频时，在这里选模型，或在「Audio_VAE」端口连线。\n"
+                        "• 默认「🎵 请选择模型…」= 不使用音频 VAE，音频路不会解码"
+                        "（视频容器=MP4/MKV/WebM 时解出的视频将**没有声音**）。\n"
+                        "• 想要音轨 / 音频文件时，在这里选模型，或在「Audio_VAE」端口连线。\n"
                         "• 与 VAE1 完全独立：VAE1 保持默认也能单独指定音频 VAE。",
                 }),
             },
@@ -1003,8 +1173,11 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
                     "解码「Latent」里**音频路**用的 VAE（LTX / MiniMax H3 等双 VAE 模型）。\n"
                     "• 接了这里 ⇒ 下方 VAE2 下拉自动灰化。\n"
                     "• 潜空间里检测到音频路、但这里没接 VAE 时会明确告警，而不是静默丢掉音频。"}),
-                "视频": ("VIDEO", {"tooltip": "已有的视频对象，按所选容器原样转存。"}),
+                "视频": ("VIDEO", {"tooltip": "已有的视频对象，按所选容器原装转存。"}),
                 "音频": ("AUDIO", {"tooltip": "要落盘的音频。"}),
+                # 🔁 批量解码联动走**纯后台**：上游「加载Latent test」把（节点ID + 源文件名）
+                #    塞进 Latent 字典的 "_josia_batch" 标记里，save_media 取出回写进度后消费掉。
+                #    不占任何输入端口（媒体保存 UI 复杂度已高，哥哥要求不再加）。
             },
             "hidden": {
                 "prompt": "PROMPT",
@@ -1263,7 +1436,8 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
         return file
 
     def _save_video_av(self, container, images_t, folder, name, counter, fps, codec, crf,
-                       prompt, extra_pnginfo, write_meta, results, video_obj=None):
+                       prompt, extra_pnginfo, write_meta, results, video_obj=None,
+                       audio=None, audio_quality=None):
         if av is None:
             raise RuntimeError("未安装 PyAV（av），无法写出视频。请在设置里安装依赖。")
 
@@ -1303,7 +1477,10 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
             encoder = VIDEO_ENCODERS.get(use_codec, "libx264")
             save_alpha = images_t.shape[-1] == 4 and use_codec == "vp9"
 
-            container_obj = av.open(path, mode="w")
+            # MP4 的元数据要落进 udta.meta.keys/ilst 盒（前端按此解析），
+            # ffmpeg 需显式开 use_metadata_tags，否则键值全被丢进默认 iTunes 原子 ⇒ 拖回读不到。
+            mp4_opts = {"movflags": "+use_metadata_tags"} if container == "MP4" else None
+            container_obj = av.open(path, mode="w", options=mp4_opts)
             if write_meta and not args.disable_metadata:
                 try:
                     if prompt is not None:
@@ -1326,6 +1503,11 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
             if use_codec == "av1":
                 stream.options["preset"] = "6"
 
+            # 🔴 音轨流必须在**写头之前**挂上（FFmpeg 不许 header 写完后再加流 ⇒
+            #    time_base=0/0 ⇒ mux 崩「Cannot rebase to zero time」，2026-09-29 实测）。
+            audio_ctx = (self._prep_audio_stream(container_obj, container, audio, audio_quality)
+                         if audio is not None else None)
+
             for frame in images_t:
                 if save_alpha:
                     nd = torch.clamp(frame[..., :4] * 255, 0, 255).to(torch.uint8).numpy()
@@ -1336,6 +1518,9 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
                 for packet in stream.encode(vf):
                     container_obj.mux(packet)
             container_obj.mux(stream.encode())
+            # 音频包在视频包之后补写（同一个容器、同一个 header）
+            if audio_ctx is not None:
+                self._encode_audio_stream(container_obj, audio_ctx)
             container_obj.close()
 
         results["images"].append({"filename": file, "subfolder": _rel_sub(folder), "type": results["type"]})
@@ -1345,6 +1530,68 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
     # ------------------------------------------------------------------
     # 保存：音频 / 潜空间
     # ------------------------------------------------------------------
+    def _prep_audio_stream(self, container_obj, container, audio, quality):
+        """在**写头之前**给视频容器挂音轨流（对齐原生「创建视频」的有声输出）。
+
+        🔴 FFmpeg 不允许 header 写完后再加流——那会让 stream.time_base=0/0，
+        mux 时报「Cannot rebase to zero time」（2026-09-29 实测）。所以流在这里建，
+        音频包在视频包 mux 完之后由 _encode_audio_stream 补写。
+        audio = {"waveform": [C, T] 或 [B, C, T]，"sample_rate": sr}；B>1 时取第 0 条
+        （容器路径一次只写一个视频文件）。失败只告警不中断——视频本体还要继续编。
+        """
+        if av is None or not audio:
+            return None
+        codec = {"MP4": "aac", "MKV": "aac", "WebM": "libopus"}.get(container)
+        if codec is None:
+            return None
+        try:
+            wf = audio["waveform"].detach().cpu().float()
+            if wf.dim() == 3:
+                wf = wf[0]                    # 批次只取第 0 条
+            sr = int(audio["sample_rate"])
+            if codec == "libopus":
+                # Opus 采样率白名单（同 _save_audio 的约束）
+                if sr > 48000:
+                    sr = 48000
+                elif sr not in OPUS_RATES:
+                    for rate in sorted(OPUS_RATES):
+                        if rate > sr:
+                            sr = rate
+                            break
+                    if sr not in OPUS_RATES:
+                        sr = 48000
+            layout = "mono" if wf.shape[0] == 1 else "stereo"
+            st = container_obj.add_stream(codec, rate=sr, layout=layout)
+            st.bit_rate = (Q_OPUS if codec == "libopus" else Q_MP3).get(quality, 128000)
+            return {"stream": st, "waveform": wf, "sr": sr, "layout": layout, "codec": codec}
+        except Exception as e:
+            print(f"{WATERMARK} ⚠️ 音轨流创建失败（{e}），视频保持无声。")
+            return None
+
+    def _encode_audio_stream(self, container_obj, ctx):
+        """把 _prep_audio_stream 准备好的音轨编码进容器（视频包 mux 完之后调用）。"""
+        try:
+            st, wf = ctx["stream"], ctx["waveform"]
+            try:
+                # aac 原生吃 fltp（平面格式 → 形状 [C, T]）
+                frame = av.AudioFrame.from_ndarray(wf.numpy(), format="fltp", layout=ctx["layout"])
+            except Exception:
+                # 兜底：交错 flt（形状 [1, C*T]，与 _save_audio 同款）
+                frame = av.AudioFrame.from_ndarray(
+                    wf.reshape(1, -1).numpy(), format="flt", layout=ctx["layout"])
+            frame.sample_rate = ctx["sr"]
+            frame.pts = 0
+            for packet in st.encode(frame):
+                container_obj.mux(packet)
+            for packet in st.encode(None):
+                container_obj.mux(packet)
+            print(f"{WATERMARK} 🎵 音轨已封装进容器（{ctx['codec']}，"
+                  f"{(st.bit_rate or 0) // 1000}k，{ctx['sr']}Hz）")
+            return True
+        except Exception as e:
+            print(f"{WATERMARK} ⚠️ 音轨封装失败（{e}），视频保持无声。")
+            return False
+
     def _save_audio(self, audio, container_name, quality, folder, name, counter,
                     prompt, extra_pnginfo, write_meta, results):
         if av is None:
@@ -1441,6 +1688,15 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
             if extra_pnginfo is not None:
                 for x in extra_pnginfo:
                     metadata[x] = json.dumps(extra_pnginfo[x])
+            # 「Josia加载Latent」信息窗据此显示这个 .latent 对应哪套 VAE（解析不出就空着）。
+            # 优先记本轮真正用于解码的 VAE；免解码直通（只存 Latent）时退回工作流里
+            # 「Josia模型加载」选中的那个 —— 两种情况用户都能一眼看出该配哪套 VAE。
+            _labels = getattr(self, "_vae_labels", None) or {}
+            _loaders = getattr(self, "_loader_names", None) or {}
+            for _slot, _mkey in (("vae1", "josia_vae1"), ("vae2", "josia_vae2")):
+                _nm = _labels.get(_slot) or _loaders.get(_slot) or ""
+                if _nm and _nm != "端口接线":
+                    metadata[_mkey] = _nm
         output = {"latent_format_version_0": torch.tensor([])}
         samples = latent.get("samples") if isinstance(latent, dict) else latent
         if getattr(samples, "is_nested", False):
@@ -1505,25 +1761,58 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
             Latent = g("Latent")
             视频 = g("视频")
             音频 = g("音频")
+            # 🔴 强制兜底（按**实际产物**判）：三路没有任何一路真能出文件、但接了 Latent
+            #    ⇒「落盘 .latent」视为开启（本节点接入工作流就必须留下产物，不许空转）。
+            #    典型：图像格式选了 PNG 但「图像」端口没接帧 + 视频/音频路都是「不保存X」——
+            #    上面的强制规则只看下拉值，会漏掉这种情况 ⇒ 编码跑完才报「不会产生任何文件」。
+            if (not 保存潜空间 and Latent is not None
+                    and (图像格式 == NONE_IMAGE or 图像 is None)
+                    and 视频容器 in OFF_VIDEO
+                    and 音频格式 in OFF_AUDIO):
+                保存潜空间 = True
+                print(f"{WATERMARK} ⚡ 三路均无实际产物（图像格式选了但「图像」端口没接帧，"
+                      f"视频/音频路均为「不保存X」）⇒ 自动落盘 Latent 兜底。")
             prompt = g("prompt")
             extra_pnginfo = g("extra_pnginfo")
+            # 「使用Josia模型加载VAE」的联动源：直接读本次工作流里模型加载节点选的 VAE
+            # 文件名（见 _loader_vae_names）——不再依赖那个节点有没有被执行过。
+            self._loader_names = _loader_vae_names(prompt)
+            self._vae_labels = {}          # 本轮实际用到的 VAE 来源标签（落盘时写进 .latent 元数据）
+            # 🔁 批量联动（纯后台）：从 Latent 字典里取上游「加载Latent test」夹带的
+            #    "_josia_batch" 标记（nid + 源文件名），按节点 ID 分桶回写进度 ⇒
+            #    多个加载Latent节点互不串扰。取完**立即 pop 消费**：
+            #    透传输出 / 落盘的 Latent 都不再携带标记，下游不会重复回写。
+            src_nid, src_file = "default", ""
+            if isinstance(Latent, dict):
+                _marker = Latent.pop("_josia_batch", None)
+                if isinstance(_marker, dict):
+                    src_nid = str(_marker.get("nid") or "default")
+                    src_file = str(_marker.get("name") or "").strip()
 
-            # 🔴 免解码直通判定 —— 决定**要不要碰 VAE**。
-            #    用户选「不保存X」的用意是跳过 VAE 解码：大分辨率 / 长视频最容易在解码这一步
-            #    OOM，先把整批潜空间秒速落盘，等工作流跑完、模型显存腾出来后，再用
-            #    「Josia加载Latent」单独批量解码（批量解码计划见 docs/）。所以这条路必须做到：
-            #      ① 不加载 VAE（光把模型读进显存就已是最大一笔开销）② 不调用任何 decode
-            #      ③ 不对 Latent 做额外加工，只是原样写盘。
-            #    注意「要不要解码」是**按路**判的：视频路 = 出视频文件或静态图，音频路 = 出音频文件。
-            有视频路, 有音频路 = _latent_routes(Latent)
-            需要视频解码 = (Latent is not None and 有视频路
-                       and (图像格式 != NONE_IMAGE or 视频容器 in VIDEO_OUTPUT_CONTAINERS))
-            需要音频解码 = (Latent is not None and 有音频路 and 音频格式 not in OFF_AUDIO)
+            # 🔁 批量模式兜底：循环跑完（加载节点已无待处理）时 Latent 为 None、
+            #    且没有任何其它输入 ⇒ 静默跳过，不抛「至少要接入之一」，
+            #    避免队列 batch count 设大后刷一堆红。文件名置空则不写进度。
+            if Latent is None and 图像 is None and 视频 is None and 音频 is None:
+                print(f"{WATERMARK} ℹ️ 批量解码：本次无待处理文件（Latent 为 None），跳过。")
+                return {"ui": {"josia_info": {
+                            "skipped": True, "src": src_file,
+                            # 🔴 前端状态行直接显示这句：池跑空不再是一句莫名的「没有产物落盘」
+                            "skip_msg": "💤 任务池已全部完成（或尚未载入文件）—— 本次无待解码 Latent，已跳过。",
+                        }},
+                        "result": (None, "", None, None, None)}
 
-            # VAE 来源解析：接线 > Josia 跨节点共享注册表 / models/vae 目录模型
-            # 🔴 两路都不需要解码时**连加载都不做**（下拉里选了模型也不从磁盘读）。
-            vae = _resolve_vae(g("Video_VAE"), g("VAE1", VAE1_PLACEHOLDER), "vae1") if 需要视频解码 else None
-            vae2 = _resolve_vae(g("Audio_VAE"), g("VAE2", PLACEHOLDER_VAE2), "vae2") if 需要音频解码 else None
+            # ================================================================
+            # 🔁 内置 for 循环：首个工作项＝本次接入的 Latent；若带批量标记 ⇒
+            #    追加任务池里其余「未完成」文件，一次运行清空整个任务池。
+            #    VAE 通过 _vae_cache 整轮只加载一次——显存曲线与手动逐个跑完全相同。
+            # ================================================================
+            items = [(Latent, src_nid, src_file)]
+            if src_file:
+                for _n in _pool_pending(src_nid):
+                    if _n != src_file:
+                        items.append((None, src_nid, _n))
+            _vae_cache = {}
+            音频_in = 音频            # 循环里「音频」会被潜空间解出的音频路重绑，每轮要复位
 
             t_start = time.time()
 
@@ -1531,7 +1820,7 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
             if 清理缓存 != "关" and 清理时机 == "解码前":
                 clear_cache(清理缓存)
 
-            # ---- 1.5 落盘目录 / 文件名 / 计数器（提前算：供「解码前先存潜空间」使用）---
+            # ---- 1.5 落盘目录 / 文件名 / 计数器（整轮一次；序号跨文件连续顺延）---
             # 先解析通配符（%date% / %time% / %date:yyyyMMdd% / %time:hhmm% …），
             # 再判断用户是不是在前缀里手填了绝对路径（选了「选择目录」按钮就会）。
             filename_prefix = _resolve_wildcards(filename_prefix) or DEFAULT_PREFIX
@@ -1552,9 +1841,6 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
                 folder_type = "output"
 
             results = {"images": [], "audio": [], "latents": [], "type": folder_type, "animated": False}
-            main_path = ""
-            已提前保存潜空间 = False
-            提前保存的潜空间路径 = ""
 
             # 目录 / 文件名 / 计数器（宽高此时尚未解码，用 0；get_save_image_path 实际不依赖宽高）
             if abs_folder:
@@ -1574,68 +1860,6 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
 
             counter0 = counter      # 本次第一个文件用的序号（前端信息窗展示用）
 
-            # 🔴 解码前先存潜空间（OOM 保护）：
-            #    解码是显存大头，OOM 时若还没存潜空间就会彻底报废数据；
-            #    先落下 .latent，即使后续解码爆显存，也能用「Josia加载Latent」节点
-            #    释放显存、单独解码续上，大幅拉高解码成功率。
-            if Latent is not None and 保存潜空间:
-                try:
-                    f = self._save_latent(Latent, full_folder, name, counter,
-                                          prompt, extra_pnginfo, results)
-                    已提前保存潜空间 = True
-                    提前保存的潜空间路径 = f
-                    if not main_path:
-                        main_path = f
-                    print(f"{WATERMARK} 💾 已**先**保存潜空间（解码前）：{f} —— 即使解码爆显存也能用加载Latent节点续上")
-                except Exception as _le:
-                    # 潜空间存盘自身失败：不当场中断，继续尝试解码（解码可能仍成功）；记一笔便于排错
-                    print(f"{WATERMARK} ⚠️ 解码前保存潜空间失败（{_le}），仍继续解码流程。")
-
-            # ---- 2. 取图像 / 音频（潜空间先分离视频路与音频路）---------------
-            images = 图像
-            音频_latent = None
-            video_lat, audio_lat = _split_av_latent(Latent)
-
-            if Latent is not None:
-                if not (需要视频解码 or 需要音频解码):
-                    print(f"{WATERMARK} ⚡ 免解码直通：三路均为「不保存X」⇒ "
-                          f"不加载 VAE、不解码，把潜空间原样落盘（{(_latent_kind(Latent) or '未知')}）")
-                if video_lat is None and audio_lat is not None:
-                    print(f"{WATERMARK} ℹ️ 接入的是**纯音频**潜空间，本次只解音频。")
-                # 🔴 只有**真的要出这一路的产物**才解码（否则用户选「不保存X」就白省了）
-                if video_lat is not None and 需要视频解码:
-                    images = self._decode(vae, video_lat, 解码方式, 分块尺寸, 分块重叠,
-                                          时间分块, 时间重叠, 解码精度)
-                    if 图像 is not None:
-                        print(f"{WATERMARK} ℹ️ 同时接了「图像」与「Latent」，以解码结果为准（图像仅作透传来源被忽略）")
-                if audio_lat is not None and 需要音频解码:
-                    if vae2 is None:
-                        print(f"{WATERMARK} ⚠️ 潜空间里检测到**音频路**，但没有可用的音频 VAE —— 音频不会被解码。"
-                              f"请在「VAE2」下拉里选一个音频 VAE，或给「Audio_VAE」端口接线。")
-                    else:
-                        音频_latent = self._decode_audio(vae2, audio_lat)
-
-            if 音频_latent is not None:
-                if 音频 is not None:
-                    print(f"{WATERMARK} ℹ️ 同时存在「音频」接线与潜空间解出的音频，采用**潜空间解出的**那路。")
-                音频 = 音频_latent
-
-            if images is None and 视频 is None and 音频 is None and Latent is None:
-                raise ValueError("Josia媒体保存：至少要接入 图像 / Latent / 视频 / 音频 之一。")
-
-            # ---- 4. 图像 / 动图 / 视频 -----------------------------------------
-            # 🔴 宽高仅用于信息窗「尺寸」显示；目录 / 文件名 / 计数器已在解码前算好（供先存潜空间）
-            if images is not None:
-                h, w = int(images[0].shape[0]), int(images[0].shape[1])
-            elif 视频 is not None:
-                try:
-                    w, h = 视频.get_dimensions()
-                except Exception:
-                    w = h = 0
-            else:
-                w = h = 0
-            实际输出帧率 = None      # 视频/动图实际落盘的播放帧率（输出帧率转换后），供前端信息窗展示
-
             # 🔴 下一个文件从「上一个文件实际用到的序号 + 1」起步，而不是盲目 +1：
             #    保存函数遇到被占用的序号会自己往后顺延（_alloc_stem），若这里还机械 +1，
             #    顺延出来的号码就会被下一次覆盖掉。
@@ -1643,146 +1867,317 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
                 used = getattr(self, "_last_counter", None)
                 return (used + 1) if isinstance(used, int) else (c + 1)
 
-            if images is not None or 视频 is not None:
-                if images is not None:
-                    spec = _normalize_format(图像格式)
-                    if spec is None:
-                        fallback = "⭐ PNG" if "⭐ PNG" in IMAGE_FORMAT_MAP else IMAGE_FORMAT_CHOICES[0]
-                        print(f"{WATERMARK} ⚠️ 图像格式「{图像格式}」当前环境不可用（可能缺依赖），"
-                              f"已降级为 {fallback}。可在设置里的「依赖安装」中安装对应插件。")
-                        spec = IMAGE_FORMAT_MAP[fallback]
+            轮成功数 = 0
+            轮失败 = []            # [(源文件, "Type: msg", traceback)]
+            last = {}              # 最后一个成功项的摘要（供结果组装）
 
-                # 绝对无损格式（PNG 等）：质量无意义，强制 100（与前端灰化显示一致，
-                # 也避免「节点显示 100 / 信息窗读 90」之类的错位）。这类格式后端本来就忽略质量参数。
-                if 图像格式.replace(STAR, "").strip() in ALWAYS_LOSSLESS:
-                    质量 = 100
+            for _idx, (_it_latent, _it_nid, _it_file) in enumerate(items, 1):
+                Latent, src_nid, src_file = _it_latent, _it_nid, _it_file
+                main_path = ""
+                已提前保存潜空间 = False
+                提前保存的潜空间路径 = ""
+                音频 = 音频_in
+                # 🔴 实时进度：本文件开始处理（前端状态行「解码中 i/N」+ 面板刷新）
+                _notify_progress(src_nid, src_file, _idx, len(items), "processing",
+                                 轮成功数, len(轮失败))
+                try:
+                    # ---- 0. 池内文件 → 现场载入（循环第 2 项起走这里）----
+                    if Latent is None and src_file:
+                        _ld, _lerr = _pool_load_latent(src_file)
+                        if _ld is None:
+                            raise ValueError(f"任务池文件「{src_file}」无法载入：{_lerr}")
+                        Latent = _ld
+                        Latent["_josia_batch"] = {"nid": src_nid, "name": src_file}
 
-                animated_containers = ("APNG", "动图WebP", "GIF")
-                video_containers = ("MP4", "MKV", "WebM")
-                batch_len = int(images.shape[0]) if images is not None else 0
-                made_container = False
+                    # ---- 路由判定（按文件判；VAE 走缓存，整轮只加载一次）----
+                    有视频路, 有音频路 = _latent_routes(Latent)
+                    # 🔴 视频路只在「真的要出容器文件」时才解码：「不保存视频」＝这一路零产物，
+                    #    绝不因「图像格式」选了 PNG 就把整段视频拆成逐帧静图落盘（要抽静帧请在
+                    #    前面用「VAE解码」把 Latent 解成图像、再接进「图像」端口，由图像路保存）。
+                    需要视频解码 = (Latent is not None and 有视频路
+                               and 视频容器 in VIDEO_OUTPUT_CONTAINERS)
+                    # 🔴 音频路解码条件：要么「音频格式」要单独出文件，要么视频容器要出
+                    #    能装音轨的真视频（音轨封装进容器，对齐原生「创建视频」——哥哥实测
+                    #    AV 潜空间解出的 MP4 无声，根因就是「不保存音频」把解码整个跳过了）。
+                    需要音频解码 = (Latent is not None and 有音频路
+                               and (音频格式 not in OFF_AUDIO
+                                    or 视频容器 in AUDIO_MUX_CONTAINERS))
+                    if 需要视频解码 and "vae1" not in _vae_cache:
+                        _vae_cache["vae1"] = _resolve_vae(
+                            g("Video_VAE"), g("VAE1", VAE1_PLACEHOLDER), "vae1",
+                            self._loader_names.get("vae1", ""), self._vae_labels)
+                    vae = _vae_cache.get("vae1") if 需要视频解码 else None
+                    if 需要音频解码 and "vae2" not in _vae_cache:
+                        _vae_cache["vae2"] = _resolve_vae(
+                            g("Audio_VAE"), g("VAE2", PLACEHOLDER_VAE2), "vae2",
+                            self._loader_names.get("vae2", ""), self._vae_labels)
+                    vae2 = _vae_cache.get("vae2") if 需要音频解码 else None
 
-                # 输出帧率：0 / 留空＝跟随「帧率」；>0＝把源帧按输出帧率重采样（复制/抽帧，不插帧）
-                out_fps_user = (输出帧率 if (输出帧率 and 输出帧率 > 0) else None)
-
-                # 图像批次 / 单图 → 动图或真视频（单图也能合成，满足「1 张图 + 视频模式」生成视频）
-                if images is not None and 视频容器 in (animated_containers + video_containers) and batch_len >= 1 and not made_container:
-                    src_fps = 帧率
-                    dst_fps = out_fps_user if out_fps_user else 帧率
-                    实际输出帧率 = dst_fps
-                    imgs_out = images
-                    # 重采样：源帧数 N → N × dst_fps ÷ src_fps（最近邻，复制/抽帧）。
-                    # 单图（N=1）：任何 dst_fps 都只是把这一帧复制若干份（如 1fps×24=24 帧=1 秒静帧视频）。
-                    if out_fps_user and out_fps_user != src_fps and batch_len > 1:
-                        imgs_out, _ = _resample_frames(images, src_fps, out_fps_user)
-                    if 视频容器 in animated_containers:
-                        main_path = self._save_animated_pillow(
-                            视频容器, imgs_out, full_folder, name, counter, dst_fps, 无损, 质量,
-                            压缩级别, prompt, extra_pnginfo, 写入元数据, results) or main_path
-                    else:
-                        main_path = self._save_video_av(
-                            视频容器, imgs_out, full_folder, name, counter, dst_fps, 视频编码, 视频质量,
-                            prompt, extra_pnginfo, 写入元数据, results) or main_path
-                    counter = bump(counter)
-                    made_container = True
-
-                # 已有的视频对象 → 按容器转存（含输出帧率转换）
-                if 视频 is not None and 视频容器 in video_containers:
-                    video_handled = False
-                    if out_fps_user and out_fps_user > 0:
+                    # 🔴 解码前先存潜空间（OOM 保护）：
+                    #    解码是显存大头，OOM 时若还没存潜空间就会彻底报废数据；
+                    #    先落下 .latent，即使后续解码爆显存，也能用「Josia加载Latent」节点
+                    #    释放显存、单独解码续上，大幅拉高解码成功率。
+                    if Latent is not None and 保存潜空间:
                         try:
-                            comp = 视频.get_components()
-                            vframes = comp.images
-                            vrate = float(comp.frame_rate) if comp.frame_rate else 帧率
-                            if abs(out_fps_user - vrate) > 1e-6:
-                                vframes, _ = _resample_frames(vframes, vrate, out_fps_user)
-                                main_path = self._save_video_av(
-                                    视频容器, vframes, full_folder, name, counter, out_fps_user,
-                                    视频编码, 视频质量, prompt, extra_pnginfo, 写入元数据, results) or main_path
-                                counter = bump(counter)
-                                实际输出帧率 = out_fps_user
-                                video_handled = True
-                        except Exception as e:
-                            print(f"{WATERMARK} ⚠️ 视频帧率转换失败（{e}），退回原样转存。")
-                    if not video_handled:
-                        main_path = self._save_video_av(
-                            视频容器, images, full_folder, name, counter, 帧率, 视频编码, 视频质量,
-                            prompt, extra_pnginfo, 写入元数据, results, video_obj=视频) or main_path
-                        实际输出帧率 = 帧率
-                    counter = bump(counter)
-                    made_container = True
+                            f = self._save_latent(Latent, full_folder, name, counter,
+                                                  prompt, extra_pnginfo, results)
+                            已提前保存潜空间 = True
+                            提前保存的潜空间路径 = f
+                            if not main_path:
+                                main_path = f
+                            print(f"{WATERMARK} 💾 已优先保存Latent文件：{f}")
+                        except Exception as _le:
+                            # 潜空间存盘自身失败：不当场中断，继续尝试解码（解码可能仍成功）；记一笔便于排错
+                            print(f"{WATERMARK} ⚠️ 解码前保存潜空间失败（{_le}），仍继续解码流程。")
 
-                if images is not None and not made_container and 图像格式 != NONE_IMAGE:
-                    # 逐张静态图（原生 SaveImage 行为）
-                    for batch_number, image in enumerate(images):
-                        keep_alpha = image.shape[-1] == 4 and spec["fmt"] in ("PNG", "WEBP", "AVIF", "TIFF")
-                        img = _tensor_to_pil(image, keep_alpha=keep_alpha)
-                        name_b = name.replace("%batch_num%", str(batch_number))
-                        f = self._save_still(img, spec, full_folder, name_b, counter, 无损, 质量,
-                                             压缩级别, prompt, extra_pnginfo, 写入元数据, results)
+                    # ---- 2. 取图像 / 音频（潜空间先分离视频路与音频路）---------------
+                    images = 图像
+                    音频_latent = None
+                    video_lat, audio_lat = _split_av_latent(Latent)
+
+                    if Latent is not None:
+                        if not (需要视频解码 or 需要音频解码):
+                            print(f"{WATERMARK} ⚡ 免解码直通：三路均为「不保存X」⇒ "
+                                  f"不加载 VAE、不解码，把潜空间原样落盘（{(_latent_kind(Latent) or '未知')}）")
+                        if video_lat is None and audio_lat is not None:
+                            print(f"{WATERMARK} ℹ️ 接入的是纯音频潜空间，本次只解音频。")
+                        # 🔴 只有**真的要出这一路的产物**才解码（否则用户选「不保存X」就白省了）
+                        if video_lat is not None and 需要视频解码:
+                            images = self._decode(vae, video_lat, 解码方式, 分块尺寸, 分块重叠,
+                                                  时间分块, 时间重叠, 解码精度)
+                            if 图像 is not None:
+                                print(f"{WATERMARK} ℹ️ 同时接了「图像」与「Latent」，以解码结果为准（图像仅作透传来源被忽略）")
+                        if audio_lat is not None and 需要音频解码:
+                            if vae2 is None:
+                                print(f"{WATERMARK} ⚠️ 潜空间里检测到音频路，但没有可用的音频 VAE —— 音频不会被解码。"
+                                      f"请在「VAE2」下拉里选一个音频 VAE，或给「Audio_VAE」端口接线。")
+                            else:
+                                音频_latent = self._decode_audio(vae2, audio_lat)
+
+                    if 音频_latent is not None:
+                        if 音频 is not None:
+                            print(f"{WATERMARK} ℹ️ 同时存在「音频」接线与潜空间解出的音频，采用潜空间解出的那路。")
+                        音频 = 音频_latent
+
+                    if images is None and 视频 is None and 音频 is None and Latent is None:
+                        raise ValueError("Josia媒体保存：至少要接入 图像 / Latent / 视频 / 音频 之一。")
+
+                    # ---- 4. 图像 / 动图 / 视频 -----------------------------------------
+                    # 🔴 宽高仅用于信息窗「尺寸」显示；目录 / 文件名 / 计数器已在解码前算好（供先存潜空间）
+                    if images is not None:
+                        h, w = int(images[0].shape[0]), int(images[0].shape[1])
+                    elif 视频 is not None:
+                        try:
+                            w, h = 视频.get_dimensions()
+                        except Exception:
+                            w = h = 0
+                    elif video_lat is not None:
+                        # 免解码直通（只存 Latent）时没有像素可量：按潜空间尺寸 ×8 反推，供信息窗展示
+                        try:
+                            _sh = video_lat["samples"].shape
+                            h, w = int(_sh[-2]) * 8, int(_sh[-1]) * 8
+                        except Exception:
+                            w = h = 0
+                    else:
+                        w = h = 0
+                    实际输出帧率 = None      # 视频/动图实际落盘的播放帧率（输出帧率转换后），供前端信息窗展示
+
+                    # 🔴 下一个文件从「上一个文件实际用到的序号 + 1」起步，而不是盲目 +1：
+                    #    保存函数遇到被占用的序号会自己往后顺延（_alloc_stem），若这里还机械 +1，
+                    #    顺延出来的号码就会被下一次覆盖掉。
+                    def bump(c):
+                        used = getattr(self, "_last_counter", None)
+                        return (used + 1) if isinstance(used, int) else (c + 1)
+
+                    if images is not None or 视频 is not None:
+                        if images is not None:
+                            spec = _normalize_format(图像格式)
+                            if spec is None:
+                                fallback = "⭐ PNG" if "⭐ PNG" in IMAGE_FORMAT_MAP else IMAGE_FORMAT_CHOICES[0]
+                                print(f"{WATERMARK} ⚠️ 图像格式「{图像格式}」当前环境不可用（可能缺依赖），"
+                                      f"已降级为 {fallback}。可在设置里的「依赖安装」中安装对应插件。")
+                                spec = IMAGE_FORMAT_MAP[fallback]
+
+                        # 绝对无损格式（PNG 等）：质量无意义，强制 100（与前端灰化显示一致，
+                        # 也避免「节点显示 100 / 信息窗读 90」之类的错位）。这类格式后端本来就忽略质量参数。
+                        if 图像格式.replace(STAR, "").strip() in ALWAYS_LOSSLESS:
+                            质量 = 100
+
+                        animated_containers = ("APNG", "动图WebP", "GIF")
+                        video_containers = ("MP4", "MKV", "WebM")
+                        batch_len = int(images.shape[0]) if images is not None else 0
+                        made_container = False
+
+                        # 输出帧率：0 / 留空＝跟随「帧率」；>0＝把源帧按输出帧率重采样（复制/抽帧，不插帧）
+                        out_fps_user = (输出帧率 if (输出帧率 and 输出帧率 > 0) else None)
+
+                        # 图像批次 / 单图 → 动图或真视频（单图也能合成，满足「1 张图 + 视频模式」生成视频）
+                        if images is not None and 视频容器 in (animated_containers + video_containers) and batch_len >= 1 and not made_container:
+                            src_fps = 帧率
+                            dst_fps = out_fps_user if out_fps_user else 帧率
+                            实际输出帧率 = dst_fps
+                            imgs_out = images
+                            # 重采样：源帧数 N → N × dst_fps ÷ src_fps（最近邻，复制/抽帧）。
+                            # 单图（N=1）：任何 dst_fps 都只是把这一帧复制若干份（如 1fps×24=24 帧=1 秒静帧视频）。
+                            if out_fps_user and out_fps_user != src_fps and batch_len > 1:
+                                imgs_out, _ = _resample_frames(images, src_fps, out_fps_user)
+                            if 视频容器 in animated_containers:
+                                main_path = self._save_animated_pillow(
+                                    视频容器, imgs_out, full_folder, name, counter, dst_fps, 无损, 质量,
+                                    压缩级别, prompt, extra_pnginfo, 写入元数据, results) or main_path
+                            else:
+                                main_path = self._save_video_av(
+                                    视频容器, imgs_out, full_folder, name, counter, dst_fps, 视频编码, 视频质量,
+                                    prompt, extra_pnginfo, 写入元数据, results,
+                                    audio=音频 if 视频容器 in AUDIO_MUX_CONTAINERS else None,
+                                    audio_quality=音频质量) or main_path
+                            counter = bump(counter)
+                            made_container = True
+
+                        # 已有的视频对象 → 按容器转存（含输出帧率转换）
+                        if 视频 is not None and 视频容器 in video_containers:
+                            video_handled = False
+                            if out_fps_user and out_fps_user > 0:
+                                try:
+                                    comp = 视频.get_components()
+                                    vframes = comp.images
+                                    vrate = float(comp.frame_rate) if comp.frame_rate else 帧率
+                                    if abs(out_fps_user - vrate) > 1e-6:
+                                        vframes, _ = _resample_frames(vframes, vrate, out_fps_user)
+                                        main_path = self._save_video_av(
+                                            视频容器, vframes, full_folder, name, counter, out_fps_user,
+                                            视频编码, 视频质量, prompt, extra_pnginfo, 写入元数据, results) or main_path
+                                        counter = bump(counter)
+                                        实际输出帧率 = out_fps_user
+                                        video_handled = True
+                                except Exception as e:
+                                    print(f"{WATERMARK} ⚠️ 视频帧率转换失败（{e}），退回原样转存。")
+                            if not video_handled:
+                                main_path = self._save_video_av(
+                                    视频容器, images, full_folder, name, counter, 帧率, 视频编码, 视频质量,
+                                    prompt, extra_pnginfo, 写入元数据, results, video_obj=视频,
+                                    audio=音频 if 视频容器 in AUDIO_MUX_CONTAINERS else None,
+                                    audio_quality=音频质量) or main_path
+                                实际输出帧率 = 帧率
+                            counter = bump(counter)
+                            made_container = True
+
+                        if images is not None and not made_container and 图像格式 != NONE_IMAGE:
+                            # 逐张静态图（原生 SaveImage 行为）
+                            for batch_number, image in enumerate(images):
+                                keep_alpha = image.shape[-1] == 4 and spec["fmt"] in ("PNG", "WEBP", "AVIF", "TIFF")
+                                img = _tensor_to_pil(image, keep_alpha=keep_alpha)
+                                name_b = name.replace("%batch_num%", str(batch_number))
+                                f = self._save_still(img, spec, full_folder, name_b, counter, 无损, 质量,
+                                                     压缩级别, prompt, extra_pnginfo, 写入元数据, results)
+                                if not main_path:
+                                    main_path = f
+                                counter = bump(counter)
+                        elif images is not None and made_container:
+                            # 刻意不额外导单帧：原生 SaveWEBM / SaveAnimated* 也只出容器文件，
+                            # 逐帧再存一份会让磁盘悄悄膨胀。要抽静帧请先用「VAE解码」解出图像、
+                            # 再接进「图像」端口（图像格式负责逐帧保存）。
+                            print(f"{WATERMARK} ℹ️ 已把 {batch_len} 帧合成 1 个「{视频容器}」文件，"
+                                  f"未额外导出单帧图（需要逐帧静图请用「VAE解码」解出后接「图像」端口）")
+
+                    # ---- 5. 音频 ------------------------------------------------------
+                    if 音频 is not None and 音频格式 not in OFF_AUDIO:
+                        f = self._save_audio(音频, 音频格式, 音频质量, full_folder, name, counter,
+                                             prompt, extra_pnginfo, 写入元数据, results)
+                        if f and not main_path:
+                            main_path = f
+
+                    # ---- 6. 潜空间 ----------------------------------------------------
+                    # 🔴 已在上文「解码前」优先存过（OOM 保护），此处不再重复落盘，避免多写一个 .latent；
+                    #    仅当「解码前那次存盘自身异常失败」时才在此兜底补存一次。
+                    if Latent is not None and 保存潜空间 and not 已提前保存潜空间:
+                        f = self._save_latent(Latent, full_folder, name, counter,
+                                              prompt, extra_pnginfo, results)
                         if not main_path:
                             main_path = f
-                        counter = bump(counter)
-                elif images is not None and made_container:
-                    # 刻意不额外导单帧：原生 SaveWEBM / SaveAnimated* 也只出容器文件，
-                    # 逐帧再存一份会让磁盘悄悄膨胀。要只要静帧就把「视频容器」设为「不保存视频」。
-                    print(f"{WATERMARK} ℹ️ 已把 {batch_len} 帧合成 1 个「{视频容器}」文件，"
-                          f"未额外导出单帧图（只需静帧请把「视频容器」设为「{NONE_VIDEO}」）")
 
-            # ---- 5. 音频 ------------------------------------------------------
-            if 音频 is not None and 音频格式 not in OFF_AUDIO:
-                f = self._save_audio(音频, 音频格式, 音频质量, full_folder, name, counter,
-                                     prompt, extra_pnginfo, 写入元数据, results)
-                if f and not main_path:
-                    main_path = f
 
-            # ---- 6. 潜空间 ----------------------------------------------------
-            # 🔴 已在上文「解码前」优先存过（OOM 保护），此处不再重复落盘，避免多写一个 .latent；
-            #    仅当「解码前那次存盘自身异常失败」时才在此兜底补存一次。
-            if Latent is not None and 保存潜空间 and not 已提前保存潜空间:
-                f = self._save_latent(Latent, full_folder, name, counter,
-                                      prompt, extra_pnginfo, results)
-                if not main_path:
-                    main_path = f
+                    # ---- 7. 保存后清理 -------------------------------------------------
+                    if 清理缓存 != "关" and 清理时机 == "解码后":
+                        clear_cache(清理缓存)
 
-            # 🔴 落地校验：本节点一旦接入工作流，就必须留下至少一个产物。
-            #    三路都选「不保存X」时靠强制落盘 .latent 兜底（那时必须有 Latent）；
-            #    若连 Latent 都没接 ⇒ 跑完一个文件都没有，工作流等于空转 —— 宁可当场报错。
+                    # ---- 本文件收尾：成功落盘 ⇒ 回写 done ----
+                    rel = f"{subfolder}/{main_path}" if (main_path and subfolder) else main_path
+                    if set_status and src_file:
+                        set_status(src_nid, src_file, "done", output=rel or main_path or "")
+                    轮成功数 += 1
+                    # 🔴 实时进度：本文件完成（前端立即看到「已完成」，不用等整轮跑完）
+                    _notify_progress(src_nid, src_file, _idx, len(items), "done",
+                                     轮成功数, len(轮失败))
+                    last = {"rel": rel, "main_path": main_path, "Latent": Latent,
+                            "images": images, "video_lat": video_lat, "audio_lat": audio_lat,
+                            "w": w, "h": h, "actual_fps": 实际输出帧率,
+                            "early_latent_path": 提前保存的潜空间路径}
+                    if len(items) > 1:
+                        print(f"{WATERMARK} ✅ 批量循环[{_idx}/{len(items)}]：「{src_file or '外部输入'}」处理完成")
+                except Exception as _e:
+                    import traceback as _tb
+                    _stk = _tb.format_exc()
+                    轮失败.append((src_file or "（无源文件）", f"{type(_e).__name__}: {_e}", _stk))
+                    if set_status and src_file:
+                        set_status(src_nid, src_file, "failed", error=f"{type(_e).__name__}: {_e}")
+                    # 🔴 实时进度：本文件失败（前端状态行警示，任务池同步标红）
+                    _notify_progress(src_nid, src_file, _idx, len(items), "failed",
+                                     轮成功数, len(轮失败))
+                    print(f"{WATERMARK} ❌ 批量循环[{_idx}/{len(items)}]：「{src_file or '外部输入'}」失败已跳过：{_e}")
+
+            # 🔴 落地校验（整轮）：一个产物都没有 ⇒ 区分「全失败」与「配置空转」，保持旧版语义
             if not (results["images"] or results["audio"] or results["latents"]):
+                if 轮失败:
+                    _f, _msg, _stk = 轮失败[0]
+                    if _msg.startswith("ValueError:"):
+                        raise ValueError(_msg.split(":", 1)[1].strip())
+                    ui["josia_info"] = {
+                        "error": _msg,
+                        "error_detail": _stk,
+                        "inputs": in_parts,
+                        "early_latent": (last.get("early_latent_path") if last else "") or None,
+                    }
+                    print(f"{WATERMARK} ❌ 执行出错（详情已写入前端信息窗）：\n{_stk}")
+                    return {"ui": ui, "result": (None, "", None, None, None)}
                 raise ValueError(
-                    "Josia媒体保存：本次不会产生任何文件 —— 图像 / 视频 / 音频三路都选了「不保存X」，"
-                    "又没有接入 Latent（没有潜空间可存）。请接入 Latent，或让其中一路选真实格式。")
-
-            # ---- 7. 保存后清理 -------------------------------------------------
-            if 清理缓存 != "关" and 清理时机 == "解码后":
-                clear_cache(清理缓存)
+                    "Josia媒体保存：本次不会产生任何文件 —— 图像 / 视频 / 音频三路都没有可落盘的产物，"
+                    "也没有可保存的 Latent（未接入，或保存失败）。请接入 Latent 并保持「落盘 .latent」"
+                    "开启，或让至少一路选真实格式并接上对应输入。")
 
             # ---- 8. 组装返回 ---------------------------------------------------
             ui = {}
-            # 运行期信息：前端信息窗的「输入 / 输出」两行数据源。
-            # 官方前端只认 images/audio/text 等已知键，未知键会被忽略（不会多画控件）。
-            in_parts = []
-            if 图像 is not None:
-                in_parts.append("图像")
-            if Latent is not None:
-                in_parts.append("Latent（" + (_latent_kind(Latent) or "未知") + "）")
-            if 视频 is not None:
-                in_parts.append("视频")
-            if 音频_latent is not None:
-                in_parts.append("潜空间音频")
-            elif 音频 is not None:
-                in_parts.append("音频")
+            cost = time.time() - t_start
+            images = last.get("images")
+            video_lat = last.get("video_lat")
+            audio_lat = last.get("audio_lat")
+            main_path = last.get("main_path", "")
+            rel = last.get("rel", "")
+            w, h = last.get("w", 0), last.get("h", 0)
+            实际输出帧率 = last.get("actual_fps")
+            if len(items) > 1:
+                in_parts = [f"批量循环 ×{len(items)}（成功 {轮成功数} / 失败 {len(轮失败)}）"]
+            else:
+                in_parts = []
+                if 图像 is not None:
+                    in_parts.append("图像")
+                if Latent is not None:
+                    in_parts.append("Latent（" + (_latent_kind(Latent) or "未知") + "）")
+                if 视频 is not None:
+                    in_parts.append("视频")
+                if audio_lat is not None:
+                    in_parts.append("潜空间音频")
+                elif 音频 is not None:
+                    in_parts.append("音频")
             try:
                 out_ext = os.path.splitext(main_path)[1].lstrip(".").upper() if main_path else ""
             except Exception:
                 out_ext = ""
-            cost = time.time() - t_start          # 信息窗「其他」行要用，先算（后面 print 复用同一个值）
             try:
                 size_txt = ("%d×%d" % (int(w), int(h))) if (w and h) else ""
             except Exception:
                 size_txt = ""
             # 本次真实落盘的**全部**文件名（按落盘顺序）—— 前端「输出」行据此显示
-            # 「1 张＝名字 / 2 张＝A、B / ≥3 张＝A ~ C」。此前只给首个文件名，多图时与日志对不上。
             saved_names = [d.get("filename") for d in results["images"]]
             saved_names += [d.get("filename") for d in results["audio"]]
             saved_names += [d.get("filename") for d in results["latents"]]
@@ -1794,7 +2189,6 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
                 "counter": "%05d" % int(counter0),
                 "format": out_ext,
                 "target": folder_type,
-                # 本次真实落盘的：文件名（首个 + 全部）/ 分辨率 / 耗时 / 产物数量（前端信息窗直接显示）
                 "filename": os.path.basename(main_path) if main_path else "",
                 "filenames": saved_names,
                 "size": size_txt,
@@ -1802,9 +2196,11 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
                 "count": (max(0, len(results["images"]) - (1 if results["animated"] else 0))
                           + (1 if results["animated"] else 0)
                           + len(results["audio"]) + len(results["latents"])),
-                # 视频/动图实际落盘的播放帧率（经「输出帧率」转换后）；非视频产物为 None
                 "actual_fps": (round(float(实际输出帧率), 3) if 实际输出帧率 is not None else None),
             }
+            if 轮失败:
+                ui["josia_info"]["batch_failed"] = len(轮失败)
+                ui["josia_info"]["batch_errors"] = [f"{f}: {m}" for f, m, _s in 轮失败]
             if results["images"]:
                 ui["images"] = results["images"]
             if results["animated"]:
@@ -1814,22 +2210,23 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
             if results["latents"]:
                 ui["latents"] = results["latents"]
 
-            rel = f"{subfolder}/{main_path}" if (main_path and subfolder) else main_path
-
-            n_img = max(0, len(results["images"]) - (1 if results["animated"] else 0))
-            parts = []
-            if results["animated"]:
-                parts.append("动图/视频 1 个")
-            if n_img:
-                parts.append(f"图像 {n_img} 张")
-            if results["audio"]:
-                parts.append(f"音频 {len(results['audio'])} 个")
-            if results["latents"]:
-                parts.append(f"Latent {len(results['latents'])} 个")
-            print(f"{WATERMARK} ✅ 保存完成：{'，'.join(parts) if parts else '无'} "
-                  f"| 目录 {folder_type} | 耗时 {cost:.2f}s")
-
-            return {"ui": ui, "result": (images, rel, Latent, video_lat, audio_lat)}
+            if len(items) > 1:
+                print(f"{WATERMARK} ✅ 批量循环完成：成功 {轮成功数} / 失败 {len(轮失败)} "
+                      f"| 落盘 {len(saved_names)} 个文件 | 目录 {folder_type} | 耗时 {cost:.2f}s")
+            else:
+                n_img = max(0, len(results["images"]) - (1 if results["animated"] else 0))
+                parts = []
+                if results["animated"]:
+                    parts.append("动图/视频 1 个")
+                if n_img:
+                    parts.append(f"图像 {n_img} 张")
+                if results["audio"]:
+                    parts.append(f"音频 {len(results['audio'])} 个")
+                if results["latents"]:
+                    parts.append(f"Latent {len(results['latents'])} 个")
+                print(f"{WATERMARK} ✅ 保存完成：{'，'.join(parts) if parts else '无'} "
+                      f"| 目录 {folder_type} | 耗时 {cost:.2f}s")
+            return {"ui": ui, "result": (images, rel, last.get("Latent"), video_lat, audio_lat)}
 
 
         except ValueError as _ve:
@@ -1840,6 +2237,9 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
         except Exception as _e:
             import traceback as _tb
             _stack = _tb.format_exc()
+            # 🔁 批量模式：解码失败 ⇒ 回写 failed（含错误），信息窗标红，但**不自动重试**（只记录）
+            if set_status and src_file:
+                set_status(src_nid, src_file, "failed", error=f"{type(_e).__name__}: {_e}")
             ui["josia_info"] = {
                 "error": f"{type(_e).__name__}: {_e}",
                 "error_detail": _stack,
@@ -2074,6 +2474,7 @@ def _register_routes():
             return _web.json_response({"error": str(e)}, status=500)
 
 
+# 🔴 路由注册：本节点独占 /josia_media_save/* 前缀（与加载Latent 的 /josia_load_latent/* 互不冲突）。
 try:
     _register_routes()
 except Exception as _e:      # pragma: no cover
@@ -2086,5 +2487,5 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "JosiaMediaSave": NODE_DISPLAY_NAME_MEDIA_SAVE,
+    "JosiaMediaSave": "Josia媒体保存",
 }

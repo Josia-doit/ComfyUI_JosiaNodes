@@ -16,6 +16,7 @@ ComfyUI_JosiaNodes/
 ├── native_picker.py               # 辅助模块：Windows 原生文件夹选择器后端（零子进程，供文本保存 / 媒体保存复用）
 ├── dep_check.py                   # 辅助模块：只读 HTTP 路由（依赖检测 /josia_dep/check · 结果缓存并附带 ComfyUI 专用 Python 路径、包版本号 /josia_dep/version），不装包不写盘
 ├── encoder.py                     # 文本 + 多图参考编码节点
+├── image_encode.py                # 图像编码节点（加载图像 + 缩放 + VAE 编码一体，替代原生加载图像）
 ├── style_select.py                # 风格选择节点（Krea2 风格库选择器）
 ├── multi_image_loader.py          # 多图批量加载节点（缩放/上传/拖拽/粘贴）
 ├── text_list.py                   # 文本列表节点（多行按行分割为列表）
@@ -43,6 +44,7 @@ ComfyUI_JosiaNodes/
 └── web/
     └── js/
         ├── encoder.js             # 文本编码节点默认尺寸配置
+        ├── image_encode.js         # 图像编码节点前端（VAE 自动联动 / 缩放类型切换 / 端口透传）
         ├── style_select.js         # 风格选择节点前端（主题/分类/搜索/收藏/拖动/画廊）
         ├── multi_image_loader.js  # 多图加载前端（图库/拖拽/缩略图/自适应布局）
         ├── text_list.js           # 文本列表前端
@@ -81,7 +83,7 @@ ComfyUI_JosiaNodes/
 14. [Josia媒体保存（JosiaMediaSave）](#14-josia媒体保存josiamediasave)
 15. [Josia加载Latent（JosiaLoadLatent）](#15-josia加载latentjosialoadlatent)
 
-> 注：本包实际注册 **17** 个节点项；其中「分组控制」在节点菜单中显示为同一类，但后端注册了 M / S / G 三个别名，故注册总数为 17。
+> 注：本包实际注册 **18** 个节点项；其中「分组控制」在节点菜单中显示为同一类，但后端注册了 M / S / G 三个别名，故注册总数为 18。
 
 **画布 / 列表增强功能（非节点，在设置面板中启用）**：[🎨 Josia编组增强](#-josia编组增强画布增强功能)　|　[🎨 Josia模型列表增强](#-josia模型列表增强子文件夹着色下拉已选项高亮)
 
@@ -551,7 +553,7 @@ ComfyUI_JosiaNodes/
 3. **（如使用 GGUF 模型）** 安装 [ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF) 插件到 `ComfyUI/custom_nodes/`
 4. 确保 `web/js` 文件夹完整，不要移动或删除文件
 5. 重启 ComfyUI
-6. 看到控制台输出 `[JosiaNodes] ✅ JosiaNodes 加载成功，注册节点数：17（分组控制 M/S/G 计 3 个别名，菜单中归为同一类）` 即成功
+6. 看到控制台输出 `[JosiaNodes] ✅ JosiaNodes 加载成功，注册节点数：18（分组控制 M/S/G 计 3 个别名，菜单中归为同一类）` 即成功
 7. **（可选）开关增强功能**：设置 → `⚡️JosiaNodes`，按需调整 —— 「编组增强 → 四角缩放 / 标题栏按钮」（**默认关闭**）、「模型列表 → 模型子文件夹着色」（**默认开启**）、「下拉高亮 → 下拉已选项高亮」（**默认开启**）
 
 ---

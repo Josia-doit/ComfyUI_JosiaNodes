@@ -27,10 +27,13 @@ ComfyUI **没有**官方的「跨节点共享已加载对象」机制（已核�
 
 from __future__ import annotations
 
+import json
+import os
 import threading
 import time
 
-__all__ = ["VAE1", "VAE2", "publish", "get_vae", "has_vae", "snapshot", "clear"]
+__all__ = ["VAE1", "VAE2", "publish", "get_vae", "has_vae", "snapshot", "clear",
+           "get_labels"]
 
 # 取用时的路别名（与「Josia媒体保存」的 VAE1 / VAE2 两个下拉框一一对应）
 VAE1 = "vae1"          # 主 VAE（视频 VAE）
@@ -77,6 +80,7 @@ def publish(vae=None, vae2=None, label1="", label2="", source=""):
         if source:
             _STATE["source"] = str(source)
         _STATE["time"] = time.time()
+        _persist_unlocked()
 
 
 def get_vae(which=VAE1):
@@ -85,6 +89,68 @@ def get_vae(which=VAE1):
         raise KeyError(f"未知的 VAE 路：{which!r}（应为 {VAE1!r} 或 {VAE2!r}）")
     with _LOCK:
         return _STATE[which]
+
+
+# ------------------------------------------------------------------
+# 持久化（2026-09-29 第十八轮）
+# ------------------------------------------------------------------
+# 🔴 注册表是**进程内存单例**：重启 ComfyUI 后为空；且「Josia模型加载」只有真正
+#    执行过才 publish —— 下游只跑「加载Latent → 媒体保存」解码链（模型加载节点不在
+#    执行路径上）时，注册表必然是空的，「使用Josia模型加载VAE」联动必失败。
+#    修法：publish 时把 **文件名标签** 持久化到磁盘；下游拿不到对象时按登记的
+#    文件名重载 VAE（文件名足够定位模型，重载一次的代价可接受）。
+def _persist_path():
+    """状态文件路径：ComfyUI user 目录优先（随用户数据走），取不到退回包目录。"""
+    try:
+        import folder_paths
+        base = folder_paths.get_user_directory()
+        if base:
+            return os.path.join(base, "JosiaNodes", "model_registry.json")
+    except Exception:
+        pass
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "_model_registry_state.json")
+
+
+def _persist_unlocked():
+    """把当前文件名标签写盘（持锁调用）。失败静默 —— 持久化绝不能影响加载。"""
+    try:
+        path = _persist_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        data = {
+            "vae1": _STATE["label1"],
+            "vae2": _STATE["label2"],
+            "source": _STATE["source"],
+            "time": _STATE["time"],
+        }
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, path)          # 原子替换，避免写一半被读到
+    except Exception:
+        pass
+
+
+def get_labels():
+    """取已登记的 VAE **文件名标签**：内存优先，内存没有（刚重启）读磁盘。
+
+    返回 {"vae1": 文件名或"", "vae2": 文件名或"", "source": 主模型文件名或""}。
+    绝不抛 —— 调用方（媒体保存的回退加载）只把它当尽力而为的提示。
+    """
+    with _LOCK:
+        out = {"vae1": _STATE["label1"], "vae2": _STATE["label2"],
+               "source": _STATE["source"]}
+        if out["vae1"] or out["vae2"]:
+            return out
+    # 内存空（进程刚启动 / 尚未跑过模型加载）⇒ 读磁盘
+    try:
+        with open(_persist_path(), encoding="utf-8") as f:
+            data = json.load(f)
+        return {"vae1": str(data.get("vae1") or ""),
+                "vae2": str(data.get("vae2") or ""),
+                "source": str(data.get("source") or "")}
+    except Exception:
+        return {"vae1": "", "vae2": "", "source": ""}
 
 
 def has_vae(which=VAE1):

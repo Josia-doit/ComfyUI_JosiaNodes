@@ -13,7 +13,8 @@
  *  · Node 2.0 检测只认官方内部标志 window.LiteGraph.vueNodesMode === true（严格）。
  *  · 前端构造阶段就为每个 widget 建输入槽（早于 onNodeCreated），只 hidden 只挡绘制、槽仍在
  *    node.inputs → 必须 socketless + removeInput（见 dropStaleInputs）。
- *  · EXPOSED_INPUTS 里的参数故意保留输入槽（可从上游连线），并留高度防叠在左上角。
+ *  · EXPOSED_INPUTS 必须为空：给 widget 保留的输入槽会叠在节点左上角（hover 才可见）、
+ *    连线后难以点选断开 —— 数值参数一律用面板胶囊调整，不从上游连线。
  *  · 滚轮缩放：节点面板捕获 wheel → 直接调用 LiteGraph 原生 handler 转发给画布（仿 multi_image_loader）。
  */
 import { app } from "../../../scripts/app.js";
@@ -33,14 +34,18 @@ const ROW_GAP = 6;
 const PAD = 8;
 const MIN_PANEL_H = 96;
 const EXT_NAME = "JosiaNodes.JosiaMediaSave";
+let _jmsExecHooked = false;      // 全局实时进度监听只挂一次
+let _jmsExecNodeId = null;       // 当前正在执行的节点 id（executing 事件追踪）
 const DEF_VIDEO = "MP4";                 // 视频 tab 默认容器
 const AUDIO_LOSSLESS = new Set(["FLAC", "WAV"]);   // 无损音频 → 音质灰化
 // 绝对无损图像格式（没有有损分支）：「质量」无意义 ⇒ 灰化并固定显示 100（后端也按 100 处理）。
 // 与后端 ALWAYS_LOSSLESS 保持一致（去掉 ⭐ 前缀后的显示名）。
 const ALWAYS_LOSSLESS = new Set(["PNG", "TIFF", "BMP", "TGA", "PPM", "PBM", "ICO", "DDS", "PCX"]);
 
-// 故意保留输入槽的参数（用户要的「帧率等数值可从上游连线进来」）+ 各留的高度。
-const EXPOSED_INPUTS = { filename_prefix: 14, "帧率": 14, "质量": 14 };
+// 🔴 必须为空表（哥哥实测：保留的槽全部叠在节点左上角、hover 才可见、接错难删）。
+//    清空后 dropStaleInputs 会把 filename_prefix / 帧率 / 质量 的 widget 输入槽全部删除，
+//    它们只作为面板胶囊存在；类型端口（Latent / 图像 / 视频 / 音频 / VAE…）不受影响。
+const EXPOSED_INPUTS = {};
 
 // 压缩级别三档胶囊（PNG zlib 0~9，不影响画质，只影响体积与耗时）
 const COMPRESS_STEPS = [
@@ -271,6 +276,31 @@ div.dom-widget:has(> .jms-root){pointer-events:none !important;}
 .jms-chip:hover{background:var(--secondary-background,#262729);}
 .jms-panel-foot{display:flex;align-items:center;gap:8px;justify-content:space-between;}
 .jms-panel-foot .cur{opacity:.72;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+
+/* 批量视频宫格预览（多视频时接管官方只显示第一个的播放器） */
+/* 🔴 用 CSS Grid（列数由内联 grid-template-columns 给定）而不是 flex + 定宽px：
+   flex 版本只要宿主容器窄 1px 就会把一行挤成两行，而行高公式仍按「一行」算 ⇒ 节点暴涨。 */
+.jms-vg-grid{display:grid;align-items:start;}
+.jms-vg-cell{position:relative;overflow:hidden;border-radius:4px;background:#000;
+  box-sizing:border-box;box-shadow:0 0 0 1px var(--border-default,#494a50);}
+.jms-vg-cell:hover{box-shadow:0 0 0 2px var(--border-default,#8a8c93);}
+.jms-vg-idx{position:absolute;left:4px;bottom:3px;font-size:10px;line-height:1;padding:1px 5px;
+  border-radius:999px;background:rgba(0,0,0,.55);color:#fff;pointer-events:none;}
+.jms-vg-single{position:relative;overflow:hidden;border-radius:4px;background:#000;}
+/* 🔴 pointer-events:auto 必须有：根容器是 none（空白处留给节点拖拽），会被子元素继承，
+   少了这句按钮就点不动 —— 点击穿透到底下的 <video> 变成播放 / 暂停。 */
+.jms-vg-close{position:absolute;right:6px;top:6px;width:22px;height:22px;border:none;border-radius:4px;
+  cursor:pointer;font-size:12px;line-height:1;background:rgba(0,0,0,.7);color:#fff;z-index:3;
+  pointer-events:auto;display:inline-flex;align-items:center;justify-content:center;}
+.jms-vg-close:hover{background:rgba(220,80,80,.8);}
+.jms-vg-arrow{position:absolute;top:50%;transform:translateY(-50%);width:24px;height:24px;border:none;
+  border-radius:4px;cursor:pointer;font-size:14px;line-height:1;background:rgba(0,0,0,.7);color:#fff;
+  z-index:3;pointer-events:auto;display:inline-flex;align-items:center;justify-content:center;}
+.jms-vg-arrow.l{left:6px;}
+.jms-vg-arrow.r{right:6px;}
+.jms-vg-arrow:hover{background:rgba(0,0,0,.82);}
+.jms-vg-badge{position:absolute;right:8px;bottom:6px;font-size:11px;padding:1px 6px;border-radius:999px;
+  background:rgba(0,0,0,.6);color:#fff;pointer-events:none;}
 `;
 
 function injectStyle() {
@@ -568,6 +598,7 @@ function mkNumber(node, widget, { width, label, step = 1, wstep, min, max, prec 
     v = rnd(clamp(v));
     inp.value = v;
     setWidgetValue(node, widget, v);
+    node._jmsRefresh?.();   // 🔴 手输/回车/失焦也要刷新信息窗（与 stepBy 一致，否则只有箭头才跟值）
   };
   const stepBy = (dir) => {
     let v = parseFloat(inp.value);
@@ -652,7 +683,7 @@ function mkText(node, widget, { label } = {}) {
   inp.style.width = "100%";          // 填满容器（容器本身是 flex:1，随节点宽度自适应）
   inp.style.minWidth = "40px";
   inp.style.textAlign = "left";
-  const commit = () => setWidgetValue(node, widget, inp.value);
+  const commit = () => { setWidgetValue(node, widget, inp.value); node._jmsRefresh?.(); };
   inp.addEventListener("change", commit);
   inp.addEventListener("blur", commit);
   inp.addEventListener("keydown", (e) => { if (e.key === "Enter") commit(); });
@@ -669,12 +700,375 @@ function mkBtn(text, title) {
   return b;
 }
 
+/* ============================ 批量视频宫格预览 ============================ */
+/* ===== JOSIA VIDEO GRID BEGIN =====
+ * 官方 useNodeVideo 只显示批量里的**第一个**视频（onLoaded 取 videoElements[0] +
+ * videoContainer.replaceChildren）⇒ 批量解码多个视频时看不到其余成果。这里自绘宫格接管：
+ *   · 宫格模式：N 个视频缩略并排，点任一格 ⇒ 单视图；
+ *   · 单视图：大播放器 + 右下角「i/N」+ 右上角 ✕（回宫格）+ 左右 ‹ › 切换。
+ * 🔴 只用标准 DOM API（模块级，便于离线抽取自测）；几何全部内联样式，不依赖 CSS 注入时机。
+ * 🔴 容器 pointer-events:none（空白处要能拖节点），只有视频 / 按钮自己开 auto。
+ * ===== JOSIA VIDEO GRID END ===== */
+function buildVideoGrid(items, opts) {
+  /* 排布规则（2026-09-29 重做，解决「节点被撑爆 / 手动缩小溢出」）：
+   * ① 严格 N 列 CSS Grid —— 旧的 flex + 定宽 px 只要容器窄 1px 就会换行（表现为上下堆叠），
+   *    而行高却仍按「一行」累加 ⇒ 真实行数翻倍、节点暴涨。Grid 永不换行。
+   * ② **统一行高**：同一行所有格子等高，视频 object-fit:contain 居中（信箱留黑边）。
+   *    取向一致的批次用真实比例；横竖混合的批次用统一参考比例 REF_MIX，两种朝向都不吃亏。
+   * ③ 行高 clamp 在 [MIN_ROW_H, 自适应上限] ⇒ 极端比例（9:16）也撑不爆节点。
+   * ④ 列数按「可用宽度 / 最小格子宽」自适应，过窄自动降列 ⇒ 绝不横向溢出。
+   * ⑤ 预览适应节点：未手动拖过高度时按合适尺寸排（节点自动撑到容得下）；
+   *    手动拖过之后读 availH 摊到每行——拖高预览变大（上限＝宽度允许的最大行高），
+   *    拖矮预览随之缩小（下限 MIN_FIT_ROW_H），两边都不溢出。
+   */
+  const o = opts || {};
+  const list = (items || []).filter((x) => x && x.url);
+  const n = list.length;
+
+  const GAP = 4;
+  // 🔴 最小尺寸**按条目类型分级**（2026-09-29 哥哥实测反馈）：
+  //    动图WebP（<img>）走「大」档 —— 旧官方预览小到看不清，哥哥要求 3~4 倍：
+  //    88→300（≈3.4×）、72→240（≈3.3×），上限同步放宽到 560 让竖版动图能展开；
+  //    视频（<video>）维持原档（黑边信箱已有 240 封顶，再大会重演「节点暴涨」）。
+  const IMG = list.some((it) => it && it.kind === "img");
+  const MIN_CELL_W = IMG ? 300 : 88;  // 最小格子宽：再窄就没法看清了
+  const MIN_ROW_H = IMG ? 240 : 72;   // 自动排布的行高下限（节点会保持能容下它的高度）
+  const MAX_ROW_H = IMG ? 560 : 240;  // 自动排布的行高上限：防竖版 / 超宽屏等极端比例把节点撑爆
+  const MIN_FIT_ROW_H = 56;   // 手动拖拽时的地板：可以继续压小，但不至于消失
+  const MAX_SINGLE_H = IMG ? 720 : 520;   // 单视图封顶（动图放大到能看清细节）
+  const DEF_RATIO = 9 / 16;   // 元数据未回来前的占位比例（16:9）
+  const REF_MIX = 0.75;       // 横竖混合时的统一参考比例（≈4:3，比正方形省高度）
+  const MAX_COLS = 4;         // 再多格子就太小了
+
+  const root = document.createElement("div");
+  root.className = "jms-vg-root";
+  root.style.pointerEvents = "none";
+  root.style.boxSizing = "border-box";
+  root.style.width = "100%";               // 跟随宿主容器宽度（配合 ① 的 Grid）
+
+  let mode = "grid";                                   // "grid" | "single"
+  let cur = 0;
+  let width = Math.max(120, Number(o.width) || 240);
+  let availH = Math.max(0, Number(o.availH) || 0);     // 节点留给预览区的高度（0＝走自动排布）
+  const ratios = new Array(n).fill(0);                 // 每个视频 高/宽；0＝未知（先按 16:9）
+
+  // 挂载后优先用真实可用宽度（starting 用 opts.width 兜底）
+  function measure() {
+    try {
+      const c = root.clientWidth || 0;
+      if (c > 8) width = c;
+    } catch (e) { /* 忽略 */ }
+  }
+
+  // 🔴 条目分两种：<video>（mp4/mkv/webm）与 <img>（动图WebP —— video 元素放不了 webp）。
+  //    两者共用同一套格子几何 / 点击交互；img 天然循环播放、无需静音，尺寸从 naturalWidth 取。
+  const vids = list.map((it, i) => {
+    const isImg = it.kind === "img";
+    const v = document.createElement(isImg ? "img" : "video");
+    v.src = it.url;
+    if (!isImg) {
+      v.muted = true;                                  // 静音自动播才不会被浏览器拦
+      v.loop = true;
+      v.autoplay = true;
+      v.playsInline = true;
+      v.preload = "metadata";
+    }
+    v.style.pointerEvents = "auto";
+    v.style.width = "100%";
+    v.style.height = "100%";
+    v.style.objectFit = "contain";
+    v.style.display = "block";
+    v.style.background = "#000";
+    // 事件不要冒泡到画布（否则点视频变成拖节点）
+    v.addEventListener("pointerdown", (e) => e.stopPropagation());
+    const onMeta = () => {
+      const vw = Number(isImg ? v.naturalWidth : v.videoWidth) || 0;
+      const vh = Number(isImg ? v.naturalHeight : v.videoHeight) || 0;
+      if (vw > 0 && vh > 0) { ratios[i] = vh / vw; layout(); changed(); }
+    };
+    if (isImg) v.addEventListener("load", onMeta);
+    else v.addEventListener("loadedmetadata", onMeta);
+    return v;
+  });
+
+  // 单视图的固定控件（只建一次，按模式挂载 / 卸载）
+  // 🔴 必须显式抢回 pointer-events：根容器是 none（空白处要留给节点拖拽），而 none 会被子元素
+  //    继承 ⇒ 不设 auto 的按钮点不动，点击会穿透到底下的 <video> 变成播放 / 暂停。
+  function reclaimPointer(el) {
+    el.style.pointerEvents = "auto";
+    el.style.zIndex = "3";
+    return el;
+  }
+  const closeBtn = document.createElement("button");
+  closeBtn.className = "jms-vg-close";
+  closeBtn.type = "button";
+  closeBtn.textContent = "✕";
+  closeBtn.title = "关闭单独显示，回到宫格";
+  reclaimPointer(closeBtn);
+  closeBtn.addEventListener("pointerdown", (e) => { e.preventDefault(); e.stopPropagation(); });
+  closeBtn.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); close(); });
+
+  const badge = document.createElement("div");
+  badge.className = "jms-vg-badge";
+
+  /* ---------- 播放同步 ---------- */
+  // 🔴 <video> 元素被从 DOM 摘除（进单视图时其他视频、或切模式重排）会被浏览器暂停，
+  //    回到宫格后不会自己恢复 ⇒ 回宫格渲染时统一 resume（不重置进度）。
+  //    （2026-09-29 实测：点开一个视频再退出，其余预览全部停住。）
+  function resumeAll() {
+    for (const v of vids) {
+      if (v.tagName !== "VIDEO" || typeof v.play !== "function") continue;
+      try { const p = v.play(); if (p && p.catch) p.catch(() => { /* 自动播策略拦截时忽略 */ }); } catch (e) { /* 忽略 */ }
+    }
+  }
+  // 同步控制（右键菜单入口）：所有视频统一回到 0 帧一起播 / 一起停。
+  function syncAll(play) {
+    for (const v of vids) {
+      if (v.tagName !== "VIDEO") continue;
+      try { if (play) v.currentTime = 0; } catch (e) { /* 忽略 */ }
+      try {
+        if (play) { const p = v.play(); if (p && p.catch) p.catch(() => { /* 忽略 */ }); }
+        else if (typeof v.pause === "function") v.pause();
+      } catch (e) { /* 忽略 */ }
+    }
+  }
+  // 🔴 宫格/视频上右键默认弹浏览器菜单且没有任何控制入口 ⇒ 拦截后改用 LiteGraph 原生
+  //    ContextMenu（与节点右键同一套组件），提供「同步播放 / 同步暂停」。
+  root.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const LG = window.LiteGraph;
+    if (!LG || typeof LG.ContextMenu !== "function") return;
+    new LG.ContextMenu(["▶ 同步播放（全部回到 0 帧）", "⏸ 同步暂停"], {
+      event: e,
+      title: " ",
+      callback: (val) => {
+        const s = String(val || "");
+        if (s.indexOf("同步播放") > -1) syncAll(true);
+        else if (s.indexOf("同步暂停") > -1) syncAll(false);
+      },
+    });
+  });
+
+  const gridBox = document.createElement("div");
+  gridBox.className = "jms-vg-grid";
+  const singleBox = document.createElement("div");
+  singleBox.className = "jms-vg-single";
+  const cells = new Array(n).fill(null);
+  const idxs = new Array(n).fill(null);      // 每格的角标（与 cells 一一对应）
+
+  /* ---------- 几何 ---------- */
+  // 列数：按「最小格子宽」自适应 —— 窄节点自动降列（1 列竖排），绝不横向溢出
+  function cols() {
+    const fit = Math.floor((width + GAP) / (MIN_CELL_W + GAP));
+    return Math.max(1, Math.min(n, fit, MAX_COLS));
+  }
+  function rows() { return Math.ceil(n / cols()); }
+  function colW() {
+    const c = cols();
+    return Math.max(MIN_CELL_W, Math.floor((width - GAP * (c - 1)) / c));
+  }
+  function ratio(i) { return ratios[i] > 0 ? ratios[i] : DEF_RATIO; }
+
+  // 参考比例：取向一致（全横 / 全竖）用真实比例的平均值；横竖混合用统一参考比例 REF_MIX
+  function refRatio() {
+    const k = [];
+    for (let i = 0; i < n; i++) if (ratios[i] > 0) k.push(ratios[i]);
+    if (!k.length) return DEF_RATIO;
+    const allLand = k.every((r) => r < 1);
+    const allPort = k.every((r) => r > 1);
+    if (!allLand && !allPort) return REF_MIX;
+    const avg = k.reduce((a, b) => a + b, 0) / k.length;
+    return Math.min(1.78, Math.max(0.5, avg));
+  }
+
+  // 自动模式行高：由参考比例算出，并 clamp 在 [MIN_ROW_H, MAX_ROW_H] ⇒ 节点不会被极端比例撑爆
+  function autoRowH() {
+    return Math.min(MAX_ROW_H, Math.max(MIN_ROW_H, Math.round(colW() * refRatio())));
+  }
+  function fitRowH() {                       // 把节点留给预览的高度摊到每一行
+    if (availH <= 0) return 0;
+    const r = rows();
+    return Math.floor((availH - GAP * (r - 1)) / r);
+  }
+  function rowH() {
+    const auto = autoRowH();
+    const fit = fitRowH();
+    if (fit <= 0) return auto;                              // 自动模式（未手动拖过高度）
+    // 🔴 填充上限＝列宽（≈正方形容器）：拖高只让格子整体放大、形状不变，
+    //    绝不竖向拉成长条 —— 否则格子变竖版、横版视频上下黑边暴涨（2026-09-29 实测反馈）。
+    const cap = Math.max(auto, colW());
+    return Math.max(MIN_FIT_ROW_H, Math.min(fit, cap));     // 拖高⇒变大，拖矮⇒变小，两向都受限
+  }
+  function gridH() {
+    const r = rows();
+    return r * rowH() + GAP * (r - 1);
+  }
+  function singleH() {
+    const want = Math.round(width * ratio(cur));
+    const cap = availH > 0 ? Math.max(MIN_FIT_ROW_H, availH) : MAX_SINGLE_H;
+    return Math.max(MIN_FIT_ROW_H, Math.min(want, Math.min(cap, MAX_SINGLE_H)));
+  }
+  function height() { return mode === "single" ? singleH() : gridH(); }
+  // 🔴 内容地板：行高压到极限（手动拖矮的地板 MIN_FIT_ROW_H）时宫格仍需要的总高。
+  //    computeLayoutSize 的 minHeight 必须 ≥「widget y 偏移 + 它」，否则用户把节点拖到
+  //    比预览还矮 ⇒ 预览溢出到节点外（2026-09-29 哥哥实测：下边缘缩到预览图之上）。
+  function minH() {
+    if (mode === "single") return MIN_FIT_ROW_H;
+    const r = rows();
+    return r * MIN_FIT_ROW_H + GAP * (r - 1);
+  }
+
+  function layout(skipMeasure) {
+    try {
+      if (!skipMeasure) measure();
+      if (mode === "grid") {
+        const c = cols();
+        const rh = rowH();
+        gridBox.style.display = "grid";
+        gridBox.style.gridTemplateColumns = `repeat(${c}, 1fr)`;   // 严格 N 列 ⇒ 永不换行
+        gridBox.style.gap = GAP + "px";
+        for (let i = 0; i < n; i++) {
+          const cell = cells[i];
+          if (!cell) continue;
+          cell.style.width = "100%";         // 宽度交给 Grid 的 1fr 均分
+          cell.style.height = rh + "px";     // 🔴 同一行等高，极端比例在格子里 contain 留黑边
+        }
+      } else {
+        singleBox.style.width = "100%";
+        singleBox.style.height = height() + "px";
+        badge.textContent = (cur + 1) + "/" + n;
+      }
+    } catch (e) { /* 忽略 */ }
+  }
+
+  /* ---------- 渲染 ---------- */
+  function clearBox(box) { while (box.firstChild) box.removeChild(box.firstChild); }
+
+  function render() {
+    clearBox(root);
+    if (mode === "grid") {
+      gridBox.style.gap = GAP + "px";
+      for (let i = 0; i < n; i++) {
+        let cell = cells[i];
+        if (!cell) {
+          cell = document.createElement("div");
+          cell.className = "jms-vg-cell";
+          cell.style.pointerEvents = "auto";
+          cell.style.cursor = "pointer";
+          cell.title = list[i].label || ("视频 " + (i + 1));
+          const idx = document.createElement("span");
+          idx.className = "jms-vg-idx";
+          idx.textContent = (i + 1) + "/" + n;
+          cell.appendChild(vids[i]);
+          cell.appendChild(idx);
+          cell.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); open(i); });
+          cell.addEventListener("pointerdown", (e) => e.stopPropagation());
+          cells[i] = cell;
+          idxs[i] = idx;
+        } else if (vids[i].parentNode !== cell) {
+          // 🔴 从单视图搬回来时**必须两个都重挂**：只挂 video 会让它落到角标之后
+          //    （appendChild 是搬到末尾），顺序一乱角标就盖在视频上。
+          cell.appendChild(vids[i]);
+          cell.appendChild(idxs[i]);
+        }
+        gridBox.appendChild(cell);
+      }
+      root.appendChild(gridBox);
+    } else {
+      const v = vids[cur];
+      if (v && v.tagName === "VIDEO") v.controls = true;   // <img> 没有控制条（天然循环播放）
+      singleBox.appendChild(v);
+      singleBox.appendChild(closeBtn);
+      singleBox.appendChild(badge);
+      root.appendChild(singleBox);
+    }
+    layout();
+    if (mode === "grid") resumeAll();   // 回宫格：把被 DOM 摘除暂停掉的视频全部恢复播放
+  }
+
+  /* ---------- 对外操作 ---------- */
+  function changed() { try { o.onChange && o.onChange(height()); } catch (e) { /* 忽略 */ } }
+  function open(i) {
+    cur = Math.min(n - 1, Math.max(0, i | 0));
+    mode = "single";
+    render();
+    changed();
+  }
+  function close() {
+    try { if (vids[cur] && vids[cur].tagName === "VIDEO") vids[cur].controls = false; } catch (e) { /* 忽略 */ }
+    mode = "grid";
+    render();
+    changed();
+  }
+  function setWidth(w) {
+    const nw = Math.max(120, Number(w) || 240);
+    if (Math.abs(nw - width) < 1) return;
+    width = nw;
+    render();
+  }
+  function hintWidth(w) {
+    // 官方布局期以「节点宽度 − DOM 左右边距」先行校正内部几何。
+    // 此刻 root.clientWidth 可能还是旧值（DOM 宽度滞后一拍）——按旧宽算会把列数 / 行数
+    // 算错，computeLayoutSize 就为「不存在的第二行」预留高度 ⇒ 收窄节点反而被撑高留白
+    // （2026-09-29 实测：收窄宽度时节点变高、格子却仍是一行）。跳过实测、直接采信 hint。
+    const nw = Math.max(120, Math.round(Number(w) || 0));
+    if (Math.abs(nw - width) < 2) return;
+    width = nw;
+    layout(true);
+  }
+  function setAvail(h) {                   // 节点留给预览区的高度（0＝回到自动排布）
+    const nh = Math.max(0, Number(h) || 0);
+    if (Math.abs(nh - availH) < 2) return; // 2px 滞回：避免和节点自动撑高互相追尾抖动
+    availH = nh;
+    render();
+    changed();                             // 高度变了要通知宿主重排（拖高 / 拖矮都要跟上）
+  }
+  function destroy() { try { clearBox(root); } catch (e) { /* 忽略 */ } }
+
+  render();
+  return {
+    root: root,
+    api: { height: height, minH: minH, width: () => width, cols: cols, rowH: rowH, refRatio: refRatio,
+      setWidth: setWidth, hintWidth: hintWidth, setAvail: setAvail, open: open, close: close,
+      mode: () => mode, index: () => cur, destroy: destroy },
+  };
+}
+
 /* ============================ 主 UI 注册 ============================ */
 app.registerExtension({
   name: EXT_NAME,
 
   async beforeRegisterNodeDef(nodeType, nodeData) {
     if (nodeData.name !== "JosiaMediaSave") return;
+
+    // 🔴 全局实时进度（只挂一次）：媒体保存批量循环在执行期逐文件广播
+    //    `josia_batch_progress` —— 正在执行的节点状态行实时显示「解码中 i/N」，
+    //    解视频长任务时不用傻等。`executing` 事件追踪当前执行的节点 id 以精准定位。
+    if (!_jmsExecHooked) {
+      _jmsExecHooked = true;
+      api.addEventListener("executing", (e) => {
+        _jmsExecNodeId = (e?.detail === undefined || e?.detail === null) ? null : String(e.detail);
+      });
+      api.addEventListener("josia_batch_progress", (e) => {
+        try {
+          const d = e?.detail || {};
+          if (!d.total || d.total <= 1) return;   // 非批量不打扰状态行
+          const g = app.graph;
+          for (const n of (g?._nodes || g?.nodes || [])) {
+            if (n && String(n.id) === _jmsExecNodeId && typeof n._jmsSetStatus === "function") {
+              if (d.phase === "processing") {
+                n._jmsSetStatus(`⏳ 批量解码中 ${d.idx}/${d.total}：${d.file || "外部输入"}…`);
+              } else if (d.phase === "done") {
+                n._jmsSetStatus(`✅ 已解码 ${d.ok}/${d.total}：${d.file || "外部输入"}`);
+              } else if (d.phase === "failed") {
+                n._jmsSetStatus(`⚠️ 解码失败 ${d.idx}/${d.total}：${d.file || "外部输入"}（已跳过，继续下一个）`, true);
+              }
+            }
+          }
+        } catch (err) { /* 忽略 */ }
+      });
+    }
 
     const onNodeCreated = nodeType.prototype.onNodeCreated;
     const onConfigure = nodeType.prototype.onConfigure;
@@ -797,6 +1191,29 @@ app.registerExtension({
       const chromeH = () => Math.round((Number(window.LiteGraph?.NODE_TITLE_HEIGHT) || 30) + 2);
       // 用户是否手动拖过尺寸（只由官方拖拽路径 node.setSize → onResize 置真，程序自身动作不经过它）
       let userResized = false;
+      // 🔴 真人拖拽检测（2026-09-29）：官方**自动撑高**（arrange tail / fitHeight）同样走
+      //    setSize → onResize ⇒ onResize 不能当作「用户手动调过尺寸」。在画布上捕获
+      //    pointerdown→pointerup：期间**本节点**尺寸变了才算真拖拽（粘性，之后一直走
+      //    「预览适应节点」模式；官方自动撑高永远不算）。
+      let userDragged = false;
+      let _ptrSize = null;
+      try {
+        const _cvs = app.canvas?.canvas || document.querySelector("canvas");
+        if (_cvs) {
+          _cvs.addEventListener("pointerdown", () => {
+            _ptrSize = [Number(node.size?.[0]) || 0, Number(node.size?.[1]) || 0];
+          }, true);
+          _cvs.addEventListener("pointerup", () => {
+            try {
+              if (_ptrSize) {
+                const s = node.size || [];
+                if (Math.abs((Number(s[1]) || 0) - _ptrSize[1]) > 2 ||
+                    Math.abs((Number(s[0]) || 0) - _ptrSize[0]) > 2) userDragged = true;
+              }
+            } finally { _ptrSize = null; }
+          }, true);
+        }
+      } catch (e) { /* 旧内核无 pointer 事件时忽略 */ }
       // 🔴🔴 尺寸铁律：computeSize() **绝不能返回「当前尺寸」**，必须返回固定的最小值。
       //    前端源码（LGraphCanvas.ts 拖拽缩放分支）：
       //      const min = node.computeSize()
@@ -930,6 +1347,8 @@ app.registerExtension({
         lineSt.textContent = String(txt ?? "");
         lineSt.classList.toggle("err", !!isErr);
       }
+      // 🔴 暴露给全局实时进度监听：批量解码时后端广播的事件据此更新本节点状态行
+      node._jmsSetStatus = setStatus;
 
       // ---------- 预览缓存管理 ----------
       // 🔴 官方有**三条互不清理**的预览通道（取证：litegraphService.unsafeUpdatePreviews +
@@ -962,6 +1381,126 @@ app.registerExtension({
         if (video) removePreviewWidget("video-preview");
         try { if (image) { node.imgs = []; node.images = undefined; } } catch (e) { /* 忽略 */ }
         try { if (video) { node.videos = []; node.videoContainer = undefined; } } catch (e) { /* 忽略 */ }
+      }
+
+      // ---------- 多视频宫格预览 ----------
+      // 🔴 官方播放器（video-preview）只显示批量里的**第一个**视频 ⇒ 多个视频时换成自绘宫格。
+      //    单视频不动（官方那套更原生）；只有本次落盘 ≥2 个视频文件才接管。
+      const GRID_WIDGET = "josia-video-grid";
+      function killOfficialPlayer() {
+        try { removePreviewWidget("video-preview"); node.videoContainer = undefined; } catch (e) { /* 忽略 */ }
+      }
+      function removeVideoGrid() {
+        try { stopGridGuard(); } catch (e) { /* 忽略 */ }
+        try {
+          const g = node._jmsVideoGrid;
+          if (g && g.api && g.api.destroy) g.api.destroy();
+        } catch (e) { /* 忽略 */ }
+        node._jmsVideoGrid = null;
+        try { removePreviewWidget(GRID_WIDGET); } catch (e) { /* 忽略 */ }
+      }
+      // 预览区「可用高度」**直接量**：宫格 widget 的 y 偏移官方布局每次都会回写，
+      // avail ＝ bodyHeight − w.y − 底部留白。不再用「总高 − 宫格高」反推固定部分 ——
+      // 那条路在官方播放器异步短暂占位时会把固定部分量错，之后一路错下去
+      // （2026-09-29 实测：MP4 宫格节点暴涨 + 下方超长空白 + 拖矮后预览溢出节点外）。
+      function syncGridAvail() {
+        try {
+          const g = node._jmsVideoGrid;
+          if (!g || !g.api) return;
+          const w = (node.widgets || []).find((x) => x && x.name === GRID_WIDGET);
+          if (!w) return;
+          // 真人没拖过尺寸 ⇒ 永远走自动排布（行高只由宽度决定，不参与填充）——
+          // 官方自动撑高不能算「用户给了更多空间」，否则会自己把自己越撑越大。
+          if (!userDragged) { g.api.setAvail(0); return; }
+          const bodyH = Number(node.bodyHeight) || 0;
+          if (!(bodyH > 0)) return;
+          const avail = Math.max(0, Math.round(bodyH - (Number(w.y) || 0) - 6));
+          g.api.setAvail(avail);
+        } catch (e) { /* 忽略 */ }
+      }
+      // 🔴 官方预览 widget 的「僵尸复活」守卫：useNodeVideo / 动图预览都是**异步**加载完才把
+      //    widget 追加进 node.widgets（大文件可 > 900ms），旧的固定四拍清不干净 ⇒ 官方播放器
+      //    挂在宫格下方占一大块高度（2026-09-29 实测：MP4 宫格下方超长空白）。宫格在位期间
+      //    每 400ms 巡检一次，见一个删一个；20s 后自动收队（下次执行重装宫格时会重启）。
+      let _gridGuard = 0;
+      function removeOfficialPreviewWidgets() {
+        let removed = false;
+        for (const nm of ["video-preview", "$$comfy_animation_preview", "$$canvas-image-preview"]) {
+          try {
+            const idx = (node.widgets || []).findIndex((x) => x && x.name === nm);
+            if (idx > -1) {
+              const w0 = node.widgets[idx];
+              w0.onRemove?.();
+              node.widgets.splice(idx, 1);
+              removed = true;
+            }
+          } catch (e) { /* 忽略 */ }
+        }
+        return removed;
+      }
+      function startGridGuard() {
+        stopGridGuard();
+        const t0 = Date.now();
+        removeOfficialPreviewWidgets();
+        _gridGuard = setInterval(() => {
+          try {
+            if (!node._jmsVideoGrid) return stopGridGuard();
+            let dirty = removeOfficialPreviewWidgets();
+            // node.imgs 也一并按住：官方动画预览的数据源，留着会被 fitHeight 当成「有图别收高」
+            try { if (node.imgs && node.imgs.length) { node.imgs = []; node.images = undefined; dirty = true; } } catch (e) { /* 忽略 */ }
+            if (dirty) {
+              node.setDirtyCanvas?.(true, true);
+              // 🔴 僵尸删掉后没人收高 ⇒ 节点留在被官方播放器撑爆的高度、下方一大片空白
+              //    （2026-09-29 实测：批量解码后节点尺寸暴涨）。删完立即重跑贴合 + 重量预览可用高。
+              scheduleHeal();
+              requestAnimationFrame(syncGridAvail);
+            }
+            if (Date.now() - t0 > 20000) stopGridGuard();
+          } catch (e) { /* 忽略 */ }
+        }, 400);
+      }
+      function stopGridGuard() {
+        if (_gridGuard) { clearInterval(_gridGuard); _gridGuard = 0; }
+      }
+      function installVideoGrid(items) {
+        try {
+          removeVideoGrid();
+          killOfficialPlayer();
+          const g = buildVideoGrid(items, {
+            width: Math.max(160, (Number(node.size?.[0]) || 240) - 20),   // −20＝DOM 左右边距，与 measure 口径一致
+            onChange: () => {
+              try { node.setDirtyCanvas?.(true, true); } catch (e) { /* 忽略 */ }
+              requestAnimationFrame(syncGridAvail);
+            },
+          });
+          const w = node.addDOMWidget(GRID_WIDGET, "video", g.root, {
+            canvasOnly: true, hideOnZoom: false,
+          });
+          w.serialize = false;
+          // 🔴 minHeight ＝「宫格 widget 的 y 偏移 + 内容地板」＝**绝对节点高度下限**。
+          //    官方拖拽缩放会硬 clamp 到它 ⇒ 预览永远不会被节点下边缘裁掉。
+          //    🔴 minWidth 绝不能写当前宽度：那会让节点刚被拖窄就被立刻撑回去（表现＝拖不动）。
+          //    🔴 官方布局期先用节点宽度校正内部几何（DOM 实测可能滞后一拍，见 hintWidth），
+          //       否则收窄宽度时按旧宽多算一行 ⇒ 节点为不存在的行预留高度、被撑高留白。
+          //    🔴🔴 min = max = **当前内容高 + 上下 margin 各 10**（前端 1.52.7 源码取证定案：
+          //       _arrangeWidgets → distributeSpace 只把节点富余高度分给 maxSize=∞ 的控件；
+          //       不封顶的宫格会吸走全部富余 ⇒ 宫格下方大片空白，而 fitHeight 又把这份被撑大的
+          //       computedHeight 当成内容 ⇒ 误判「已贴合」⇒ 节点永远收不回去——解码后拉高、
+          //       缩窄撑高回不去，全是这一个根因）。封顶后富余高度无人认领，fitHeight 即可收高。
+          w.computeLayoutSize = () => {
+            try { g.api.hintWidth((Number(node.size?.[0]) || 0) - 20); } catch (e) { /* 忽略 */ }
+            const content = Math.max(40, Math.round(g.api.height())) + 20;
+            return {
+              minHeight: content,
+              maxHeight: content,
+              minWidth: 40,
+            };
+          };
+          node._jmsVideoGrid = g;
+          startGridGuard();
+          requestAnimationFrame(syncGridAvail);
+          node.setDirtyCanvas?.(true, true);
+        } catch (e) { /* 宫格失败不影响主流程 */ }
       }
 
       // 右上角「复制信息窗全部文本」（信息窗文本本身也可鼠标选中后手动复制）
@@ -1076,7 +1615,7 @@ app.registerExtension({
         "1 ⇒ 每张 1 秒，0.2 ⇒ 每张 5 秒，0.1 ⇒ 每张 10 秒 —— 用图片做幻灯片就调到 1 上下。\n" +
         "最小 0.01，可精确到小数点后两位（如 29.97）。\n" +
         "滚轮 / 上下箭头智能步进：≥1 步进 1 → 1 以下步进 0.1 → 0.1 以下步进 0.01；\n" +
-        "手输两位小数（如 29.97）后上推取整到 30、下推取整到 29，再以 1 续步。原生 Save WEBM 默认 24。可从上游连线传入。";
+        "手输两位小数（如 29.97）后上推取整到 30、下推取整到 29，再以 1 续步。原生 Save WEBM 默认 24。";
       const numCrf = mkNumber(node, W["视频质量"], { label: "CRF", step: 1, width: 42, min: 0, max: 63 });
       numCrf.title = "画质/体积权衡：越小画质越高、文件越大（Save WEBM 默认 32）。";
       // 🔴「输出帧率」：仅视频/动图容器生效，实际**输出**的播放帧率；0/留空＝跟随「帧率」不转换。
@@ -1095,10 +1634,12 @@ app.registerExtension({
       //    下拉＝最长候选标签宽；数字控件＝「标签宽 + 输入框可读宽」。
       //    旧版把四颗一律写死 118px ⇒ 「输入帧率」这种 4 字标签被挤、几颗控件宽窄参差；
       //    现在每颗刚好装下自己的内容，且「输入帧率 / 输出帧率」用同一档位数 ⇒ 天然同款等宽。
-      dropVid.el.style.flex = "1 1 130px";
-      dropVid.el.style.minWidth = "130px";
-      // 各数字控件输入框要放下的字符数（帧率要能显示 29.97 两位小数 ⇒ 给 6 位）
-      const VID_NUM_CH = new Map([[numFps, 6], [numCrf, 3], [numOutFps, 6]]);
+      dropVid.el.style.flex = "1 1 150px";
+      dropVid.el.style.minWidth = "150px";
+      // 各数字控件输入框要放下的字符数：帧率 5 位（29.97 两位小数正好放下）。
+      // 🔴 比旧版 6 位各窄一截 ⇒ 给「视频格式」的长标签（如 ⭐ WebP（动图））让出下拉箭头空间，
+      //    否则长格式选中时箭头会被行宽挤进下一颗胶囊。
+      const VID_NUM_CH = new Map([[numFps, 5], [numCrf, 3], [numOutFps, 5]]);
       const VID_SIZED = [dropCodec, numFps, numCrf, numOutFps];
       function sizeVidRowDrops() {
         try {
@@ -1126,7 +1667,9 @@ app.registerExtension({
               const inp = e2.querySelector("input");
               if (!inp) continue;
               // 11px 字号下数字的近似字宽；+14px 给输入框自身的内边距与光标
-              const want = Math.ceil((VID_NUM_CH.get(e2) || 4) * 7.4) + 14;
+              // 🔴 帧率两颗（输入/输出）按哥哥要求再缩 ~10%（0.88 系数），给视频格式让更多行宽
+              const FPS_SHRINK = new Set([numFps, numOutFps]);
+              const want = Math.ceil((VID_NUM_CH.get(e2) || 4) * 7.4 * (FPS_SHRINK.has(e2) ? 0.88 : 1)) + 14;
               inp.style.flex = "0 0 auto";
               inp.style.minWidth = "0";
               inp.style.width = want + "px";
@@ -1857,11 +2400,12 @@ app.registerExtension({
         const bits = [];
         const sh = shapeText();
         if (sh) bits.push("分辨率 " + sh.replace(/（.*?）/, ""));
-        // VAE1 选了「使用Josia模型加载VAE」时，标注该共享 VAE 当前是否真的已载入
-        // （图里有节点 ⇒ 可选中；但真正拿去解码还得它跑过一次，这里把状态说清楚）
+        // VAE1 选了「使用Josia模型加载VAE」：虚拟自动联动（序列化时自动连线，见文件末尾）。
+        // 🔴 图里有「Josia模型加载」节点即可用 —— 不要求它跑过一次，也不需要手动接线。
         if (String(W["VAE1"]?.value ?? "") === USE_JOSIA_VAE) {
           const lab = (vaeShared && vaeShared.label1) ? "（" + vaeShared.label1 + "）" : "";
-          bits.push(josiaVaeReady() ? "共享VAE 已就绪" + lab : "共享VAE 待运行");
+          bits.push(josiaVaePresent() ? "VAE 联动 Josia模型加载" + lab
+                                      : "共享VAE：图中没有Josia模型加载节点");
         }
         if (lastRun && lastRun.cost) bits.push("耗时 " + lastRun.cost + "s");
         if (lastRun && lastRun.count) bits.push("产物 " + lastRun.count + " 个");
@@ -2027,6 +2571,11 @@ app.registerExtension({
         userResized = true;
         _fitFail = 0;
         scheduleHeal();
+        // 宫格按新宽度重排（格子数 / 尺寸 / 高度都跟着变）；−20＝DOM 控件左右边距，
+        // 与 hintWidth / measure 的口径一致（root.clientWidth ≈ 节点宽 − 20）。
+        try { node._jmsVideoGrid?.api.setWidth(Math.max(120, (Number(node.size?.[0]) || 0) - 20)); } catch (e) { /* 忽略 */ }
+        // 高度：手动拖过之后让预览去适应节点（拖高变大 / 拖矮变小）
+        try { requestAnimationFrame(syncGridAvail); } catch (e) { /* 忽略 */ }
       };
 
       // 🔴🔴 面板自愈观察器（Round 19 问题 3）：「调完尺寸挪一下节点，信息窗缩短且不再
@@ -2246,6 +2795,36 @@ app.registerExtension({
             try { node.previewMediaType = _isVideoOut ? "video" : "image"; } catch (e) { /* 忽略 */ }
           }
 
+          // 🔴 批量预览宫格：官方播放器只取第一个条目 ⇒ 批量时换成自绘宫格。
+          //    ① 视频（mp4/mkv/webm）：≥2 个才接管（单视频官方播放器更原生）；
+          //    ② 动图WebP：官方动画预览只有一个、且小到看不清 ⇒ **≥1 个就接管**，
+          //       用 <img> 渲染 + 大尺寸档（哥哥 2026-09-29 实测反馈）。
+          //       判定用「视频容器」当前值 —— 静态图 WebP 的输出同为 .webp 扩展名，不能只看扩展名。
+          const _mkItems = (arr, kind) => (arr || []).map((d) => ({
+            kind,
+            url: api.apiURL("/view?" + new URLSearchParams({
+              filename: String(d.filename || ""),
+              subfolder: String(d.subfolder || ""),
+              type: String(d.type || "output"),
+            }).toString()),
+            label: (d.subfolder ? String(d.subfolder).replace(/[\\/]+$/, "") + "/" : "") + String(d.filename || ""),
+          }));
+          const _vidItems = _mkItems((message?.images || [])
+            .filter((d) => /\.(mp4|mkv|webm)$/i.test(String(d?.filename || ""))), "video");
+          const _animWebp = String(W["视频容器"]?.value || "") === "动图WebP";
+          const _animItems = _animWebp
+            ? _mkItems((message?.images || [])
+              .filter((d) => /\.webp$/i.test(String(d?.filename || ""))), "img")
+            : [];
+          if (_animItems.length >= 1) {
+            clearPreviewCache("image");   // node.imgs 会喂给官方动画预览 ⇒ 重复且小，一并清掉
+            installVideoGrid(_animItems);
+          } else if (_vidItems.length >= 2) {
+            installVideoGrid(_vidItems);
+          } else {
+            removeVideoGrid();
+          }
+
           // 🔴 保存结果属于「当前操作日志」⇒ 只写状态行，绝不覆盖上面三行的显示信息。
           // 视频/动图经过「输出帧率」转换后，把实际落盘的播放帧率也带回状态行，方便核对。
           const _afps = message?.josia_info?.actual_fps;
@@ -2258,10 +2837,16 @@ app.registerExtension({
             lastSaved = allNames.length === 1 ? allNames[0]
               : allNames.length === 2 ? (allNames[0] + "、" + allNames[1])
                 : (allNames[0] + " ~ " + allNames[allNames.length - 1]);
-            setStatus(`✅ 已保存 ${allNames.length} 个媒体文件（${parts.join(" / ")}）：${lastSaved}${fpsSuffix}`);
+            // 🔴 批量循环：有失败文件时在状态行追加提示（详情在日志里）
+            const _bfail = message?.josia_info?.batch_failed;
+            const _bsum = _bfail ? `｜⚠️ 失败 ${_bfail} 个已跳过` : "";
+            setStatus(`✅ 已保存 ${allNames.length} 个媒体文件（${parts.join(" / ")}）：${lastSaved}${fpsSuffix}${_bsum}`);
           } else if (parts.length) {
             lastSaved = parts.join(" / ");
             setStatus(`✅ 已保存：${lastSaved}${fpsSuffix}`);
+          } else if (message?.josia_info?.skip_msg) {
+            // 🔴 批量模式池跑空：后端给了明确的「已全部完成/未载入」提示，别再笼统说「没有产物落盘」。
+            setStatus(String(message.josia_info.skip_msg));
           } else {
             setStatus("✅ 运行完成（本次没有产物落盘）。");
           }
@@ -2578,3 +3163,59 @@ function openFolderBrowser(initialPath, onConfirm) {
   pathEl.addEventListener("keydown", (e) => { if (e.key === "Enter") load(pathEl.value.trim()); });
   load(curPath);
 }
+
+/* ==================== VAE 虚拟联动（内置 设置点/获取点 语义）==================== */
+// 🔴 「使用Josia模型加载VAE」＝**自动连线**：选它且 VAE 端口没手动接线时，序列化
+//    prompt 的瞬间把「Josia模型加载」的对应输出临时接到本节点，序列化完立刻拆线。
+//    机制复刻 KJNodes 设置点/获取点（SetNode/GetNode）：链路在 prompt 里是真实连线
+//    ⇒ 后端等同接了 VAE，且「Josia模型加载」必然被执行（虚拟联动等同于连线）；
+//    图上不留线、不留多余节点，也没有共享名字 ⇒ 不存在被别的获取点误连接的问题。
+app.registerExtension({
+  name: EXT_NAME + ".VaeVirtualLink",
+  setup() {
+    const MS_CLASS = "JosiaMediaSave";        // 本节点注册类名
+    const LOADER_CLASS = "JosiaCheckpointPlus";   // 「Josia模型加载」注册类名
+    // 槽位对照：widget（下拉）→ 本节点输入端口 → 模型加载输出槽（RETURN_TYPES 第 N 个）
+    const SLOTS = [
+      { widget: "VAE1", input: "Video_VAE", outSlot: 2 },   // VAE1（视频 VAE）
+      { widget: "VAE2", input: "Audio_VAE", outSlot: 3 },   // VAE2（音频 VAE）
+    ];
+    const MODE_NEVER = 2, MODE_BYPASS = 4;        // LiteGraph 节点状态：静默 / 绕过
+    const autoLinks = [];
+    function connectAuto() {
+      const g = app.graph;
+      if (!g || !Array.isArray(g._nodes)) return;
+      const loaders = g._nodes.filter(
+        (n) => n && (n.comfyClass || n.type) === LOADER_CLASS
+            && n.mode !== MODE_NEVER && n.mode !== MODE_BYPASS);
+      if (!loaders.length) return;
+      for (const node of g._nodes) {
+        if (!node || (node.comfyClass || node.type) !== MS_CLASS) continue;
+        for (const s of SLOTS) {
+          const inIdx = node.inputs ? node.inputs.findIndex((i) => i && i.name === s.input) : -1;
+          if (inIdx < 0 || node.inputs[inIdx].link != null) continue;  // 🔴 手动接线最优先
+          const w = (node.widgets || []).find((x) => x && x.name === s.widget);
+          if (!w || String(w.value) !== USE_JOSIA_VAE) continue;
+          if (!loaders[0].outputs || !loaders[0].outputs[s.outSlot]) continue;
+          try {
+            const link = loaders[0].connect(s.outSlot, node, inIdx);
+            if (link) autoLinks.push({ id: link.id, graph: g });
+          } catch (err) { /* 联动失败不阻塞执行（后端另有按文件名重载兜底） */ }
+        }
+      }
+    }
+    function disconnectAuto() {
+      while (autoLinks.length) {
+        const l = autoLinks.pop();
+        try { l.graph.removeLink(l.id); } catch (err) { /* 已被拆掉就忽略 */ }
+      }
+    }
+    // 包一层 graphToPrompt：连线 → 序列化 → 拆线。队列执行 / 保存 / 导出 API 全走这里。
+    const origGraphToPrompt = app.graphToPrompt.bind(app);
+    app.graphToPrompt = async function (...args) {
+      try { connectAuto(); } catch (err) { console.warn("[Josia] VAE 虚拟连线失败：", err); }
+      try { return await origGraphToPrompt(...args); }
+      finally { disconnectAuto(); }
+    };
+  },
+});

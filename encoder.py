@@ -15,8 +15,13 @@ Josia 文本编码节点【稳定版】
         · 关闭 = 标准文本模式：纯 clip.tokenize 文本编码、不注入视觉 token，
           适用于 FLUX.2 Kontext / Klein / Krea2 原生等无视觉塔模型——这类模型
           仅靠 reference_latents 接收多参考图，强行塞视觉 token 会污染文本条件。
-      参考 Latent（reference_latents）注入与编码模式解耦：两种模式都按 reference_latent_mode
-      注入，便于 Klein 类在「采样器 Latent 留空」时仍靠 reference_latents 提供图像。
+      参考 Latent（reference_latents）注入受「图像参考模式」约束：文生图模式下
+      reference_latents 一并停掉 —— 该开关的本意是「所有与图像相关的功能全部失效」，
+      等效于原生没有图像接口的 CLIP 文本编码器，只输出纯文本编码条件。
+      需要靠 reference_latents 送图的模型（Klein 等无视觉塔）请在图生图模式下使用：
+      那种组合下视觉塔不参与、采样器 Latent 正常，正是它们的标准用法。
+      负向开关关闭时，负向条件严格归零：纯空文本 token，不带 images / llama_template，
+      也不注入参考 Latent —— 与接了什么图、开了哪些开关、负向提示词写了什么都无关。
 """
 import torch
 import math
@@ -40,9 +45,9 @@ class JosiaEncoder:
 
 • 图像接口：默认仅显示「图像1」，接入后自动展开「图像2」…依次最多 10 张
 • 视觉塔编码模式：开启=Qwen视觉塔（默认，适用 Qwen-Image-Edit）；关闭=标准文本（适用 FLUX.2 Kontext / Klein / Krea2 原生等无视觉塔模型）
-• 图像参考模式：开启时参考图像生成Latent，关闭时输出空Latent
-• 负向提示词开关：关闭时自动将负向条件归零
+• 图像参考模式：开启=图生图模式（参考图参与采样器Latent与参考Latent注入）；关闭=文生图模式（所有图像相关功能失效，只输出纯文本条件）
 • 参考 Latent 模式：开启时注入参考Latent条件，关闭时仅使用文本条件
+• 负向提示词开关：关闭时自动将负向条件归零（纯空文本，不带任何图像信息）
 
 输出：正向条件 / 负向条件 / Latent"""
 
@@ -122,9 +127,9 @@ class JosiaEncoder:
 
         四种情况：
         1. 无图像输入 → 1024x1024空Latent，纯文本条件
-        2. 有图像 + 开关1关闭 → 原图尺寸空Latent，纯文本条件
-        3. 有图像 + 开关1开 + 开关2关 → VAE编码Latent，纯文本条件（图生图）
-        4. 有图像 + 开关1开 + 开关2开 → VAE编码Latent，参考Latent条件（参考图生图）
+        2. 有图像 + 文生图模式 → 原图尺寸空Latent，纯文本条件，参考Latent也不注入
+        3. 有图像 + 图生图模式 + 参考Latent模式关闭 → VAE编码Latent，纯文本条件
+        4. 有图像 + 图生图模式 + 参考Latent模式开启 → VAE编码Latent，带参考Latent条件
         """
 
         images = [image1, image2, image3, image4, image5, image6, image7, image8, image9, image10]
@@ -154,15 +159,13 @@ class JosiaEncoder:
                     image_prompt += "Picture {}: <|vision_start|><|image_pad|><|vision_end|>".format(i + 1)
 
         # ==============================================
-        # 【参考 Latent 列表（与编码模式解耦）】
-        # 所有已接图像统一 VAE 编码成 reference_latents，仅受 reference_latent_mode、
-        # 是否接图、是否接 VAE 约束 —— 与「视觉塔开关」「图生图开关」均无关。
-        #   · Klein 类（无视觉塔）即便把「采样器 Latent」留空（文生图模式），
-        #     也能仅靠 reference_latents 把图像喂给模型（参考生成）；
-        #   · Qwen 类多图参考走同一份列表，视觉 token 与 reference_latents 并存不冲突。
+        # 【参考 Latent 列表】
+        # 所有已接图像统一 VAE 编码成 reference_latents，受三道约束：是否接图、
+        # 是否接 VAE，以及「图像参考模式」。文生图模式下 reference_latents 一律不构建，
+        # 条件里因此不可能带出图像信息 —— 该开关本意就是图像相关功能全部失效。
         # ==============================================
         ref_latents = None
-        if use_image and reference_latent_mode and vae is not None:
+        if use_image and image_reference_switch and reference_latent_mode and vae is not None:
             ref_latents = []
             for img in images:
                 if img is not None:
@@ -216,9 +219,9 @@ class JosiaEncoder:
         positive_conditioning = clip.encode_from_tokens_scheduled(tokens)
 
         # ==============================================
-        # 【参考 Latent 条件注入（与视觉塔模式解耦）】
-        # 只要开了 reference_latent_mode 且确实编码出 ref_latents 就注入，两种编码
-        # 模式通用：Qwen 多图参考 / Klein 仅靠 reference_latents 提供图像。
+        # 【参考 Latent 条件注入】
+        # ref_latents 为 None 时（文生图 / 未接图 / 未接 VAE / 参考Latent模式关闭）
+        # 整段跳过，正向条件保持纯文本。
         # reference_latents_method 内部固定 index_timestep_zero（不暴露 UI）。
         # ==============================================
         if reference_latent_mode and ref_latents is not None:
@@ -231,9 +234,10 @@ class JosiaEncoder:
 
         # ==============================================
         # 【负向条件编码】
-        #   负向开关开启：负向=负向提示词（是否带视觉 token 由 build_vision 决定）；
-        #   负向开关关闭：负向归零（空文本，视觉 token 跟随 build_vision）。
-        #   参考 Latent 注入（仅负向开启时）与正向一致。
+        #   负向开关开启：负向=负向提示词，视觉 token 由 build_vision 决定，
+        #                 参考 Latent 注入与正向一致。
+        #   负向开关关闭：负向严格归零 —— 与开了什么开关、接了什么图、负向提示词
+        #                 写了什么都无关，纯空文本 token，不留任何图像痕迹。
         # ==============================================
         if negative_switch:
             if build_vision:
@@ -249,11 +253,10 @@ class JosiaEncoder:
                     "reference_latents_method": REFERENCE_LATENTS_METHOD
                 })
         else:
-            if build_vision:
-                empty_tokens = clip.tokenize("", images=images_vl, llama_template=llama_template)
-            else:
-                empty_tokens = clip.tokenize("")
-            negative_conditioning = clip.encode_from_tokens_scheduled(empty_tokens)
+            # 归零就是归零：严格等价于「什么都没接」的原生 CLIP 文本编码器 —— 纯空文本
+            # token，不带 images / llama_template。不因 build_vision、接了什么图、
+            # 开了哪些开关而带出任何残留视觉信息，参考 Latent 也不注入。
+            negative_conditioning = clip.encode_from_tokens_scheduled(clip.tokenize(""))
 
         return (positive_conditioning, negative_conditioning, latent_output)
 
