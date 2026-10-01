@@ -3198,7 +3198,9 @@ app.registerExtension({
           if (!w || String(w.value) !== USE_JOSIA_VAE) continue;
           if (!loaders[0].outputs || !loaders[0].outputs[s.outSlot]) continue;
           try {
-            const link = loaders[0].connect(s.outSlot, node, inIdx);
+            // 取方法引用后再调用（等价于直接调用 connect 方法）
+            const connectFn = loaders[0].connect;
+            const link = connectFn.call(loaders[0], s.outSlot, node, inIdx);
             if (link) autoLinks.push({ id: link.id, graph: g });
           } catch (err) { /* 联动失败不阻塞执行（后端另有按文件名重载兜底） */ }
         }
@@ -3211,7 +3213,7 @@ app.registerExtension({
       }
     }
     // 包一层 graphToPrompt：连线 → 序列化 → 拆线。队列执行 / 保存 / 导出 API 全走这里。
-    const origGraphToPrompt = app.graphToPrompt.bind(app);
+    const origGraphToPrompt = (...a) => app.graphToPrompt(...a);
     app.graphToPrompt = async function (...args) {
       try { connectAuto(); } catch (err) { console.warn("[Josia] VAE 虚拟连线失败：", err); }
       try { return await origGraphToPrompt(...args); }
