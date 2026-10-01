@@ -65,6 +65,19 @@ function graphHasJosiaLoader() {
   return false;
 }
 
+// 🔴「通道切换」悬停说明：与后端 image_encode.py 的 CHANNEL_TOOLTIP 同源。
+//    后端走 INPUT_TYPES 的 tooltip，这里再挂一层到控件上 —— 鼠标指向下拉时必定能看到各通道的含义。
+//    ⚠️ 改文案必须两边一起改（漏一边＝悬停提示与实际行为对不上）。
+const CHANNEL_TOOLTIP =
+  "决定「图像」端口输出几通道（本节点恒定另出一路「遮罩」单通道，也就是 3+1 里的那 +1）：\n" +
+  "• 自动 ＝ 上游给几通道就透传几通道：三通道进 ⇒ 三通道出，四通道进 ⇒ 四通道出；" +
+  "没接上游时用「选择图像」加载的结果，有透明区就按四通道走。最省心。\n" +
+  "• RGB ＝ 强制三通道（RGB）。第四通道（透明度）不跟图像走，改成从「遮罩」端口出来，" +
+  "遮罩越亮＝越透明（与原生加载图像一致的口径）。\n" +
+  "• RGBA ＝ 强制四通道（RGB + A）：透明度直接跟在图像第四个通道上，" +
+  "「遮罩」端口同时仍会给出一路（遮罩亮＝越透明）。\n" +
+  "说明：上游是灰度等其它通道数时一律按三通道处理；三种模式下喂给 VAE 编码的都只有前三通道。";
+
 // 按缩放类型显隐 / 灰化子控件（原生 .hidden 与 .disabled，无自定义样式）
 // 「关」＝ 完全不缩放不对齐 ⇒ 唯一缩放参数行整行隐藏，仅对齐倍数灰化
 function applyScaleVisibility(widgetOrNode, scaleType) {
@@ -183,6 +196,12 @@ app.registerExtension({
       const r = onNodeCreated ? onNodeCreated.apply(this, arguments) : undefined;
       // 🔴 默认宽度：仅初次创建时给一次（用户手动改窄后，由 onConfigure 恢复的尺寸覆盖本值）
       if (this.size) this.size[0] = Math.max(this.size[0], NODE_W);
+
+      // 通道切换的悬停说明（双保险：后端 INPUT_TYPES 已带 tooltip，这里再补到控件上）
+      try {
+        const ch = getWidget(this, "通道切换");
+        if (ch) ch.tooltip = CHANNEL_TOOLTIP;
+      } catch (e) { /* 忽略 */ }
 
       const st = getWidget(this, "缩放类型");
       if (st) {

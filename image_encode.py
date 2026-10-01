@@ -72,6 +72,21 @@ VAE_PLACEHOLDER = "请选择VAE模型"           # VAE 下拉默认占位符（�
 USE_JOSIA_VAE = "使用Josia模型加载VAE"       # 检测到 Josia 模型加载节点时自动选中项
 SCALE_TYPES = ["关", "按系数缩放", "按长边缩放", "按短边缩放", "按像素缩放"]
 ALIGN_MULTIPLES = ["2", "4", "8", "16", "32", "64"]
+
+# ===================== 「通道切换」开关 =====================
+# 本节点恒定「外加一路单通道遮罩」输出，所以通道数按「图像三/四通道 + 遮罩一路」理解（即 3+1）。
+CHANNEL_MODES = ["自动", "RGB", "RGBA"]
+CHANNEL_MODE_DEFAULT = "自动"
+CHANNEL_TOOLTIP = (
+    "决定「图像」端口输出几通道（本节点恒定另出一路「遮罩」单通道，也就是 3+1 里的那 +1）：\n"
+    "• 自动 ＝ 上游给几通道就透传几通道：三通道进 ⇒ 三通道出，四通道进 ⇒ 四通道出；"
+    "没接上游时用「选择图像」加载的结果，有透明区就按四通道走。最省心。\n"
+    "• RGB ＝ 强制三通道（RGB）。第四通道（透明度）不跟图像走，改成从「遮罩」端口出来，"
+    "遮罩越亮＝越透明（与原生加载图像一致的口径）。\n"
+    "• RGBA ＝ 强制四通道（RGB + A）：透明度直接跟在图像第四个通道上，"
+    "「遮罩」端口同时仍会给出一路（遮罩亮＝越透明）。\n"
+    "说明：上游是灰度等其它通道数时一律按三通道处理；三种模式下喂给 VAE 编码的都只有前三通道。"
+)
 # Latent 在 RETURN_TYPES 中的下标（图像=0 / 遮罩=1 / Latent=2）；用于判定该输出是否连接
 LATENT_OUTPUT_SLOT = 2
 
@@ -180,6 +195,7 @@ class JosiaImageEncode:
 
 • 选择图像（原生按钮 + 预览）或接上游图像端口，端口接线时选择自动灰化
 • 输入：图像 / 遮罩 / VAE；输出：图像 / 遮罩 / Latent
+• 通道切换「自动 / RGB / RGBA」：自动＝上游几通道就透传几通道；RGB＝强制三通道、透明度改从遮罩端口走；RGBA＝强制四通道带 alpha
 • 条件编码：仅当 Latent 输出端口被连到下游时才调用 VAE 编码；只连图像端口 ⇒ 不编码、不碰 VAE
 • 缩放类型（最上方）：关 / 按系数 / 按长边 / 按短边 / 按像素 —— 下方唯一缩放参数随类型变形（缩放系数 / 长边尺寸 / 短边尺寸 / 百万像素），方法锁定最快，附对齐倍数 2~64
 • VAE：默认「请选择VAE模型」；图内有「Josia模型加载」节点时才出现「使用Josia模型加载VAE」并自动选中（节点删除则回落），也支持手动挑选
@@ -230,6 +246,12 @@ class JosiaImageEncode:
                     "tooltip": "把输出宽高对齐到该数字的整数倍（16 适配绝大多数 VAE 潜空间）。\n"
                                "对齐只裁切 / 只缩小，绝不放大。\n"
                                "「缩放类型 = 关」时本项灰化不起作用。",
+                }),
+
+                # —— 通道切换（图像级参数，置于对齐倍数之后）——
+                "通道切换": (CHANNEL_MODES, {
+                    "default": CHANNEL_MODE_DEFAULT,
+                    "tooltip": CHANNEL_TOOLTIP,
                 }),
 
                 # —— VAE 模型（置于「选择图像」之前，让选择图像置底紧邻上传按钮）——
@@ -358,14 +380,17 @@ class JosiaImageEncode:
         return False
 
     @classmethod
-    def IS_CHANGED(cls, 选择图像="", **kwargs):
+    def IS_CHANGED(cls, 缩放类型="按系数缩放", 通道切换=CHANNEL_MODE_DEFAULT, 选择图像="", **kwargs):
         """上传文件内容变化时重新执行（口径与原生加载图像一致：文件 sha256）。
 
         「选择图像」为空（用端口 / 没图）时返回常量，交给上游连线变化驱动。
         文件丢失时返回 NaN，强制每次重跑以便在运行期给出明确报错。
+        🔴 缩放类型 / 通道切换 也纳进 key：这两项只改输出形态、不改文件，
+        漏掉的话前端判定「输入没变」⇒ 不重跑 ⇒ 改了开关看不出效果。
         """
+        key = f"{缩放类型}|{通道切换}"
         if not 选择图像:
-            return ""
+            return key
         try:
             path = folder_paths.get_annotated_filepath(选择图像)
             if not path or not os.path.isfile(path):
@@ -380,7 +405,8 @@ class JosiaImageEncode:
     # ============================================================
     # 主函数
     # ============================================================
-    def encode(self, 缩放类型, 缩放系数, 长边尺寸, 短边尺寸, 百万像素, 对齐倍数, VAE模型, 选择图像="",
+    def encode(self, 缩放类型, 缩放系数, 长边尺寸, 短边尺寸, 百万像素, 对齐倍数, 通道切换=CHANNEL_MODE_DEFAULT,
+                VAE模型=VAE_PLACEHOLDER, 选择图像="",
                 image=None, mask=None, vae=None, unique_id=None, prompt=None):
         # 1) 解析 VAE
         vae_obj = _resolve_vae(vae, VAE模型)
@@ -427,6 +453,19 @@ class JosiaImageEncode:
             final_w, final_h = self._align_to_multiple(target_w, target_h, align_m)
             final_w, final_h = max(32, final_w), max(32, final_h)
 
+        # 5.5) 通道策略（「通道切换」开关）
+        #   自动 ＝ 上游给几通道就透传几通道（三通道出 RGB、四通道出 RGBA）；
+        #   RGB  ＝ 强制三通道，第四通道（透明度）不跟图像走、改从「遮罩」端口出来；
+        #   RGBA ＝ 强制四通道（上游只有三通道时补一路「全不透明」的 alpha）。
+        #   🔴 遮罩一路恒等输出，所以这里的三/四通道只描述「图像」本身，合计是 3+1 / 4+1。
+        src_ch = int(image.shape[-1]) if (image is not None and image.ndim == 4) else 3
+        if 通道切换 == "RGB":
+            out_ch = 3
+        elif 通道切换 == "RGBA":
+            out_ch = 4
+        else:
+            out_ch = src_ch if src_ch in (3, 4) else 3
+
         # 6) 批量处理图像 + 遮罩
         out_images = []
         out_masks = []
@@ -434,14 +473,42 @@ class JosiaImageEncode:
             batch = image.shape[0]
             for i in range(batch):
                 t = image[i].cpu().numpy()
-                pil_img = Image.fromarray((np.clip(t, 0.0, 1.0) * 255).astype(np.uint8))
+                # 🔴 兜底：灰度 / 单通道等异常维度补齐成 RGB 再往下走（正常 IMAGE 端口只给 3、4 通道）
+                #    先补维度（2D ⇒ (H,W,1)），再复制通道；顺序反了会在 RGBA 分支拼 alpha 时炸维度。
+                if t.ndim == 2:
+                    t = t[:, :, None]
+                if t.shape[-1] < 3:
+                    t = np.concatenate([t[..., :1], t[..., :1], t[..., :1]], axis=-1)
+                rgb = (np.clip(t[..., :3], 0.0, 1.0) * 255).astype(np.uint8)
+                if out_ch == 4:
+                    if t.shape[-1] >= 4:             # 上游本就带 alpha ⇒ 原样带上
+                        alpha = (np.clip(t[..., 3:4], 0.0, 1.0) * 255).astype(np.uint8)
+                    else:                            # 上游三通道 ⇒ 补一路「全不透明」的 alpha
+                        alpha = np.full(rgb.shape[:2] + (1,), 255, dtype=np.uint8)
+                    pil_img = Image.fromarray(np.concatenate([rgb, alpha], axis=-1))
+                else:
+                    pil_img = Image.fromarray(rgb)   # 强制三通道：alpha 不跟图像走
                 pil_mask = None
                 if mask is not None and i < mask.shape[0]:
                     mt = mask[i].cpu().numpy()
                     pil_mask = Image.fromarray((np.clip(mt, 0.0, 1.0) * 255).astype(np.uint8), mode="L")
+                elif t.shape[-1] >= 4:
+                    # 没接遮罩端口但图里带 alpha ⇒ 反算成遮罩（1-α，遮罩亮＝透明区，与原生一致）
+                    al = 255.0 * (1.0 - np.clip(t[..., 3:4], 0.0, 1.0))
+                    pil_mask = Image.fromarray(al.astype(np.uint8)[..., 0], mode="L")
                 pil_img, pil_mask = self._resize(pil_img, pil_mask, final_w, final_h)
+                img_arr = np.array(pil_img)
+                if img_arr.shape[-1] != out_ch:       # 双保险：PIL 吐出来的通道数不对就硬截 / 补齐
+                    if img_arr.shape[-1] > out_ch:
+                        img_arr = img_arr[..., :out_ch]
+                    else:
+                        pad_v = 255 if out_ch == 4 else 0
+                        pad = np.full(
+                            img_arr.shape[:2] + (out_ch - img_arr.shape[-1],), pad_v, dtype=np.uint8
+                        )
+                        img_arr = np.concatenate([img_arr, pad], axis=-1)
                 out_images.append(
-                    torch.from_numpy(np.array(pil_img).astype(np.float32) / 255.0)
+                    torch.from_numpy(img_arr.astype(np.float32) / 255.0)
                 )
                 if pil_mask is not None:
                     out_masks.append(
@@ -457,7 +524,12 @@ class JosiaImageEncode:
             del out_images, out_masks
         else:
             # 没图（没接端口也没上传）：输出对齐尺寸的全黑图 + 全不透明遮罩（兜底，不报错）
-            img_result = torch.zeros((1, final_h, final_w, 3), dtype=torch.float32)
+            # 🔴 通道数跟随「通道切换」：RGBA 时补一路全不透明的 alpha，免得下游按三通道解析
+            if out_ch == 4:
+                img_result = torch.zeros((1, final_h, final_w, 4), dtype=torch.float32)
+                img_result[..., 3] = 1.0
+            else:
+                img_result = torch.zeros((1, final_h, final_w, 3), dtype=torch.float32)
             mask_result = torch.ones((1, final_h, final_w), dtype=torch.float32)
 
         gc.collect()
