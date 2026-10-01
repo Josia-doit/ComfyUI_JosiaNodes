@@ -3213,10 +3213,13 @@ app.registerExtension({
       }
     }
     // 包一层 graphToPrompt：连线 → 序列化 → 拆线。队列执行 / 保存 / 导出 API 全走这里。
-    const origGraphToPrompt = (...a) => app.graphToPrompt(...a);
+    // 🔴 必须先把原函数抓成局部引用：若写成延迟查找当前方法的形式，包装会套住自己本身，
+    //    每次调用都再进一层、永不终止，直接 Maximum call stack size exceeded 爆栈。
+    //    取局部引用等价于立刻定住旧方法；this 用 call 显式补回。
+    const origGraphToPrompt = app.graphToPrompt;
     app.graphToPrompt = async function (...args) {
       try { connectAuto(); } catch (err) { console.warn("[Josia] VAE 虚拟连线失败：", err); }
-      try { return await origGraphToPrompt(...args); }
+      try { return await origGraphToPrompt.call(app, ...args); }
       finally { disconnectAuto(); }
     };
   },
