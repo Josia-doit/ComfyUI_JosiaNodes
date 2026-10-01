@@ -5,8 +5,11 @@
  *     （缩放系数 / 长边尺寸 / 短边尺寸 / 百万像素），对齐倍数仅在「关」时灰化。
  *  2) VAE 自动联动：图内有「Josia模型加载」节点时自动切到「使用Josia模型加载VAE」；
  *     无该节点时移除该项并把已选中的降级回占位符；VAE 端口接线时灰化下拉（接线优先）。
- *  3) 上传联动：「图像」端口接线时灰化「选择图像」下拉（端口优先）。
- *     上传按钮 + 图片预览由前端 image_upload 原生机制提供，这里不做任何自定义样式。
+ *  3) 上传联动：「图像」端口接线时（端口优先）灰化「选择图像」下拉，并把节点里那张
+ *     上传预览图压到 PREVIEW_DIM_FACTOR 的透明度 —— 表示「上游已接入，本节点载入的图会被忽略」；
+ *     断线自动恢复。
+ *     上传按钮 + 图片预览由前端 image_upload 原生机制提供（预览是 node.imgs，
+ *     由 litegraph 画在 canvas 上而非 DOM）⇒ 这里只能走 canvas 绘制层，不能用 CSS 不透明度。
  *
  * 🔴 铁律：
  *   · 下拉 callback 触发时 this 指向「控件」而非节点 ⇒ applyScaleVisibility 内部统一归一到节点。
@@ -39,6 +42,11 @@ let _graphHooksInstalled = false;
 
 // 默认宽度（自然宽 ~300px，取 400 便于容纳中文长标签）；不设最小限制，用户可改窄
 const NODE_W = 400;
+
+// 上游接线后，节点里那张「选择图像」预览图的呈现强度（≈30% 不透明度）
+// 🔴 预览走 litegraph 的 canvas 绘制（node.imgs），CSS 不透明度对它无效 ⇒ 只能改绘制时的
+//    globalAlpha。这里乘在一个"当前值"上，避免把节点已有的透明度冲掉。
+const PREVIEW_DIM_FACTOR = 0.3;
 
 function getWidget(node, name) {
   return node.widgets ? node.widgets.find((w) => w.name === name) : null;
@@ -175,11 +183,54 @@ function isPortWired(node, portName) {
   return !!(port && port.link != null);
 }
 
-// 「图像」端口接线 ⇒ 灰化「选择图像」下拉（端口优先）
+// ── 上传预览图压暗（表示「上游已接线，本节点载入的图会被忽略」）──
+// 🔴 原理：上传预览存在 node.imgs（HTMLImageElement 数组），由 litegraph 用 ctx.drawImage 画在
+//    节点 canvas 上 ⇒ 没有 DOM 元素可挂 CSS 样式，只能拦截绘制、在画这些图时压低 globalAlpha。
+//    拦截窗口放在节点自身的 draw()（整个节点的绘制入口）⇒ 覆盖 imgs 在任何绘制阶段的发生。
+// 🔴 铁律：只认 node.imgs 里的那几个 img，其它绘制（背景 / 边框 / 文字 / 其它节点的图）一律不碰；
+//    画完必须把 globalAlpha 与 drawImage 原样还原，绝不留污染。
+function installPreviewDim(node) {
+  if (node.__josiaPreviewHooked) return;
+  const base = node.draw;
+  if (typeof base !== "function") return;
+  node.__josiaPreviewHooked = true;
+  node.draw = function (ctx, ...args) {
+    const imgs = this.__josiaPreviewDim && this.imgs ? this.imgs : null;
+    if (!imgs || imgs.length === 0 || !ctx || typeof ctx.drawImage !== "function") {
+      return base.apply(this, [ctx, ...args]);
+    }
+    const od = ctx.drawImage;
+    ctx.drawImage = function (img, ...da) {
+      const owned = imgs.indexOf(img) >= 0;
+      if (!owned) return od.call(this, img, ...da);
+      const prev = ctx.globalAlpha;
+      ctx.globalAlpha = prev * PREVIEW_DIM_FACTOR;
+      try {
+        return od.call(this, img, ...da);
+      } finally {
+        ctx.globalAlpha = prev;
+      }
+    };
+    try {
+      return base.apply(this, [ctx, ...args]);
+    } finally {
+      ctx.drawImage = od;
+    }
+  };
+}
+
+// 开关预览压暗；切换时请求一次重绘，让状态立刻生效（不必等下一次交互）
+function setPreviewDim(node, dim) {
+  node.__josiaPreviewDim = !!dim;
+  if (dim) installPreviewDim(node);
+  try { app.graph?.setDirtyCanvas(true, true); } catch (e) { /* 忽略 */ }
+}
+
+// 「图像」端口接线 ⇒ 灰化「选择图像」下拉 + 压暗已载入的预览图（端口优先）
 function syncUploadCombo(node) {
   const up = getWidget(node, "选择图像");
-  if (!up) return;
-  up.disabled = isPortWired(node, "image");
+  if (up) up.disabled = isPortWired(node, "image");
+  setPreviewDim(node, isPortWired(node, "image"));
 }
 
 function syncAll(node) {
