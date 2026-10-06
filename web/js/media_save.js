@@ -19,6 +19,8 @@
  */
 import { app } from "../../../scripts/app.js";
 import { api } from "../../../scripts/api.js";
+// 🔴 文件夹选择器浮层与「Josia文本保存」共用同一份实现 + 同一套样式：web/js/folder_browser.js
+import { openFolderBrowser } from "./folder_browser.js";
 
 /* ============================ Node 2.0 (Vue) 检测 ============================ */
 function isVueNodes2() {
@@ -347,6 +349,50 @@ function mkRow() { return el("div", "jms-row"); }
 const NONE_IMAGE = "不保存图像";
 const NONE_VIDEO = "不保存视频";
 const NONE_AUDIO = "不保存音频";
+
+/* ── 产物分类（状态行那句「已保存 N 个媒体文件（…）」用）────────────────
+ * 🔴 为什么不能按通道名数（2026-10-04 修的）：ComfyUI 原生协议里**视频 / 动图也塞在
+ *    `images` 通道**（照抄原生 SaveWEBM / SaveAnimatedWEBP 的做法），所以以前只数
+ *    `imgs.length` ⇒ 解码出 1 个 mp4 也会报成「图片 1」，明明成功却说成图片。
+ *    优先用后端给每条落盘记录打的 `josia_kind`（各保存器自己最清楚）；
+ *    老后端没这个字段就按扩展名兜底，新老混装也不会显示错。 */
+const KIND_TXT = { image: "图片", animated: "动图", video: "视频", audio: "音频", latent: "Latent" };
+const KIND_ORDER = ["video", "animated", "image", "audio", "latent"];
+
+function extKind(name) {
+  const s = String(name || "").toLowerCase();
+  if (/\.latent$/.test(s)) return "latent";
+  if (/\.(mp4|mkv|webm)$/.test(s)) return "video";
+  if (/\.(wav|flac|mp3|ogg|m4a|opus|aac)$/.test(s)) return "audio";
+  if (/\.(gif|apng)$/.test(s)) return "animated";
+  return "image";
+}
+
+/** 把本次落盘条目分好类，返回 {kind: 个数}（只含非零项）。 */
+function classifyOutputs(entries) {
+  const tally = {};
+  for (const d of entries || []) {
+    if (!d) continue;
+    const k = d.josia_kind || extKind(d.filename);
+    tally[k] = (tally[k] || 0) + 1;
+  }
+  return tally;
+}
+
+/** 分类计数 → 状态行那句文案，例如「视频 1」「图片 2 / 音频 1」。 */
+function describeOutputs(entries) {
+  const tally = classifyOutputs(entries);
+  return KIND_ORDER.filter((k) => tally[k])
+    .map((k) => `${KIND_TXT[k]} ${tally[k]}`).join(" / ");
+}
+
+/** 状态行「这条日志要不要写」：aux=辅助操作（如「📂 已打开」），isErr=标红报错。
+ *  规矩：上一条是**重要**日志时，辅助日志不许覆盖它（否则「已保存 xxx」会被点一次按钮冲掉）；
+ *  辅助操作失败仍要写 —— 不能让用户以为打开了其实没打开。 */
+function shouldWriteStatus(prevImportant, aux, isErr) {
+  if (aux && !isErr && prevImportant) return false;
+  return true;
+}
 
 // 下拉排序：把「不保存X」顶到最后；weight 用于同时保留其它既定排序（如视频 GIF 排倒数第二）
 function noneWeight(v, noneVal, extraLast) {
@@ -1195,7 +1241,19 @@ app.registerExtension({
       //    setSize → onResize ⇒ onResize 不能当作「用户手动调过尺寸」。在画布上捕获
       //    pointerdown→pointerup：期间**本节点**尺寸变了才算真拖拽（粘性，之后一直走
       //    「预览适应节点」模式；官方自动撑高永远不算）。
-      let userDragged = false;
+      // 🔴 手动调尺寸这件事必须**持久化**：userDragged 是闭包变量，节点一重建
+      //    （刷新页面 / 切换工作流 / 撤销恢复快照）就丢 ⇒ fitHeight 会把你调好的高度
+      //    重新收成「默认最小预览高度」。意图写进 node.properties（随工作流保存/恢复）。
+      const USER_SIZED_KEY = "_jmsUserSized";
+      const userSizedProp = () => !!node.properties?.[USER_SIZED_KEY];
+      function markUserSized() {
+        userDragged = true;
+        try {
+          if (!node.properties) node.properties = {};
+          node.properties[USER_SIZED_KEY] = true;
+        } catch (e) { /* 忽略 */ }
+      }
+      let userDragged = userSizedProp();
       let _ptrSize = null;
       try {
         const _cvs = app.canvas?.canvas || document.querySelector("canvas");
@@ -1208,7 +1266,7 @@ app.registerExtension({
               if (_ptrSize) {
                 const s = node.size || [];
                 if (Math.abs((Number(s[1]) || 0) - _ptrSize[1]) > 2 ||
-                    Math.abs((Number(s[0]) || 0) - _ptrSize[0]) > 2) userDragged = true;
+                    Math.abs((Number(s[0]) || 0) - _ptrSize[0]) > 2) markUserSized();
               }
             } finally { _ptrSize = null; }
           }, true);
@@ -1343,9 +1401,16 @@ app.registerExtension({
       }
       // 🔴 状态行＝工作进度 / 当前操作（打开目录、上传、保存结果、报错…）。
       //    后一条覆盖前一条，永远显示最新；上面三行的显示信息完全不受影响。
-      function setStatus(txt, isErr) {
+      // 🔴 aux＝**辅助操作**（2026-10-04 哥哥要求）：点「📂 打开」之类的操作日志**不许**
+      //    盖掉上一条「✅ 已保存 1 个媒体文件：xxx」—— 那条才是用户要看的成果。
+      //    规矩：辅助日志只在状态行空着 / 上一条也是辅助日志时才写；
+      //    辅助操作**失败**时照旧覆盖并标红（不能让用户以为打开了其实没打开）。
+      let _stImportant = false;
+      function setStatus(txt, isErr, aux) {
+        if (!shouldWriteStatus(_stImportant, aux, isErr)) return;
         lineSt.textContent = String(txt ?? "");
         lineSt.classList.toggle("err", !!isErr);
+        _stImportant = !aux || !!isErr;
       }
       // 🔴 暴露给全局实时进度监听：批量解码时后端广播的事件据此更新本节点状态行
       node._jmsSetStatus = setStatus;
@@ -2398,6 +2463,18 @@ app.registerExtension({
 
       function extraInfoText() {
         const bits = [];
+        // 🔴 解码结果的透明度体检（后端 alpha_warn）：
+        //    ComfyUI 的 VAE 编码只接受 RGB 三通道，透明通道进不了 latent；解码出来的第四
+        //    通道是空的。照原样存成 WebP/PNG 的 RGBA ⇒ 用户拿到一张「整图透明」的空图，
+        //    不报错也看不出哪错了。后端会据此按 RGB 落盘，这里把结论顶到本行最前面，
+        //    好让哥哥一眼看见「为什么这张图没有透明背景」。
+        const _aw = String(lastRun?.alpha_warn || "");
+        if (_aw === "empty") {
+          bits.unshift("⚠️ 整图透明：解码出的透明度通道为空，已按 RGB 保存"
+            + "（透明通道进不了潜空间，输出不含透明背景）");
+        } else if (_aw === "partial") {
+          bits.unshift("⚠️ 部分透明：透明度由解码反推，非原始素材的透明通道");
+        }
         const sh = shapeText();
         if (sh) bits.push("分辨率 " + sh.replace(/（.*?）/, ""));
         // VAE1 选了「使用Josia模型加载VAE」：虚拟自动联动（序列化时自动连线，见文件末尾）。
@@ -2523,6 +2600,17 @@ app.registerExtension({
       function fitHeight() {
         const w = domWidget;
         if (!w || !_panelH || !w.computedHeight) return;
+        // 🔴🔴 **手动调过尺寸的节点一律不再自动收高**（2026-10-05）：
+        //    userDragged / properties._jmsUserSized / _jmsFromWorkflow 任一成立即锁定。
+        //    背景：拖高之后面板的 computedHeight 要等下一帧才跟上，本帧量到的还是旧的矮值
+        //    ⇒ yTotal < bodyH ⇒ 立刻被收成 `_panelH + 60`（默认最小预览高度），
+        //    表现就是「拖完又弹回去 / 刷新、切换工作流、撤销之后尺寸被吃掉，锁不住」。
+        //    需要变高时由官方 _arrangeWidgets 的 tail（y > bodyHeight → setSize）负责撑，
+        //    这条「只收不撑」的自动贴合从此只服务于**没被手动调过**的节点。
+        // 🔴 `_ptrSize`：pointerdown 已发生、pointerup 还没到 ⇒ **正在拖拽中**。
+        //    必须一起挡住：userDragged 要等 pointerup 才置真，而拖拽的每一帧都会 setSize →
+        //    applyLayout → fitHeight，只挡 userDragged 的话「边拖边被收」，根本拖不高。
+        if (_ptrSize || userDragged || userSizedProp() || node._jmsFromWorkflow) { _fitFail = 0; return; }
         // 🔴 只要这次带了图输出（官方会把 node.imgs 挂到画布预览上），就**完全不再自动收高**：
         //    高度由官方 _arrangeWidgets 的 tail 决定，我们插手只会把图片挤到节点外。
         // 出图后官方会把预览挂到 node.imgs：默认不再自动收高（避免把预览挤到节点外）。
@@ -2645,8 +2733,12 @@ app.registerExtension({
         return trimmed.slice(0, idx);
       }
       function startFolder() {
+        // 🔴 只把**绝对路径**当初始目录：默认前缀 `JosiaMedia\Media_%001%` 是相对路径，
+        //    后端 os.path.abspath 会把它解析成 ComfyUI 根下一个并不存在的目录 ⇒ 内置浏览器
+        //    直接 404 not_found。相对路径就回空串（顶层显示驱动器 + 快捷入口），
+        //    点一下「ComfyUI 输出目录」就到了，反而更快。
         const cur = String(W["filename_prefix"]?.value || "");
-        return absFolderOf(cur) || cur.replace(/[^\\/]*$/, "").replace(/[\\/]+$/, "") || "";
+        return absFolderOf(cur) || "";
       }
       // 前缀里的「目录部分」＝最后一个分隔符之前的内容（未点「选择目录」时，
       // 它就是 output 下的子层级，如 `JosiaMedia\Media_%001%` ⇒ `JosiaMedia`）。
@@ -2672,7 +2764,8 @@ app.registerExtension({
       btnPick.addEventListener("click", async (e) => {
         e.preventDefault(); e.stopPropagation();
         if (btnPick.disabled) return;
-        setStatus("⏳ 已打开系统「选择文件夹」窗口，请在弹窗里选择目录…");
+        // 🔴 辅助日志（同「📂 打开」）：不盖掉上一条「已保存 …」的成果行
+        setStatus("⏳ 已打开系统「选择文件夹」窗口，请在弹窗里选择目录…", false, true);
         btnPick.disabled = true;
         try {
           const resp = await api.fetchApi("/josia_media_save/pick_dir", {
@@ -2683,17 +2776,21 @@ app.registerExtension({
           const data = await resp.json().catch(() => ({}));
           if (resp.ok && data.ok && data.path) {
             applyPickedFolder(data.path);
-            setStatus(`📁 已选择：${data.path}`);
+            setStatus(`📁 已选择：${data.path}`, false, true);
             return;
           }
-          if (data.error === "cancelled") { setStatus("已取消选择。"); return; }
-          setStatus(`原生选择器不可用（${data.error || resp.status}），已改用内置文件夹浏览器。`);
+          if (data.error === "cancelled") { setStatus("已取消选择。", false, true); return; }
+          setStatus(`原生选择器不可用（${data.error || resp.status}），已改用内置文件夹浏览器。`, false, true);
         } catch (err) {
-          setStatus(`原生选择器调用失败（${err}），已改用内置文件夹浏览器。`);
+          setStatus(`原生选择器调用失败（${err}），已改用内置文件夹浏览器。`, false, true);
         } finally {
           btnPick.disabled = false;
         }
-        openFolderBrowser(startFolder(), applyPickedFolder);
+        openFolderBrowser({
+            base: "/josia_media_save",
+            initialPath: startFolder(),
+            onConfirm: applyPickedFolder,
+        });
       });
       btnOpen.addEventListener("click", async (e) => {
         e.preventDefault(); e.stopPropagation();
@@ -2713,7 +2810,8 @@ app.registerExtension({
           });
           const data = await resp.json().catch(() => ({}));
           if (!resp.ok || !data.ok) setStatus(`⚠️ 打开目录失败：${data.error || resp.status}`, true);
-          else setStatus(`📂 已打开：${data.path}`);
+          // 🔴 辅助日志：不许盖掉上一条「已保存 …」的成果行（aux=true）
+          else setStatus(`📂 已打开：${data.path}`, false, true);
         } catch (err) {
           setStatus(`⚠️ 打开目录失败：${err}`, true);
         } finally {
@@ -2751,10 +2849,8 @@ app.registerExtension({
           const imgs = message?.images || [];
           const auds = message?.audio || [];
           const lat = message?.latents || [];
-          const parts = [];
-          if (imgs.length) parts.push(`图片 ${imgs.length}`);
-          if (auds.length) parts.push(`音频 ${auds.length}`);
-          if (lat.length) parts.push(`Latent ${lat.length}`);
+          // 🔴 按**真实产物类型**分类（视频 / 动图也在 images 通道里，不能只数 imgs.length）
+          const parts = describeOutputs([].concat(imgs, auds, lat));
           // 🔴 状态行必须列出**本次全部**落盘文件名（1 个＝名字 / 2 个＝A、B / ≥3＝A ~ C）。
           //    以前只取 `imgs[0]` ⇒ 图像批次存了 3 张却只报 1 个名字，和目录里对不上。
           const allNames = [].concat(imgs || [], auds || [], lat || [])
@@ -2840,9 +2936,9 @@ app.registerExtension({
             // 🔴 批量循环：有失败文件时在状态行追加提示（详情在日志里）
             const _bfail = message?.josia_info?.batch_failed;
             const _bsum = _bfail ? `｜⚠️ 失败 ${_bfail} 个已跳过` : "";
-            setStatus(`✅ 已保存 ${allNames.length} 个媒体文件（${parts.join(" / ")}）：${lastSaved}${fpsSuffix}${_bsum}`);
-          } else if (parts.length) {
-            lastSaved = parts.join(" / ");
+            setStatus(`✅ 已保存 ${allNames.length} 个媒体文件（${parts}）：${lastSaved}${fpsSuffix}${_bsum}`);
+          } else if (parts) {
+            lastSaved = parts;
             setStatus(`✅ 已保存：${lastSaved}${fpsSuffix}`);
           } else if (message?.josia_info?.skip_msg) {
             // 🔴 批量模式池跑空：后端给了明确的「已全部完成/未载入」提示，别再笼统说「没有产物落盘」。
@@ -3043,127 +3139,6 @@ app.registerExtension({
   },
 });
 
-/* ============================================================================
- * 文件夹选择器（浮层实现）
- * 后端契约与 text_save 的同名接口保持一致：
- *   POST /josia_media_save/list_dirs   {path}         → {ok,path,parent,dirs,shortcuts}
- *   POST /josia_media_save/create_dir  {parent,name}  → {ok,path}
- * ========================================================================== */
-function openFolderBrowser(initialPath, onConfirm) {
-  const mask = el("div", "jms-mask");
-  const panel = el("div", "jms-panel");
-  mask.appendChild(panel);
-  document.body.appendChild(mask);
-
-  mask.addEventListener("mousedown", (e) => { if (e.target === mask) close(); });
-
-  let curPath = initialPath || "";
-  let selPath = "";
-
-  panel.innerHTML = `
-    <div class="jms-panel-head"><span>选择输出目录</span>
-      <button type="button" class="jms-btn" data-act="close">✕</button></div>
-    <div class="jms-chips" data-el="chips"></div>
-    <div class="jms-panel-bar">
-      <button type="button" class="jms-btn" data-act="up">⏫ 上级</button>
-      <input type="text" data-el="path" placeholder="直接输入路径后回车，或留空列出驱动器">
-      <button type="button" class="jms-btn" data-act="refresh">🔄</button>
-      <button type="button" class="jms-btn" data-act="mkdir">📁 新建</button>
-    </div>
-    <div class="jms-panel-list" data-el="list"></div>
-    <div class="jms-panel-foot">
-      <span class="cur" data-el="cur"></span>
-      <span style="display:flex;gap:6px;">
-        <button type="button" class="jms-btn" data-act="cancel">取消</button>
-        <button type="button" class="jms-btn" data-act="ok">选择此文件夹</button>
-      </span>
-    </div>`;
-
-  const elQ = (n) => panel.querySelector(`[data-el="${n}"]`);
-  const listEl = elQ("list");
-  const chipsEl = elQ("chips");
-  const pathEl = elQ("path");
-  const curEl = elQ("cur");
-  const okBtn = panel.querySelector('[data-act="ok"]');
-
-  function close() { mask.remove(); }
-
-  function renderChips(shortcuts) {
-    chipsEl.innerHTML = "";
-    for (const s of (shortcuts || [])) {
-      const c = el("span", "jms-chip", s.name);
-      c.title = s.path;
-      c.addEventListener("click", () => load(s.path));
-      chipsEl.appendChild(c);
-    }
-  }
-  function renderList(dirs, parent) {
-    listEl.innerHTML = "";
-    if (parent) {
-      const up = el("div", "jms-dir", "⏫ ..");
-      up.addEventListener("dblclick", () => load(parent));
-      up.addEventListener("click", () => { clearTimeout(up._t); up._t = setTimeout(() => load(parent), 260); });
-      listEl.appendChild(up);
-    }
-    for (const d of (dirs || [])) {
-      const row = el("div", "jms-dir", "📁 " + d.name);
-      row.title = d.path;
-      row.addEventListener("dblclick", () => load(d.path));
-      row.addEventListener("click", () => { clearTimeout(row._t); row._t = setTimeout(() => load(d.path), 260); });
-      listEl.appendChild(row);
-    }
-    if (!dirs?.length && !parent) {
-      const empty = el("div", "jms-dir", "（没有子目录）");
-      empty.style.opacity = ".6";
-      listEl.appendChild(empty);
-    }
-  }
-  async function load(p) {
-    try {
-      const resp = await api.fetchApi("/josia_media_save/list_dirs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: p || "" }),
-      });
-      const data = await resp.json();
-      if (!data.ok) { curEl.textContent = "读取失败：" + (data.error || resp.status); return; }
-      curPath = data.path || "";
-      selPath = curPath;
-      pathEl.value = curPath;
-      curEl.textContent = curPath || "（请选择驱动器）";
-      renderChips(data.shortcuts);
-      renderList(data.dirs, data.parent);
-      okBtn.disabled = !curPath;
-    } catch (e) { curEl.textContent = "读取失败：" + e; }
-  }
-  async function mkdir() {
-    if (!curPath) return;
-    const name = window.prompt("新文件夹名称：");
-    if (!name) return;
-    try {
-      const resp = await api.fetchApi("/josia_media_save/create_dir", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ parent: curPath, name }),
-      });
-      const data = await resp.json();
-      if (!data.ok) { curEl.textContent = "新建失败：" + (data.error || resp.status); return; }
-      load(data.path);
-    } catch (e) { curEl.textContent = "新建失败：" + e; }
-  }
-  panel.addEventListener("click", (e) => {
-    const act = e.target?.dataset?.act;
-    if (!act) return;
-    if (act === "close" || act === "cancel") close();
-    else if (act === "up") load(curPath ? curPath.replace(/[\\/][^\\/]*$/, "") || curPath.replace(/[\\/]+$/, "") : "");
-    else if (act === "refresh") load(curPath);
-    else if (act === "mkdir") mkdir();
-    else if (act === "ok") { if (curPath) { onConfirm?.(curPath); close(); } }
-  });
-  pathEl.addEventListener("keydown", (e) => { if (e.key === "Enter") load(pathEl.value.trim()); });
-  load(curPath);
-}
-
 /* ==================== VAE 虚拟联动（内置 设置点/获取点 语义）==================== */
 // 🔴 「使用Josia模型加载VAE」＝**自动连线**：选它且 VAE 端口没手动接线时，序列化
 //    prompt 的瞬间把「Josia模型加载」的对应输出临时接到本节点，序列化完立刻拆线。
@@ -3224,3 +3199,6 @@ app.registerExtension({
     };
   },
 });
+
+// 调试用：控制台敲 window.__josiaMediaSave 看分类工具（排查「显示成图片 N」这类问题）
+window.__josiaMediaSave = { classifyOutputs, describeOutputs, extKind, shouldWriteStatus, KIND_TXT, KIND_ORDER };

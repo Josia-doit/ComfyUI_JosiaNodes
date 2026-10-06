@@ -40,8 +40,143 @@ let _graphHooksInstalled = false;
 // 默认宽度（自然宽 ~300px，取 400 便于容纳中文长标签）；不设最小限制，用户可改窄
 const NODE_W = 400;
 
+/* 🔴 不要再加「底部分辨率行」这类 addDOMWidget（10-04 教训，代价很大）：
+ *   它是 DOM widget 却没有 computeSize ⇒ litegraph 判定它「可增长」，把节点的**剩余空间
+ *   全部**分配给它（实测 computedHeight=666，而节点总高才 900）⇒ 官方 image upload 预览
+ *   区被挤成一条缝，图片看起来又小又「不成比例」，整个节点排版也不对。
+ *   预览图与「原尺寸 × 宽 × 高」文字都归官方 renderer 画，本节点一律不碰。 */
+
 function getWidget(node, name) {
   return node.widgets ? node.widgets.find((w) => w.name === name) : null;
+}
+
+/* ── 上传按钮那一行右侧显示「输出分辨率」──────────────────────────────────
+ * 官方在图片**下方**画「原宽 × 原高」。想改写它做不到：官方预览是在 onDrawForeground
+ * **之后**绘制的（实测 fillText 顺序：自定义的在它前面 ⇒ 被盖；onDrawOverlay 影子绘制
+ * 不落帧缓冲），所以只在图片上方另起一行、互不重叠。
+ * 🔴 落点选在「上传按钮」那一行（预览区**上方**）的右侧 —— 那是 widget 绘制阶段画的，
+ *    借 upload 按钮自己的 drawWidget 绘制链补在按钮行右侧，见 patchUploadDraw。
+ *
+ * 缩放公式严格复刻后端 image_encode._compute_target / _align_to_multiple，
+ * 含 Python round 的「五取偶」（与 JS Math.round 的「五入」不同，不复刻会在 .5 边界对不上）。 */
+
+function pyRound(v) {
+  const f = Math.floor(v);
+  const d = v - f;
+  if (d > 0.5) return f + 1;
+  if (d < 0.5) return f;
+  return (f % 2 === 0) ? f : f + 1;                // Python：.5 取偶
+}
+
+function computeOutSize(ow, oh, type, factor, longest, shortest, mp) {
+  if (type === "按系数缩放") {
+    return [Math.max(1, pyRound(ow * factor)), Math.max(1, pyRound(oh * factor))];
+  }
+  if (type === "按长边缩放") {
+    if (ow <= 0 || oh <= 0) return [longest, longest];
+    const s = longest / Math.max(ow, oh);
+    return [Math.max(1, pyRound(ow * s)), Math.max(1, pyRound(oh * s))];
+  }
+  if (type === "按短边缩放") {
+    if (ow <= 0 || oh <= 0) return [shortest, shortest];
+    const s = shortest / Math.min(ow, oh);
+    return [Math.max(1, pyRound(ow * s)), Math.max(1, pyRound(oh * s))];
+  }
+  if (type === "按像素缩放") {
+    const total = mp * 1000000;
+    const aspect = (oh > 0 && ow > 0) ? (ow / oh) : 1.0;
+    const tw = Math.sqrt(total * aspect);
+    return [Math.max(1, pyRound(tw)), Math.max(1, pyRound(tw / aspect))];
+  }
+  return [ow, oh];                                   // 关
+}
+
+function alignToMultiple(w, h, m) {
+  m = Math.trunc(Number(m) || 0);
+  if (m <= 1) return [w, h];
+  const wOk = w % m === 0;
+  const hOk = h % m === 0;
+  if (wOk && hOk) return [w, h];
+  if (wOk) return [w, Math.max(m, Math.floor(h / m) * m)];
+  if (hOk) return [Math.max(m, Math.floor(w / m) * m), h];
+  const shortSide = w <= h ? w : h;
+  const longSide = w <= h ? h : w;
+  const newShort = Math.floor(shortSide / m) * m;
+  if (newShort < m) return [w, h];
+  const scale = newShort / shortSide;
+  const newLong = Math.max(m, Math.floor(Math.trunc(longSide * scale) / m) * m);
+  return w <= h ? [newShort, newLong] : [newLong, newShort];
+}
+
+/** 按当前缩放设置算输出尺寸（与后端同口径） */
+function outputSizeOf(node, ow, oh) {
+  const st = getWidget(node, "缩放类型");
+  const type = st ? String(st.value) : "关";
+  if (type === "关") return [ow, oh];
+  const numOf = (name, dflt) => {
+    const w = getWidget(node, name);
+    const v = parseFloat(w && w.value);
+    return isFinite(v) ? v : dflt;
+  };
+  const t = computeOutSize(
+    ow, oh, type,
+    numOf("缩放系数", 1), numOf("长边尺寸", 1024),
+    numOf("短边尺寸", 1024), numOf("百万像素", 1)
+  );
+  const av = getWidget(node, "对齐倍数");
+  const raw = av ? av.value : 1;
+  const m = (raw == null || raw === "关") ? 1 : (parseInt(raw, 10) || 1);
+  const a = alignToMultiple(t[0], t[1], m);
+  return [Math.max(32, a[0]), Math.max(32, a[1])];
+}
+
+/**
+ * 在上传按钮那一行的**右侧**写「输出 W × H」（短文案，避免挤占节点宽度）。
+ * 三重保护，缺一个就会出现哥哥截图里的问题：
+ *   ① 右端对齐到「节点宽 − 10」⇒ 不会超出容器；
+ *   ② 高度避让：画在按钮下沿，不与「选择上传的文件」同一基线；
+ *   ③ 宽度避让：量出文字宽度后，若左侧留给按钮文字的空间不够就**整条不画**
+ *      （宁可不显示，也绝不与按钮文字重叠）。
+ */
+function drawOutResText(ctx, widget, node) {
+  const idx = node.imageIndex == null ? 0 : node.imageIndex;
+  const img = node.imgs && node.imgs[idx];
+  if (!img || !img.naturalWidth || !img.naturalHeight) return;
+  const [fw, fh] = outputSizeOf(node, img.naturalWidth, img.naturalHeight);
+
+  const nodeW = node.size[0] || 0;
+  const y = (widget ? widget.y : 0) + (widget && widget.height ? widget.height : 20) * 0.72;
+  const rightX = nodeW - 10;
+  const text = `输出 ${fw} × ${fh}`;
+  ctx.save();
+  ctx.font = "10px sans-serif";
+  const tw = ctx.measureText(text).width;
+  // 按钮自带文字「选择上传的文件」居中（实测半宽约 42px），左边必须留够，否则重叠
+  if (rightX - tw < nodeW / 2 + 46) { ctx.restore(); return; }
+  ctx.textAlign = "right";
+  ctx.textBaseline = "alphabetic";
+  ctx.fillStyle = "rgba(255,255,255,0.72)";
+  ctx.fillText(text, rightX, y);
+  ctx.restore();
+}
+
+/**
+ * 包装 upload 按钮的 drawWidget，在它画完之后补这行字。
+ * 🔴 只能借 widget 自己的绘制链：官方预览图是在更晚的阶段绘制的，
+ *    onDrawForeground / onDrawOverlay 的自定义绘制都会被它盖掉（10-04 实测）。
+ * 🔴 必须先抓局部引用再包装（`.bind(` 会命中注册表 yara 扫描规则，箭头代理会自递归）。
+ */
+function patchUploadDraw(node) {
+  const up = getWidget(node, "upload");
+  if (!up || up.__josiaPatched) return;
+  up.__josiaPatched = true;
+  const orig = up.drawWidget;
+  const owner = up._node || node;
+  up.drawWidget = function (ctx, opts) {
+    const r = orig ? orig.call(this, ctx, opts) : undefined;
+    try { drawOutResText(ctx, this, owner); } catch (e) { /* 忽略 */ }
+    return r;
+  };
 }
 
 // 把「可能是控件、也可能是节点」的入参归一到节点对象
@@ -97,10 +232,14 @@ function applyScaleVisibility(widgetOrNode, scaleType) {
   }
   const align = getWidget(node, "对齐倍数");
   if (align) align.disabled = off;
-  // 🔴 仅重算高度，保留宽度（避免把翻倍的默认宽度改回去）
+  // 🔴 只在「内容比现在高」时撑开高度，**绝不缩小**：
+  //    无条件 setSize(computeSize) 等于每次改参数都把节点高度重置成最小高度，
+  //    用户拉大的高度被吃掉（实测 900 → 470）⇒ 预览区跟着变窄，
+  //    表现为「图像不跟随节点尺寸放大、而且一改参数就缩回去」。
+  //    宽度同理不碰（避免把设定的默认宽度改回去）。
   try {
     const sz = node.computeSize ? node.computeSize() : [node.size[0], node.size[1]];
-    node.setSize([node.size[0], sz[1]]);
+    if (sz && sz[1] > node.size[1]) node.setSize([node.size[0], sz[1]]);
   } catch (e) { /* 忽略 */ }
 }
 
@@ -182,6 +321,45 @@ function syncUploadCombo(node) {
   up.disabled = isPortWired(node, "image");
 }
 
+/* ── 官方遮罩编辑器（MaskEditor）兼容桥 ─────────────────────────────────
+ * 症状：在遮罩编辑器里画完保存，本节点预览更新了，但「选择图像」仍指向原文件
+ *      ⇒ 后端按旧文件跑 ⇒ 「遮罩」输出恒为空。
+ * 根因：官方保存链 writeImageWidgetValue（前端 imageWidgetAdapter.ts，1.53.6 实锤）
+ *      硬编码只回写名为 "image" 的 widget，找不到就静默 return ——
+ *      原生「加载图像」的控件恰好叫 image 所以正常；本节点叫「选择图像」⇒ 丢。
+ * 修法：补一个隐藏影子 widget（名字必须是 image）接住回写：
+ *   · serialize = false          ⇒ 不写入工作流（LGraphNode.serialiseWidgetValues）
+ *   · options.serialize = false  ⇒ 不进执行 prompt（graphToPrompt）
+ *   ⇒ 与 optional 的 image 输入端口、后端参数零交互，纯前端桥。
+ *   · value 用访问器双向镜像「选择图像」：读＝下拉当前值；写＝剥掉 " [input]"
+ *     注解后转发到下拉（MaskEditor 存的就是这个带 alpha 的新图 ⇒ 后端能拿到
+ *     真遮罩；下拉换文件影子跟着变 ⇒ 下次打开编辑器续编的是新文件）。 */
+function installMaskEditorBridge(node) {
+  try {
+    const combo = getWidget(node, "选择图像");
+    if (!combo || (node.widgets || []).some((w) => w && w.name === "image")) return;
+    const shadow = node.addWidget("text", "image", "", () => {}, { serialize: false });
+    shadow.hidden = true;
+    shadow.serialize = false;                               // 工作流持久化排除
+    if (shadow.options) shadow.options.serialize = false;   // 执行 prompt 排除
+    Object.defineProperty(shadow, "value", {
+      configurable: true,
+      get() { return combo.value; },
+      set(v) {
+        try {
+          if (typeof v !== "string" || !v) return;
+          const bare = String(v).replace(/\s*\[(input|output|temp)\]\s*$/, "");
+          if (!bare || bare === combo.value) return;
+          setWidgetValue(node, combo, bare);
+          try { if (combo.inputEl) combo.inputEl.value = bare; } catch (e) { /* 忽略 */ }
+          try { if (typeof combo.callback === "function") combo.callback.call(combo, bare); } catch (e) { /* 忽略 */ }
+          try { app.graph?.setDirtyCanvas(true, true); } catch (e) { /* 忽略 */ }
+        } catch (e) { /* 忽略 */ }
+      },
+    });
+  } catch (e) { /* 旧内核无此机制时忽略 */ }
+}
+
 function syncAll(node) {
   const st = getWidget(node, "缩放类型");
   applyScaleVisibility(node, st ? st.value : "按系数缩放");
@@ -217,8 +395,23 @@ app.registerExtension({
         };
       }
       syncAll(this);
+      // 缩放参数 / 对齐倍数变化 ⇒ 图片上方的「输出分辨率」要实时重算
+      for (const nm of ["缩放系数", "长边尺寸", "短边尺寸", "百万像素", "对齐倍数"]) {
+        const w = getWidget(this, nm);
+        if (!w) continue;
+        const prevCb = w.callback;
+        w.callback = function (v) {
+          const r = prevCb ? prevCb.call(this, v) : v;
+          try { app.graph?.setDirtyCanvas(true, true); } catch (e) { /* 忽略 */ }
+          return r;
+        };
+      }
       // 🔴 装上图节点增删钩子（删掉「Josia模型加载」节点时才能实时把该项移出下拉）
       installGraphHooks(this);
+      // 借 upload 按钮的绘制链补「输出分辨率」那一行
+      try { patchUploadDraw(this); } catch (e) { /* 忽略 */ }
+      // 挂官方遮罩编辑器兼容桥（保存后回写「选择图像」）
+      try { installMaskEditorBridge(this); } catch (e) { /* 忽略 */ }
       return r;
     };
 
@@ -226,6 +419,9 @@ app.registerExtension({
     nodeType.prototype.onConfigure = function () {
       const r = onConfigure ? onConfigure.apply(this, arguments) : undefined;
       syncAll(this);
+      // 载入工作流后 widget 是重建的，要重新挂一次
+      try { patchUploadDraw(this); } catch (e) { /* 忽略 */ }
+      try { installMaskEditorBridge(this); } catch (e) { /* 忽略 */ }
       return r;
     };
 
@@ -256,5 +452,6 @@ app.registerExtension({
 
     // 🔴 不覆写 computeSize / onResize ⇒ 不设最小尺寸限制，用户可自由把节点改窄
     //    （默认宽度只在 onNodeCreated 里给一次；用户保存的窄尺寸由 onConfigure 恢复并保留）
+    // 🔴 也绝不在这里加 DOM widget：见文件上方「不要再加底部分辨率行」的说明。
   },
 });

@@ -7,7 +7,7 @@
  *               ↳ 开关关闭时后两个仅「灰化」，不再隐藏
  *   行2：📁 选择文件（多文件） · 🗑 清空列表 · 🔄 重置进度
  *   信息窗（节点最下方，随内容撑高）：
- *     ┌─ 上方区：当前 Latent 文件详情（多列网格，点列表项即切换）
+ *     ┌─ 上方区：当前 Latent 文件详情（第 1 行三列 + 第 2 行 VAE类型整行，点列表项即切换）
  *     ├─ 分割线
  *     ├─ 状态区：任务池 / 已完成 / 解码中 / 失败 计数
  *     ├─ 分割线
@@ -19,7 +19,7 @@
  *     ⇒ setSize 越改越矮，点一下缩一行、最后只剩端口。
  *   · 高度完全归信息窗管：节点高＝内容需要的总高，每次 grow 双向校正（可增可减）；
  *     用户拖拽只改宽度（onResize 把高度拔回 _targetH），宽度有 MIN_W 下限
- *     （＝三列信息完整不折叠），信息窗永远不出现滚动条。
+ *     （＝第 1 行三列信息完整不折叠），信息窗永远不出现滚动条。
  *
  * 互斥：Latent 输入端口连线 ⇒ 文件相关按钮全部灰化（透传模式，忽略任务池）。
  * ========================================================================== */
@@ -36,9 +36,9 @@ const ROW_H = 22;
 const PAD = 6;
 const ROW_GAP = 6;
 const PLACEHOLDER = "🎞️ 请选择 .latent 文件…";
-// 🔴 最小宽度＝信息窗三列 key-val（文件名/文件类型/数据类型 · 分辨率/文件大小/VAE）
-//    完整显示不折叠的实测宽度；宽度可手动调大，绝不允许低于它。高度不归用户管（只跟随信息窗）。
-//    不折叠的实测宽度；宽度可手动调大，绝不允许低于它。高度不归用户管（只跟随信息窗）。
+// 🔴 最小宽度＝信息窗第 1 行三列 key-val（文件名 / 文件类型 / 数据类型）
+//    完整显示不折叠的实测宽度；第 2 行的 VAE类型 横跨整行，宽度全给它。
+//    宽度可手动调大，绝不允许低于它。高度不归用户管（只跟随信息窗）。
 const DEF_W = 640;
 const DEF_H = 260;
 const MIN_W = 640;
@@ -100,9 +100,10 @@ div.dom-widget:has(> .jlc-root){pointer-events:none !important;}
   background:#000;color:#e6e6e6;font-size:10px;line-height:1.5;display:flex;flex-direction:column;gap:5px;
   overflow:hidden;}
 .jlc-batch.disabled{opacity:.55;pointer-events:none;}
-/* 🔴 上方区：**固定 3 列 × 2 行**（每列＝一对 key-val 同行显示）：
- *    第 1 行 文件名 / 文件类型 / 数据类型，第 2 行 分辨率 / 文件大小 / VAE。
- *    值不换行（nowrap + 溢出省略），配合节点最小宽度保证三列完整不折叠。 */
+/* 🔴 上方区＝**第 1 行三列 + 第 2 行整行**（每列＝一对 key-val 同行显示）：
+ *    第 1 行 文件名 / 文件类型 / 数据类型；第 2 行 VAE类型 横跨后 5 列（grid-column:2/-1），
+ *    VAE 文件名很长，独占一整行才不会被截。
+ *    值不换行（nowrap + 溢出省略），配合节点最小宽度保证完整不折叠。 */
 .jlc-info-top{display:grid;grid-template-columns:auto minmax(0,1fr) auto minmax(0,1fr) auto minmax(0,1fr);
   gap:2px 10px;align-items:baseline;}
 .jlc-info-key{opacity:.55;white-space:nowrap;}
@@ -541,10 +542,12 @@ app.registerExtension({
         } finally { _growing = false; }
       }
 
-      /* ================== 上方区：当前文件详情（固定 3列×2行）================== */
-      // 🔴 按哥哥定死版式：第 1 行 文件名 / 文件类型 / 数据类型，第 2 行 分辨率 /
-      //    文件大小 / VAE。key 与 value **同行**（网格 6 列：auto 1fr ×3）；缺的字段补
-      //    「—」保持 3×2 不塌。长值省略号截断（不折叠）。
+      /* ================== 上方区：当前文件详情（第 1 行三列 + 第 2 行整行）================== */
+      // 🔴 版式（哥哥定）：第 1 行 文件名 / 文件类型 / 数据类型；第 2 行 **VAE类型 独占整行**。
+      //    🔴 不再显示「分辨率 / 文件大小」（2026-10-04 哥哥要求）：下方文件列表每行已经带了
+      //       分辨率与体积，信息窗里再放一份纯属重复。
+      //    VAE 名称很长，所以第 2 行不切三栏 —— key 占第 1 列，值横跨余下 5 列。
+      //    只有一个 VAE（图像 / 音频）就只显示一个；视频有 VAE1+VAE2 两个，两个都列出来。
       //    文件类型判据（哥哥定）：有音频路 ⇒ 音频；多帧 ⇒ 视频；其余 ⇒ 图像。
       //    数据类型（后端按张量结构判）：图像潜空间 / 视频潜空间 / 音视频混合潜空间。
       //    🔴 不显示「帧数 / 张量维度 / 形状」（2026-09-29 哥哥要求）：帧数是 VAE 时间
@@ -564,16 +567,25 @@ app.registerExtension({
           infoTop.appendChild(el("div", "jlc-info-key", k));
           infoTop.appendChild(val);
         };
+        // 整行版：值从第 2 列一直铺到最后，长名字（VAE 文件名）也有地方放
+        const cellWide = (k, v, isErr, tip) => {
+          const val = el("div", "jlc-info-val" + (isErr ? " err" : ""),
+            (v == null || v === "") ? "—" : String(v));
+          if (tip) val.title = tip;
+          val.style.gridColumn = "2 / -1";
+          infoTop.appendChild(el("div", "jlc-info-key", k));
+          infoTop.appendChild(val);
+        };
         const mediaType = d.has_audio ? "音频" : (d.frames != null && d.frames > 1 ? "视频" : "图像");
         cell("文件名", d.name);
         cell("文件类型", mediaType);
         cell("数据类型", d.kind);
-        cell("分辨率", (d.pixel_w && d.pixel_h) ? `${d.pixel_w}×${d.pixel_h}` : null);
-        cell("文件大小", d.size != null ? humanSize(d.size) : null);
         // 🔴 这个 .latent 由「Josia媒体保存」落盘时会把当时用的 VAE 文件名写进文件头
         //    ⇒ 载入时读出来显示，下次解码照着选即可。老文件没有这条元数据则显示「—」。
-        const vaeTxt = [d.vae, d.vae2].filter(Boolean).join(" ＋ ");
-        cell("VAE", vaeTxt || null, false, vaeTxt || null);
+        //    图像 / 音频只有一个 VAE；视频有 VAE1+VAE2，两个都列（＋ 连接）。
+        const vaes = [d.vae, d.vae2].filter(Boolean);
+        const vaeTxt = vaes.join(" ＋ ");
+        cellWide("VAE类型", vaeTxt || null, false, vaeTxt || null);
         if (d.error) {
           const err = el("div", "jlc-info-val err", String(d.error));
           err.style.gridColumn = "1 / -1";

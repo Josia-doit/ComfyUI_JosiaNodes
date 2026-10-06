@@ -557,7 +557,8 @@ def _latent_kind(latent):
         return "纯音频"
     try:
         if samples.dim() == 5:
-            return "仅视频"
+            # T=1 的 5 维是「单帧视频形态」的图像潜空间（见 _latent_is_image_frames）
+            return "仅视频" if int(samples.shape[2]) > 1 else "图像"
     except Exception:
         pass
     return "图像"
@@ -582,6 +583,48 @@ def _latent_routes(latent):
     if isinstance(samples, dict) and samples.get("type") == "audio":
         return (False, True)
     return (True, False)                              # 图像 / 视频稠密张量
+
+
+def _latent_is_image_frames(latent):
+    """只读形态判断这是不是「单帧图像潜空间」（区别于多帧视频潜空间），**不搬数据**。
+
+    🔴 必须把这两者分开（2026-10-04 修的回归就出在这儿）：
+       节点里有一条规矩 ——「视频容器选了『不保存视频』时，绝不因为『图像格式』选了 PNG
+       就把潜空间拆成逐帧静图落盘」。那条是给**多帧视频**防的（一段视频几十帧，
+       静图会悄悄把磁盘塞满；要抽静帧请在前面用「VAE解码」解出图像再接「图像」端口）。
+       可它原先**没有区分单帧图像潜空间**：于是「Latent 端口 + 图像格式 PNG +
+       视频容器不保存视频」这种最常见的图像解码任务被判成「这一路零产物」⇒ 压根不加载
+       VAE、不解码 ⇒ 图像文件一个都没有，只落一个 .latent，而且**不报错**。
+    判据（Qwen-Image / SD3 系潜空间形态）：
+       稠密张量 4 维 [B, C, H, W]        ＝ 图像潜空间（每 batch 一张图）
+       稠密张量 5 维 [B, C, 1, H, W]     ＝ 单帧图像潜空间（Qwen-Image / Fun 系管线的
+                                            「单帧视频形态」，T=1 视作一张图）
+       稠密张量 5 维 [B, C, T>1, H, W]   ＝ 视频潜空间
+       NestedTensor（联合 AV）/ audio dict 一律 False（那是视频 / 音频路）
+       读不到 shape ⇒ 保守 False（维持旧行为，不擅自拆帧）
+    """
+    if latent is None:
+        return False
+    samples = latent.get("samples") if isinstance(latent, dict) else None
+    if samples is None or isinstance(samples, dict):
+        return False
+    if getattr(samples, "is_nested", False):
+        return False
+    shape = getattr(samples, "shape", None)
+    try:
+        ndim = len(shape)
+    except TypeError:
+        return False
+    if ndim == 5:
+        # 🔴 [B, C, 1, H, W]（T=1）就是一张图，必须按图像路解码 —— 否则「图像格式」选了
+        #    WebP/PNG、视频容器又是「不保存视频」时，两路都判零产物 ⇒ 兜底把 Latent
+        #    原样落盘、图一张不出（实测 Media_006.latent (1,16,1,256,144) 踩中）。
+        #    多帧（T>1）维持 False：视频潜空间绝不因「图像格式」被拆成逐帧静图。
+        try:
+            return int(shape[2]) == 1
+        except Exception:
+            return False
+    return 0 < ndim <= 4
 
 
 # ==================================================================
@@ -865,6 +908,42 @@ def _tensor_to_pil(image, keep_alpha=True):
     if not keep_alpha and img.mode in ("RGBA", "LA"):
         img = img.convert("RGB")
     return img
+
+
+# ==================================================================
+# 透明度通道体检（2026-10-04）
+# ==================================================================
+# ComfyUI 的 VAE 编码只接受 3 通道（comfy/sd.py: VAE.encode 的 pixel_samples 是 4 维 RGB），
+# 所以素材自带的 alpha 永远进不了 latent；解码返回的第四通道是空的（实测恒 0）。
+# 这时若照原样存成 PNG / WebP 的 RGBA，用户拿到的就是一张「RGB 数据在、但整图透明」的
+# 空图 —— 不报错、也看不出错在哪（哥哥实测：透明背景图解码后出全透明）。
+# 这里把「第四通道是不是空的」显式判出来，让保存侧按 RGB 落盘并在信息窗说清原因。
+ALPHA_TRANSPARENT_MAX = 4 / 255.0     # alpha ≤ 4/255 视为「完全透明」
+ALPHA_EMPTY_RATIO = 0.999             # 透明像素占比 ≥ 该值 ⇒ 整图无可见像素
+
+
+def _alpha_state(image):
+    """判定解码结果的第四通道（透明度）是不是「空」的。
+
+    返回 (keep_alpha, level)：
+      keep_alpha=False ⇒ 第四通道不可用，落盘按 RGB 走；
+      level="empty" ⇒ 整图透明（什么都看不见）；"partial" ⇒ 部分透明（VAE 反推，非原素材）；
+      level="" ⇒ 正常（第四通道有真实分布）。
+    """
+    try:
+        # 🔴 必须在**最后那维**上看通道数：逐张静态图那一路给的是单帧 [H,W,C]（3 维），
+        #    视频/动图那一路才是整批 [B,H,W,C]（4 维）。早先只认 4 维，于是单帧路径
+        #    每帧都被判成「没有第四通道」⇒ 告警永远不触发（哥哥那个全透明图就是这么漏掉的）。
+        ndim = int(getattr(image, "ndim", 0))
+        if image is None or ndim < 3 or int(image.shape[-1]) < 4:
+            return False, ""
+        a = np.clip(255.0 * image[..., 3].detach().cpu().numpy(), 0, 255)
+        ratio = float((a <= ALPHA_TRANSPARENT_MAX).mean())
+        if ratio >= ALPHA_EMPTY_RATIO:
+            return False, "empty"
+        return True, ("partial" if ratio > 0 else "")
+    except Exception:
+        return True, ""
 
 
 def _prepare_image(img, spec):
@@ -1386,7 +1465,8 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
             else:
                 raise
 
-        results["images"].append({"filename": file, "subfolder": _rel_sub(folder), "type": results["type"]})
+        results["images"].append({"filename": file, "subfolder": _rel_sub(folder),
+                                  "type": results["type"], "josia_kind": "image"})
         return file
 
     # ------------------------------------------------------------------
@@ -1431,7 +1511,8 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
             else:
                 raise
 
-        results["images"].append({"filename": file, "subfolder": _rel_sub(folder), "type": results["type"]})
+        results["images"].append({"filename": file, "subfolder": _rel_sub(folder),
+                                  "type": results["type"], "josia_kind": "animated"})
         results["animated"] = True
         return file
 
@@ -1475,7 +1556,11 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
             use_codec = codec if codec in CONTAINER_CODECS.get(container, ()) else \
                 ("vp9" if container == "WebM" else "h264")
             encoder = VIDEO_ENCODERS.get(use_codec, "libx264")
-            save_alpha = images_t.shape[-1] == 4 and use_codec == "vp9"
+            # 🔴 静态图那套 alpha 体检在这里同样生效：VP9 的第四通道若是空的（VAE 编码
+            #    只收 RGB，透明度进不了 latent），硬存 yuva420p 只会得到一条全透明的空视频
+            #    ⇒ 直接退回 yuv420p（有像素），别让用户拿到看不见的视频。
+            _keep_a, _lv = _alpha_state(images_t)
+            save_alpha = _keep_a and _lv != "empty" and use_codec == "vp9"
 
             # MP4 的元数据要落进 udta.meta.keys/ilst 盒（前端按此解析），
             # ffmpeg 需显式开 use_metadata_tags，否则键值全被丢进默认 iTunes 原子 ⇒ 拖回读不到。
@@ -1523,7 +1608,8 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
                 self._encode_audio_stream(container_obj, audio_ctx)
             container_obj.close()
 
-        results["images"].append({"filename": file, "subfolder": _rel_sub(folder), "type": results["type"]})
+        results["images"].append({"filename": file, "subfolder": _rel_sub(folder),
+                                  "type": results["type"], "josia_kind": "video"})
         results["animated"] = True
         return file
 
@@ -1671,7 +1757,8 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
             out.mux(st.encode(None))
             out.close()
 
-            results_audio.append({"filename": fname, "subfolder": _rel_sub(folder), "type": results["type"]})
+            results_audio.append({"filename": fname, "subfolder": _rel_sub(folder),
+                                  "type": results["type"], "josia_kind": "audio"})
             counter += 1
 
         results["audio"].extend(results_audio)
@@ -1713,7 +1800,8 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
         else:
             output["latent_tensor"] = _to_save_tensor(samples)
         comfy.utils.save_torch_file(output, path, metadata=metadata)
-        results["latents"].append({"filename": file, "subfolder": _rel_sub(folder), "type": results["type"]})
+        results["latents"].append({"filename": file, "subfolder": _rel_sub(folder),
+                                   "type": results["type"], "josia_kind": "latent"})
         return file
 
     # ------------------------------------------------------------------
@@ -1765,10 +1853,15 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
             #    ⇒「落盘 .latent」视为开启（本节点接入工作流就必须留下产物，不许空转）。
             #    典型：图像格式选了 PNG 但「图像」端口没接帧 + 视频/音频路都是「不保存X」——
             #    上面的强制规则只看下拉值，会漏掉这种情况 ⇒ 编码跑完才报「不会产生任何文件」。
+            # 🔴 2026-10-04 补一个排除项：接的是**单帧图像潜空间**时，「图像」端口没接帧
+            #    **不是**「无产物」—— 图像格式选了就是要解出这张图来落盘（见「图像路要出图」）。
+            #    这个兜底以前把最常见的图像解码任务（Latent 端口 + PNG + 不保存视频）
+            #    误判成无产物，硬开了「落盘 .latent」，于是磁盘上只剩一个 .latent。
             if (not 保存潜空间 and Latent is not None
                     and (图像格式 == NONE_IMAGE or 图像 is None)
                     and 视频容器 in OFF_VIDEO
-                    and 音频格式 in OFF_AUDIO):
+                    and 音频格式 in OFF_AUDIO
+                    and not _latent_is_image_frames(Latent)):
                 保存潜空间 = True
                 print(f"{WATERMARK} ⚡ 三路均无实际产物（图像格式选了但「图像」端口没接帧，"
                       f"视频/音频路均为「不保存X」）⇒ 自动落盘 Latent 兜底。")
@@ -1891,11 +1984,21 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
 
                     # ---- 路由判定（按文件判；VAE 走缓存，整轮只加载一次）----
                     有视频路, 有音频路 = _latent_routes(Latent)
-                    # 🔴 视频路只在「真的要出容器文件」时才解码：「不保存视频」＝这一路零产物，
-                    #    绝不因「图像格式」选了 PNG 就把整段视频拆成逐帧静图落盘（要抽静帧请在
-                    #    前面用「VAE解码」把 Latent 解成图像、再接进「图像」端口，由图像路保存）。
+                    # 🔴 图像路要出图的判定（2026-10-04 修的回归）：
+                    #    「图像格式」选了真实格式 + 接的是**单帧图像潜空间** ⇒ 必须解码出像素。
+                    #    以前这里只认「视频容器」这一个触发条件，于是图像格式选 PNG、视频容器选
+                    #    「不保存视频」这种最常见的图像解码任务被判成「这一路零产物」：
+                    #    不加载 VAE、不解码，图像文件一个都没有，只落一个 .latent，而且**不报错**。
+                    #    多帧视频潜空间**不**因此拆帧（理由见 _latent_is_image_frames）；
+                    #    视频潜空间要静图请先用「VAE解码」解出图像再接「图像」端口。
+                    图像路要出图 = (图像格式 != NONE_IMAGE
+                              and Latent is not None
+                              and 有视频路
+                              and _latent_is_image_frames(Latent))
+                    # 🔴 视频路只在「真的要出容器文件」或「图像路要出图」时才解码：
+                    #    「不保存视频」＝不出容器文件，这一路零产物。
                     需要视频解码 = (Latent is not None and 有视频路
-                               and 视频容器 in VIDEO_OUTPUT_CONTAINERS)
+                               and (视频容器 in VIDEO_OUTPUT_CONTAINERS or 图像路要出图))
                     # 🔴 音频路解码条件：要么「音频格式」要单独出文件，要么视频容器要出
                     #    能装音轨的真视频（音轨封装进容器，对齐原生「创建视频」——哥哥实测
                     #    AV 潜空间解出的 MP4 无声，根因就是「不保存音频」把解码整个跳过了）。
@@ -1939,6 +2042,11 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
                         if not (需要视频解码 or 需要音频解码):
                             print(f"{WATERMARK} ⚡ 免解码直通：三路均为「不保存X」⇒ "
                                   f"不加载 VAE、不解码，把潜空间原样落盘（{(_latent_kind(Latent) or '未知')}）")
+                        if 图像路要出图 and 视频容器 in OFF_VIDEO:
+                            # 这一行是 2026-10-04 那次回归的判据留痕：以前这条件下压根不解码，
+                            # 只落 .latent；现在会明确告诉你是「图像格式」触发的解码。
+                            print(f"{WATERMARK} 🖼️ 潜空间是单帧图像 +「图像格式」选了 {图像格式} "
+                                  f"⇒ 解码出图像落盘（视频容器「{视频容器}」不出容器文件）。")
                         if video_lat is None and audio_lat is not None:
                             print(f"{WATERMARK} ℹ️ 接入的是纯音频潜空间，本次只解音频。")
                         # 🔴 只有**真的要出这一路的产物**才解码（否则用户选「不保存X」就白省了）
@@ -2062,10 +2170,19 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
                             counter = bump(counter)
                             made_container = True
 
+                        # 🔴 本次解码结果的 alpha 体检结论（"" / "empty" / "partial"），带进信息窗告警
+                        alpha_warn = ""
                         if images is not None and not made_container and 图像格式 != NONE_IMAGE:
                             # 逐张静态图（原生 SaveImage 行为）
                             for batch_number, image in enumerate(images):
-                                keep_alpha = image.shape[-1] == 4 and spec["fmt"] in ("PNG", "WEBP", "AVIF", "TIFF")
+                                # 🔴 alpha 体检：解码出的第四通道全是 0（VAE 编码只收 RGB，透明度
+                                #    进不了 latent）⇒ 强制按 RGB 落盘，别交一张什么都看不见的空图。
+                                keep_alpha, _lv = _alpha_state(image)
+                                keep_alpha = keep_alpha and spec["fmt"] in ("PNG", "WEBP", "AVIF", "TIFF")
+                                if _lv == "empty":
+                                    alpha_warn = "empty"
+                                elif _lv == "partial" and alpha_warn != "empty":
+                                    alpha_warn = "partial"
                                 img = _tensor_to_pil(image, keep_alpha=keep_alpha)
                                 name_b = name.replace("%batch_num%", str(batch_number))
                                 f = self._save_still(img, spec, full_folder, name_b, counter, 无损, 质量,
@@ -2118,6 +2235,17 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
                 except Exception as _e:
                     import traceback as _tb
                     _stk = _tb.format_exc()
+                    # 🔴 解码失败兜底（2026-10-04）：解码前那次「优先存潜空间」没开或没存成时，
+                    #    这里补存一个 .latent —— 免得这一轮白跑：数据还在，事后能用「Josia加载Latent」
+                    #    单独重试解码。注意这**不算成功产物**，下面的整轮校验仍会照实报错。
+                    if (Latent is not None and 保存潜空间 and not 已提前保存潜空间):
+                        try:
+                            f = self._save_latent(Latent, full_folder, name, counter,
+                                                  prompt, extra_pnginfo, results)
+                            提前保存的潜空间路径 = f
+                            print(f"{WATERMARK} 💾 执行失败，已兜底保存潜空间（可事后单独解码）：{f}")
+                        except Exception as _le2:
+                            print(f"{WATERMARK} ⚠️ 兜底保存潜空间也失败：{_le2}")
                     轮失败.append((src_file or "（无源文件）", f"{type(_e).__name__}: {_e}", _stk))
                     if set_status and src_file:
                         set_status(src_nid, src_file, "failed", error=f"{type(_e).__name__}: {_e}")
@@ -2126,20 +2254,25 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
                                      轮成功数, len(轮失败))
                     print(f"{WATERMARK} ❌ 批量循环[{_idx}/{len(items)}]：「{src_file or '外部输入'}」失败已跳过：{_e}")
 
+            # ---- 落地校验（整轮）----
+            # 🔴 2026-10-04：失败兜底会落一个 .latent，results["latents"] 因此非空 ——
+            #    但那不是成功产物，绝不能让兜底把失败静默掉。判据改成「有图像/音频产物
+            #    才算真出图」，否则一律按失败处理（错误详情进前端信息窗）。
+            if 轮失败 and not (results["images"] or results["audio"]):
+                _f, _msg, _stk = 轮失败[0]
+                if _msg.startswith("ValueError:"):
+                    raise ValueError(_msg.split(":", 1)[1].strip())
+                ui["josia_info"] = {
+                    "error": _msg,
+                    "error_detail": _stk,
+                    "inputs": in_parts,
+                    "early_latent": (last.get("early_latent_path") if last else "")
+                                    or 提前保存的潜空间路径 or None,
+                }
+                print(f"{WATERMARK} ❌ 执行出错（详情已写入前端信息窗）：\n{_stk}")
+                return {"ui": ui, "result": (None, "", None, None, None)}
             # 🔴 落地校验（整轮）：一个产物都没有 ⇒ 区分「全失败」与「配置空转」，保持旧版语义
             if not (results["images"] or results["audio"] or results["latents"]):
-                if 轮失败:
-                    _f, _msg, _stk = 轮失败[0]
-                    if _msg.startswith("ValueError:"):
-                        raise ValueError(_msg.split(":", 1)[1].strip())
-                    ui["josia_info"] = {
-                        "error": _msg,
-                        "error_detail": _stk,
-                        "inputs": in_parts,
-                        "early_latent": (last.get("early_latent_path") if last else "") or None,
-                    }
-                    print(f"{WATERMARK} ❌ 执行出错（详情已写入前端信息窗）：\n{_stk}")
-                    return {"ui": ui, "result": (None, "", None, None, None)}
                 raise ValueError(
                     "Josia媒体保存：本次不会产生任何文件 —— 图像 / 视频 / 音频三路都没有可落盘的产物，"
                     "也没有可保存的 Latent（未接入，或保存失败）。请接入 Latent 并保持「落盘 .latent」"
@@ -2182,6 +2315,16 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
             saved_names += [d.get("filename") for d in results["audio"]]
             saved_names += [d.get("filename") for d in results["latents"]]
             saved_names = [n for n in saved_names if n]
+            # 🔴 按**真实产物类型**分类计数（2026-10-04）：ComfyUI 原生协议里视频/动图也塞在
+            #    `images` 通道（照抄原生 SaveWEBM / SaveAnimatedWEBP 的做法），前端只按通道名
+            #    统计就会把 mp4 报成「图片 1」—— 视频明明解码成功了却说成图片。
+            #    每个落盘条目都带 `josia_kind`（由各自的保存器打上），这里汇总给前端显示。
+            by_kind = {}
+            for _bucket in ("images", "audio", "latents"):
+                for _d in results[_bucket]:
+                    _k = _d.get("josia_kind") or ""
+                    by_kind[_k] = by_kind.get(_k, 0) + 1
+            by_kind = {k: v for k, v in by_kind.items() if k and v}
             ui["josia_info"] = {
                 "inputs": in_parts,
                 "dir": full_folder,
@@ -2191,6 +2334,10 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
                 "target": folder_type,
                 "filename": os.path.basename(main_path) if main_path else "",
                 "filenames": saved_names,
+                "by_kind": by_kind,
+                # 🔴 解码结果的透明度体检（"" 正常 / "partial" 部分透明 / "empty" 整图透明）。
+                #    交给前端在信息窗顶部告警——全透明空图必须让用户当场看见，不能静默交付。
+                "alpha_warn": (locals().get("alpha_warn") or ""),
                 "size": size_txt,
                 "cost": "%.2f" % cost,
                 "count": (max(0, len(results["images"]) - (1 if results["animated"] else 0))

@@ -102,11 +102,23 @@ MASK_OUTPUT_SLOT = 1
 
 # ===================== 下拉候选 =====================
 def _input_image_choices():
-    """「选择图像」下拉候选：空项 + input 目录下的全部图像文件（口径与原生加载图像一致）。"""
+    """「选择图像」下拉候选：空项 + input 目录下的全部图像文件（口径与原生加载图像一致）。
+
+    🔴 必须**递归**子目录（2026-10-04 修的硬伤）：ComfyUI 前端粘贴的图落在
+       `input/pasted/image (30).png`，而这里原先只 `os.listdir(input_dir)` 列顶层 ⇒
+       粘贴图永远不在候选里 ⇒ 提交时 `execution.validate_inputs` 直接判失败：
+       `Value not in list: 选择图像: 'pasted/image (30).png'`，**整个节点跑不起来**
+       （校验只认候选列表，image_upload 标记并不会豁免）。
+       候选用**相对 input 的路径**（`pasted/xxx.png`），与加载侧
+       `folder_paths.get_annotated_filepath(name)` / 原生 LoadImage.load_image 口径一致。
+    """
     try:
         input_dir = folder_paths.get_input_directory()
-        files = [f for f in os.listdir(input_dir)
-                 if os.path.isfile(os.path.join(input_dir, f))]
+        files = []
+        for root, _dirs, names in os.walk(input_dir):
+            for n in names:
+                rel = os.path.relpath(os.path.join(root, n), input_dir)
+                files.append(rel.replace("\\", "/"))          # 统一用正斜杠
         files = folder_paths.filter_files_content_types(files, ["image"])
         return [""] + sorted(files, key=str.lower)
     except Exception:

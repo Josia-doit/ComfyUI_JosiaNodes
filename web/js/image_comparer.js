@@ -20,6 +20,14 @@ function imageDataToUrl(data) {
  * 不新增后端参数，避免破坏旧工作流的 widgets_values 顺序。
  * ========================================================================== */
 const CMP_ROW_H = 22;
+// 图像绘制区起点 = 标题区 + 按钮行（DOM widget）高度 + 留白。
+// 🔴 按钮行是 addDOMWidget 挂进来的真实 DOM，节点画布上不占「绘制像素」，
+// 只写死一个 titleH 会让图像顶部压到按钮底下（10-04 哥哥实测反馈）。
+// 这里只做兜底常量；draw 里会实测那个 DOM 的 bottom 顶替它（量不到才用常量）
+//  —— 不同主题 / 字体 / 标题高度下写死必然再翻车。
+const CMP_TITLE_H = 48;          // 标题区兜底高度
+const CMP_DOM_H = CMP_ROW_H + 6; // 按钮行高度，与 domWidget.computeSize 保持一致
+const CMP_CONTENT_GAP = 4;       // 按钮行与图像区之间的留白
 let _cmpStyleInjected = false;
 
 /** 注入胶囊样式（幂等，只注入一次） */
@@ -261,9 +269,17 @@ class JosiaImageComparerNode {
         this.healTries = 0; // 自愈式还原的尝试次数上限
         this.isPointerOver = false; // 鼠标是否悬停在节点上
         this.pointerPos = [0, 0]; // 鼠标位置
+        // 🔴 刚进入节点的那一帧不画分隔线：此时 pointerPos 还是上次离开时留下的旧坐标，
+        //    直接拿来当 wipeX 会让线「凭空跳到旧位置」（10-05 哥哥反馈的割裂感来源之一）。
+        //    draw() 画完一帧会把它清掉，之后线就严格等于指针位置。
+        this._skipWipe = false;
         this.comparerMode = "Slide"; // 默认对比模式：滑动
         this.fitMode = "默认"; // 显示适配方式：默认 / 等宽 / 等高
-        this.blend = 0; // 混合度：上层图像B叠加在A上的不透明度（0=关闭；与滑动/点击对比共存，不替代）
+        this.blend = 0; // 混合度：A/B 互补不透明度（0=A 全实 B 全隐；50=各半；100=B 全实 A 全隐）
+        this.contentTop = null; // 图像区在节点内的实际起点（实测按钮行底部，量不到才用常量）
+        this._topMeasuredAt = 0; // 上次实测时刻（节流，避免每帧 getBoundingClientRect）
+        this._nodeBg = null; // 采样到的节点底色（透明背景最终显示的就是它）
+        this._nodeBgAt = 0;
 
         this.initProperties(); // 初始化节点属性
         this.setupEvents(); // 绑定鼠标事件
@@ -485,10 +501,17 @@ class JosiaImageComparerNode {
             { label: "混合", step: 5, min: 0, max: 100 }
         );
         numBlend.title =
-            "混合：上层图像B以该不透明度叠在A上（0=关闭，100=完全覆盖）。\n" +
-            "大于 0 时替代滑动/点击对比；改动实时生效，无需重新执行节点。";
+            "混合：两图互补不透明度 —— 数值 n 表示 A 图 (100−n)%、B 图 n%。\n" +
+            "0 = 只显示 A，50 = A/B 各半，100 = 只显示 B。\n" +
+            "鼠标扫过时照常分割对比：左侧按该混合显示，右侧显示 B 图原图。\n" +
+            "改动实时生效，无需重新执行节点。";
         root.appendChild(numBlend);
         this.numBlend = numBlend;
+
+        // 留一份 DOM 引用：draw 要靠它实测「按钮行底部」在节点内的位置
+        this.domRoot = root;
+        this.contentTop = null;
+        this._topMeasuredAt = 0;
 
         // 面板上滚滚轮时把事件转交给画布，避免自定义 UI 吃掉画布缩放
         root.addEventListener("wheel", (e) => {
@@ -521,6 +544,12 @@ class JosiaImageComparerNode {
         node.onResize = function () {
             try { origResize?.apply(this, arguments); } catch (e) {}
             syncCaps();
+            // 节点尺寸变了 → 按钮行位置跟着变，实测缓存作废（draw 下一帧重测）
+            const cmp = this.josiaComparer;
+            if (cmp) {
+                cmp.contentTop = null;
+                cmp._topMeasuredAt = 0;
+            }
         };
     }
 
@@ -559,7 +588,12 @@ class JosiaImageComparerNode {
     // 绑定鼠标事件（悬停/点击/移动）
     setupEvents() {
         const node = this.node;
-        node.onMouseEnter = () => { this.isPointerOver = true; node.setDirtyCanvas(true, false); };
+        // 进节点＝先不画线（等第一次真实 mousemove 定位），避免线跳到上一次离开时的旧坐标
+        node.onMouseEnter = () => {
+            this.isPointerOver = true;
+            this._skipWipe = true;
+            node.setDirtyCanvas(true, false);
+        };
         node.onMouseLeave = () => { this.isPointerOver = false; node.setDirtyCanvas(true, false); };
 
         node.onMouseDown = () => { node.setDirtyCanvas(true, false); return false; };
@@ -617,6 +651,63 @@ class JosiaImageComparerNode {
         this.applyPair({ a, b }, true);
     }
 
+    /**
+     * 图像区在节点内的起点 y（= 按钮行底部往下再留一点）。
+     * 🔴 按钮行是 addDOMWidget 挂进来的真实 DOM，而 draw 画在 canvas 上，
+     * 两套坐标系并行 —— 写死一个 titleH 必然在某次主题/行高变化后又被按钮压住
+     * （10-04 哥哥实测反馈：图像顶部压到「滑动对比 / 混合」那排按钮下面）。
+     * 所以这里实测 DOM 下沿反算回节点局部坐标；量不到才回落兜底常量。
+     * 600ms 节流：正常每帧 draw 只在首帧和尺寸变化后量一次，不会每帧 getBoundingClientRect。
+     */
+    ensureContentTop() {
+        const node = this.node;
+        const now = (typeof performance !== "undefined" && performance.now)
+            ? performance.now() : Date.now();
+        if (this.contentTop != null && now - this._topMeasuredAt < 600) {
+            return this.contentTop;
+        }
+
+        // 唯一可信的一路：litegraph 的 widget 布局（`dw.y + 行高`）——
+        // 它是**节点局部**的纯逻辑值，与画布平移 / 缩放 / DOM 裁剪全都无关。
+        // 实测（10-04）：dw.y=46、行高 28 ⇒ 按钮行底部 74，起点取 78。
+        let top = null;
+        try {
+            const dw = (node.widgets || []).find(
+                (w) => w && (w.element === this.domRoot || w.name === "comparer_ui")
+            );
+            if (dw && Number.isFinite(Number(dw.y))) {
+                let hh = CMP_DOM_H;
+                try {
+                    const sz = typeof dw.computeSize === "function" ? dw.computeSize() : null;
+                    if (sz && Number.isFinite(Number(sz[1]))) hh = Number(sz[1]);
+                } catch (e) {}
+                top = Number(dw.y) + hh + CMP_CONTENT_GAP;
+            }
+        } catch (e) { /* 拿不到就回落兜底 */ }
+
+        // 图像区至少留 minH 高：top 越界（节点被压得很矮 / dw.y 异常）就回落兜底常量。
+        // 🔴 上一版栽在这里：额外加了一条「DOM rect 反算」并两路取 max，而 rect 是屏幕像素、
+        // 要靠 ds.offset 反算 —— 画布一平移就滞后一帧偏掉（实测偏出 338），
+        // 「取 max」每次都精准选中这条错的：节点越大偏得越多（图像被压到下方、只剩一条），
+        // 节点缩小到 limit 之内又被踢掉、反而看起来正常。视角放大后偏差除以 scale 变小、
+        // 缩小时再变回怪尺寸 —— 全是这一个换算式惹的。
+        const minH = Math.min(140, Math.max(40, node.size[1] * 0.4));
+        const limit = Math.max(CMP_TITLE_H, node.size[1] - minH);
+        if (!Number.isFinite(top) || top <= 0 || top > limit) {
+            top = Math.min(CMP_TITLE_H + CMP_DOM_H + CMP_CONTENT_GAP, limit);
+        }
+
+        this.contentTop = top;
+        this._topMeasuredAt = now;
+        return this.contentTop;
+    }
+
+    // 🔴 显示区不再自己垫底色：litegraph 画节点时已经把整块节点 body 填成 node.bgcolor，
+    // 显示区又恒在节点 body 内（x=pad、底边=size[1]-pad）⇒ 透明背景的图透出来的就是这个
+    // 节点底色，与「预览图像」节点观感一致。曾经额外 fillRect 一层「采样得来的底色」
+    // （getImageData 读显示区左上角 1px + 800ms 节流）⇒ 颜色随采样内容漂移（有时节点色、
+    // 有时画布网格的深灰/黑），纯属自找的抖动，已删除。
+
     // 绘制图像对比界面
     draw(ctx) {
         if (!this.imgs[0]) {
@@ -634,11 +725,12 @@ class JosiaImageComparerNode {
 
         const node = this.node;
         const pad = 12;
-        const titleH = 48;
+        // 🔴 起点取实测的「按钮行底部」，不再写死 titleH —— 否则图像顶部会压到按钮下面
+        const top = this.ensureContentTop();
         const w = node.size[0] - pad * 2;
-        const h = node.size[1] - titleH - pad * 2;
+        const h = Math.max(1, node.size[1] - top - pad);
         const x = pad;
-        const y = titleH + pad;
+        const y = top;
 
         const imgA = this.imgs[0];
         const imgB = this.imgs[1] || imgA;
@@ -686,49 +778,72 @@ class JosiaImageComparerNode {
         ctx.rect(x, y, w, h);
         ctx.clip();
 
-        // 混合层（常驻）：先画 A，再把 B 以 blend 不透明度叠在 A 上作为底层预览。
-        // 🔴 它永远不替代滑动/点击对比——只是叠加预览，滑动/点击时由下方清晰对比层覆盖。
+        // ---- 混合：两图互补不透明度（数值 n ⇒ 合成结果 = (1−n)·A + n·B）----
+        // 🔴 下层 B 必须按 100% 铺满、上层 A 才用 (100−n)%：离屏/主画布上都不要写成
+        //    「B 也按 n% 半透明」，否则 A 的半透明部分透出的是「半透明 B + 节点底色」，
+        //    中间值（比如 15）会整体压暗发黑（10-04 实测，只有 0/100 正常）。
         const blend = Math.max(0, Math.min(100, Number(this.blend) || 0));
-        ctx.drawImage(imgA, offsetXA, offsetYA, drawWA, drawHA);
-        if (blend > 0 && imgB.complete) {
-            ctx.save();
-            ctx.globalAlpha = blend / 100;
-            ctx.drawImage(imgB, offsetXB, offsetYB, drawWB, drawHB);
-            ctx.restore();
-        }
+        const alphaA = (100 - blend) / 100;
 
-        // Click模式：按住显示清晰B图（覆盖在混合层之上），松开恢复 A（混合层仍在）
-        if (this.comparerMode === "Click") {
-            const isDown = this.node.mouse_down || app.canvas.pointer_is_down || false;
-            if (isDown && imgB.complete) {
-                ctx.drawImage(imgB, offsetXB, offsetYB, drawWB, drawHB);
+        // ---- 擦除位置 wipeX：A 覆盖 B（B 在下、A 在上），鼠标扫过时把 A 的右侧擦掉露出 B ----
+        //   null = 不擦，整幅按混合显示；= x 表示整幅擦掉（只剩 B）；= 指针 表示擦掉其右侧
+        let wipeX = null;
+        const bReady = !!imgB.complete;
+        if (bReady) {
+            if (this.comparerMode === "Click") {
+                // 点击对比：按住＝整幅只剩 B，松开＝回到混合效果
+                if (this.node.mouse_down || app.canvas.pointer_is_down) wipeX = x;
+            } else if (this.isPointerOver && !this._skipWipe) {
+                // 🔴 分隔线跟随指针扫过**整个显示区**（= 两图的并集、也就是最宽那张图吃满的横向范围），
+                //    只夹在显示区左右边界内。绝不夹到 B 图自己的范围：
+                //    A 横版 / B 竖版时 B 又窄又居中，指针一旦进到 A 超出 B 的留白区，
+                //    线会卡死在 B 右边缘不动、再动鼠标也不会跟 —— 观感就是「突然跳一下、划不动」。
+                //    现在指针到最右＝A 完整显示，到最左＝A 全擦只剩 B，全程连续无跳变。
+                wipeX = Math.max(x, Math.min(x + w, this.pointerPos[0]));
             }
-            ctx.restore(); // 配平显示区裁剪
-            return;
         }
 
-        // Slide模式：默认显示 A（含混合层），鼠标位置右侧显示清晰 B 图
-        if (this.isPointerOver && imgB.complete) {
-            // 分界线位置（基于B图自身区域裁剪；两图同高，纵向范围一致）
-            let dividerX = Math.max(offsetXB, Math.min(offsetXB + drawWB, this.pointerPos[0]));
+        // 🔴 这里不垫底色 —— 节点 body 已经是节点底色，透明处自然透出它。
 
-            // 绘制B图（仅分界线右侧）
+        // 下层：B 铺满（100% 不透明）；上层 A 的 (100−n)% 会把它压出 n% 的比重。
+        // 混合 0 且不擦除时不必画（A 会全遮住）。
+        if (bReady && (wipeX != null || blend > 0)) {
             ctx.save();
-            ctx.beginPath();
-            ctx.rect(dividerX, offsetYB, offsetXB + drawWB - dividerX, drawHB);
-            ctx.clip();
             ctx.drawImage(imgB, offsetXB, offsetYB, drawWB, drawHB);
             ctx.restore();
+        }
 
-            // 绘制分界线（白色，贯穿两图高度范围）
+        // 上层：A（只画擦除线左侧；不透明度按混合）
+        if (alphaA > 0) {
             ctx.save();
-            ctx.imageSmoothingEnabled = false;
-            ctx.globalCompositeOperation = "difference";
-            const lineWidth = 1 / (app.canvas.ds.scale || 1);
-            ctx.fillStyle = "#ffffff";
-            ctx.fillRect(dividerX - lineWidth / 2, offsetYB, lineWidth, drawHB);
+            if (wipeX != null) {
+                ctx.beginPath();
+                ctx.rect(x, y, Math.max(0, wipeX - x), h);
+                ctx.clip();
+            }
+            ctx.globalAlpha = alphaA;
+            ctx.drawImage(imgA, offsetXA, offsetYA, drawWA, drawHA);
             ctx.restore();
         }
+
+        // 分界线：跟随指针（与上面 wipeX 同一个值，全程连续），取 B 图反色（difference）。
+        // 🔴 纵向贯穿**整个显示区**高度（两图各自垂直居中、高度可能差很多，A 是矮宽横版时
+        //    若只画到 B 的那段高度，上下留白里会缺一块线，滑动看着像断的）—— 一条通长线
+        //    才对得上「左边是 A、右边是 B」这条界。
+        // 🔴 线宽取 2 个屏幕像素并对齐到整像素：1px 线只要落在半像素上就会被抗锯齿拆成
+        //    两列 50% 灰（实测压在红图上是 (127,128,128)），对比度只剩一半、看着像断线。
+        if (wipeX != null && wipeX > x && wipeX < x + w && bReady) {
+            ctx.save();
+            ctx.globalCompositeOperation = "difference";
+            const scale = app.canvas.ds.scale || 1;
+            const lineWidth = 2 / scale;
+            const lineX = Math.round((wipeX - lineWidth / 2) * scale) / scale;
+            ctx.fillStyle = "#ffffff";
+            ctx.fillRect(lineX, y, lineWidth, h);
+            ctx.restore();
+        }
+
+        this._skipWipe = false;
         ctx.restore(); // 配平显示区裁剪
     }
 }
