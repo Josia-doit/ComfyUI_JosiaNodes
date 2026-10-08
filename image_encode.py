@@ -69,7 +69,9 @@ except Exception:
 
 # ===================== 常量 =====================
 VAE_PLACEHOLDER = "请选择VAE模型"           # VAE 下拉默认占位符（无 Josia模型加载 节点时回落到它）
-USE_JOSIA_VAE = "使用Josia模型加载VAE"       # 检测到 Josia 模型加载节点时自动选中项
+USE_JOSIA_VAE = "使用Josia模型加载VAE"       # 用户手动选才生效；不自动选中
+IMAGE_PLACEHOLDER = "🖼️请选择或上传图像…"     # 「选择图像」默认空选项（等价于空，节点不产出图像）
+EMPTY_IMAGE_SENTINELS = ("", IMAGE_PLACEHOLDER)  # 视为「无图像来源」的取值集合
 SCALE_TYPES = ["关", "按系数缩放", "按长边缩放", "按短边缩放", "按像素缩放"]
 ALIGN_MULTIPLES = ["2", "4", "8", "16", "32", "64"]
 
@@ -102,8 +104,11 @@ MASK_OUTPUT_SLOT = 1
 
 # ===================== 下拉候选 =====================
 def _input_image_choices():
-    """「选择图像」下拉候选：空项 + input 目录下的全部图像文件（口径与原生加载图像一致）。
+    """「选择图像」下拉候选：空选项 + 旧空串（兼容旧工作流） + input 目录全部图像文件。
 
+    🔴 首项是可视化的空选项 `IMAGE_PLACEHOLDER`（🖼️请选择或上传图像…）：等价于空、节点不产出图像，
+       用于工作流里多颗参考节点只启用其一、其余快速略过的场景。保留 `""` 是为了向后兼容——
+       旧工作流序列化下来的「选择图像=""」仍能在候选里找到，否则 validate_inputs 会判失败跑不起来。
     🔴 必须**递归**子目录（2026-10-04 修的硬伤）：ComfyUI 前端粘贴的图落在
        `input/pasted/image (30).png`，而这里原先只 `os.listdir(input_dir)` 列顶层 ⇒
        粘贴图永远不在候选里 ⇒ 提交时 `execution.validate_inputs` 直接判失败：
@@ -120,9 +125,9 @@ def _input_image_choices():
                 rel = os.path.relpath(os.path.join(root, n), input_dir)
                 files.append(rel.replace("\\", "/"))          # 统一用正斜杠
         files = folder_paths.filter_files_content_types(files, ["image"])
-        return [""] + sorted(files, key=str.lower)
+        return [IMAGE_PLACEHOLDER, ""] + sorted(files, key=str.lower)
     except Exception:
-        return [""]
+        return [IMAGE_PLACEHOLDER, ""]
 
 
 def _vae_choices():
@@ -237,7 +242,7 @@ class JosiaImageEncode:
 • 通道切换「自动 / RGB / RGBA」：自动＝上游几通道就透传几通道；RGB＝强制三通道、透明度改从遮罩端口走；RGBA＝强制四通道带 alpha
 • 条件编码：仅当 Latent 输出端口被连到下游时才调用 VAE 编码；只连图像端口 ⇒ 不编码、不碰 VAE
 • 缩放类型（最上方）：关 / 按系数 / 按长边 / 按短边 / 按像素 —— 下方唯一缩放参数随类型变形（缩放系数 / 长边尺寸 / 短边尺寸 / 百万像素），方法锁定最快，附对齐倍数 2~64
-• VAE：默认「请选择VAE模型」；图内有「Josia模型加载」节点时才出现「使用Josia模型加载VAE」并自动选中（节点删除则回落），也支持手动挑选
+• VAE：默认「请选择VAE模型」；图内有「Josia模型加载」节点时下拉才出现「使用Josia模型加载VAE」（需手动选，节点删除则回落），也支持手动从 models/vae 里挑
 
 「遮罩」优先走端口；上传图带 alpha 通道时自动转出遮罩。"""
 
@@ -298,17 +303,18 @@ class JosiaImageEncode:
                     "default": VAE_PLACEHOLDER,
                     "tooltip": "编码 Latent 用的 VAE。\n"
                                "• 「请选择VAE模型」＝ 不使用（不编码 Latent，除非给 VAE 端口连线）\n"
-                               "• 「使用Josia模型加载VAE」＝ 直接复用「Josia模型加载」节点已载入的 VAE（检测到该节点时自动选中）\n"
+                               "• 「使用Josia模型加载VAE」＝ 直接复用「Josia模型加载」节点已载入的 VAE（需手动选择；不选则不使用模型加载节点的 VAE）\n"
                                "• 也可手动从 models/vae 里选一个\n"
                                "• 一旦给「VAE」端口接了线，本项自动灰化 —— 接线优先。",
                 }),
 
                 # —— 选择图像（置底）：原生上传按钮 + 原生预览（image_upload 机制，按钮紧随其下）——
                 "选择图像": (_input_image_choices(), {
-                    "default": "",
+                    "default": IMAGE_PLACEHOLDER,
                     "image_upload": True,  # 🔴 原生上传机制开关：前端据此注入上传按钮 + 图片预览（置于本 combo 下方）
                     "tooltip": "从 input 目录选择图像，或点下方「选择要上传的文件」按钮上传。\n"
                                "选中的图像会直接预览在本节点上（与「加载图像」一致）。\n"
+                               "默认「🖼️请选择或上传图像…」＝ 空，节点不产出图像、0.01 秒级快速略过。\n"
                                "「图像」端口接线时本项自动灰化 —— 端口优先。",
                 }),
             },
@@ -432,7 +438,7 @@ class JosiaImageEncode:
         漏掉的话前端判定「输入没变」⇒ 不重跑 ⇒ 改了开关看不出效果。
         """
         key = f"{缩放类型}|{通道切换}"
-        if not 选择图像:
+        if not 选择图像 or 选择图像 in EMPTY_IMAGE_SENTINELS:
             return key
         try:
             path = folder_paths.get_annotated_filepath(选择图像)
@@ -449,24 +455,38 @@ class JosiaImageEncode:
     # 主函数
     # ============================================================
     def encode(self, 缩放类型, 缩放系数, 长边尺寸, 短边尺寸, 百万像素, 对齐倍数, 通道切换=CHANNEL_MODE_DEFAULT,
-                VAE模型=VAE_PLACEHOLDER, 选择图像="",
+                VAE模型=VAE_PLACEHOLDER, 选择图像=IMAGE_PLACEHOLDER,
                 image=None, mask=None, vae=None, unique_id=None, prompt=None):
-        # 1) 解析 VAE
-        vae_obj = _resolve_vae(vae, VAE模型)
+        # 0) 快速略过：无任何图像来源（未选图 + 未接图像端口）⇒ 跳过 VAE 解析 / 全图扫描 / 大张量分配，
+        #    直接返回极小占位（0.01 秒级），用于工作流里多颗参考节点只启用其一的场景。
+        #    ⚠️ 仍返回合法的「图像 / 遮罩 / Latent」三元组（框架要求固定返回结构），
+        #       但内容是 8×8 的占位，不会触发 VAE 编码、不会占用显存。
+        if image is None and 选择图像 in EMPTY_IMAGE_SENTINELS:
+            _ch = 4 if 通道切换 == "RGBA" else 3
+            img_result = torch.zeros((1, 8, 8, _ch), dtype=torch.float32)
+            mask_result = torch.ones((1, 8, 8), dtype=torch.float32)
+            latent_output = {"samples": torch.zeros((1, 4, 1, 1), dtype=torch.float32)}
+            return (img_result, mask_result, latent_output)
 
-        # 2) 判定是否需要编码 Latent
+        # 1) 判定是否真的需要编码 Latent（先判定，再决定是否解析 VAE）
         detected = self._latent_connected(unique_id, prompt)
-        if detected is None:
-            # 无法判定时：有 VAE 才编码（保守，避免无谓报错）
-            encode_latent = (vae_obj is not None)
-        else:
-            encode_latent = detected
+        encode_latent = False if detected is None else detected
 
-        if encode_latent and vae_obj is None:
-            raise ValueError(
-                "[Josia图像编码] Latent 输出已连接，但没有可用的 VAE：请在「VAE模型」里选模型、"
-                "或接「Josia模型加载」节点、或直接给「VAE」端口连线。"
-            )
+        # 2) 解析 VAE —— **仅当确实需要编码 Latent 时才解析**（懒加载）。
+        #    🔴 关键保证：Latent 输出没连线 ⇒ 永远不解析 VAE ⇒ 哪怕图里有「Josia模型加载」节点、
+        #       哪怕「VAE模型」误选成了「使用Josia模型加载VAE」，也不会去碰模型加载注册表、
+        #       不会读取一次 VAE、不会执行任何编码。与媒体保存节点口径完全一致：只有用户显式选了
+        #       「使用Josia模型加载VAE」且确有 Latent 要编码时，才复用模型加载节点的 VAE。
+        #       即：工作流里挂着模型加载节点时，只要你不接 Latent、不选共享 VAE，本节点就
+        #       完全不碰 VAE、零编码开销。
+        vae_obj = None
+        if encode_latent:
+            vae_obj = _resolve_vae(vae, VAE模型)
+            if vae_obj is None:
+                raise ValueError(
+                    "[Josia图像编码] Latent 输出已连接，但没有可用的 VAE：请在「VAE模型」里选模型、"
+                    "或接「Josia模型加载」节点、或直接给「VAE」端口连线。"
+                )
 
         # 2.5) 「遮罩」输出端口有没有被连：连上了就按原生「合并图像Alpha」的口径，
         #      在 RGBA 模式里把遮罩合并成第四通道（遮罩亮＝透明 ⇒ alpha = 1 − 遮罩），
@@ -478,7 +498,7 @@ class JosiaImageEncode:
         # 3) 图像来源：端口 > 上传文件（端口没接时才走上传）
         uploaded_mask = None
         up_alpha = None
-        if image is None and 选择图像:
+        if image is None and 选择图像 and 选择图像 not in EMPTY_IMAGE_SENTINELS:
             image, uploaded_mask, up_alpha = _load_selected_image(选择图像)
             if up_alpha is not None:
                 up_alpha = up_alpha[None]       # 统一成 (1,H,W)，循环里再按批次下标取

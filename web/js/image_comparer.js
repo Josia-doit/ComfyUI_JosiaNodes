@@ -479,7 +479,7 @@ class JosiaImageComparerNode {
             [
                 { value: "默认", label: "默认", tip: "每张图各自以完整可见的最大比例适配显示区（横图吃满宽度、竖图吃满高度）" },
                 { value: "等宽", label: "等宽", tip: "两图宽度相同，高度按各自宽高比" },
-                { value: "等高", label: "等高", tip: "以A为基准填满可用区，B缩放到与A同高（B更宽时超出部分被裁剪）" }
+                { value: "等高", label: "等高", tip: "A、B 同高，且两张图都完整落在节点内（窄图居中留白、宽图自动下压高度不溢出）" }
             ],
             () => this.fitMode,
             (v) => {
@@ -749,12 +749,20 @@ class JosiaImageComparerNode {
             drawHA = sharedW / aAspect;
             drawHB = sharedW / bAspect;
         } else if (fit === "等高") {
-            // 等高：以 A 为基准填满可用区，B 缩放到与 A 同高（B 更宽时超出部分由显示区裁剪）
-            let ha = h, wa = h * aAspect;
-            if (wa > w) { wa = w; ha = w / aAspect; }
+            // 等高：A、B 同高，且两张图都**完整**落在显示区内（宽与高都不超出节点）。
+            // 🔴 旧逻辑只限制 A 的宽度、B 按同高自由放宽 ⇒ 当 B 比 A 更宽（横图在 B）时，
+            //    B 的宽度无视显示区、被裁掉一半（看似「突破节点界限」），横图在 A 时却正常，
+            //    完全不对称。修正为：共享高度取「显示区高度」与「两图都能塞进显示区宽度的
+            //    最大高度」的最小值 —— 无论宽图在 A 还是 B，两图都受节点约束、同高且完整可见；
+            //    若某张更宽导致无法在满高下并排完整显示，则共享高度下压到两张都能完整进框为止。
+            const safeA = (aAspect && isFinite(aAspect)) ? aAspect : 1;
+            const safeB = (bAspect && isFinite(bAspect)) ? bAspect : 1;
+            let ha = h;
+            const maxHByWidth = Math.min(w / safeA, w / safeB);
+            if (maxHByWidth < ha) ha = maxHByWidth;
             drawHA = drawHB = ha;
-            drawWA = wa;
-            drawWB = ha * bAspect;
+            drawWA = ha * safeA;
+            drawWB = ha * safeB;
         } else {
             // 默认：每张图**各自**以「完整可见的最大比例」适配显示区（独立 contain）——
             // 横版图吃满宽度、竖版图吃满高度，互不拖累，各自居中。

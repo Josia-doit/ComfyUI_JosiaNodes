@@ -391,6 +391,37 @@ def _resolve_vae(wired, choice, which="vae1", loader_name="", out=None):
     return _done(v, choice if v is not None else "")
 
 
+def _vae_expected_channels(vae):
+    """尽力拿到该 VAE 期望的 latent 通道数；拿不到返回 None（跳过预检，避免误杀）。"""
+    for obj in (vae, getattr(vae, "first_stage_model", None)):
+        if obj is None:
+            continue
+        lc = getattr(obj, "latent_channels", None)
+        if isinstance(lc, int) and lc > 0:
+            return lc
+        for attr in ("latents_std", "latents_mean"):
+            t = getattr(obj, attr, None)
+            if hasattr(t, "shape") and len(t.shape) >= 1:
+                return int(t.shape[0])
+    return None
+
+
+def _check_vae_for_latent(vae, latent):
+    """解码前校验 VAE 与 Latent 通道数一致，不一致给出可操作的中文报错（而非 torch 底层崩溃）。"""
+    if vae is None or latent is None:
+        return
+    samples = latent.get("samples") if isinstance(latent, dict) else latent
+    if not hasattr(samples, "shape") or len(samples.shape) < 2:
+        return
+    ch = int(samples.shape[1])
+    exp = _vae_expected_channels(vae)
+    if exp is not None and exp != ch:
+        raise ValueError(
+            f"Josia媒体保存：VAE 通道数({exp})与 Latent 通道数({ch})不匹配，无法解码。\n"
+            f"请在「VAE1」里选回生成该 Latent 时使用的 VAE——可在对应 .latent 文件的元数据栏"
+            f"「josia_vae1」查看当初用的 VAE 名；选错 VAE 会解码崩溃或画面错乱。")
+
+
 # ------------------------------------------------------------------
 # 文件名通配符（与 text_save.py 同一套规则 —— 用户要求「复刻不重新设计」）
 # ------------------------------------------------------------------
@@ -1778,10 +1809,13 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
             # 「Josia加载Latent」信息窗据此显示这个 .latent 对应哪套 VAE（解析不出就空着）。
             # 优先记本轮真正用于解码的 VAE；免解码直通（只存 Latent）时退回工作流里
             # 「Josia模型加载」选中的那个 —— 两种情况用户都能一眼看出该配哪套 VAE。
+            # 🔴 只记「本节点 VAE 下拉明确选中的 VAE」：用户手动选的真实 VAE 文件名，或显式选
+            #    「使用Josia模型加载VAE」时记联动源 VAE 名。**不再退回 _loader_names**（模型加载
+            #    节点当时选中的 VAE）——它只是联动源、不等于真正编码该 Latent 的 VAE，记它会误导
+            #    用户选错 VAE 导致解码失败（哥哥实测 008/009：元数据标成 H3，实际是 16 通道 Qwen 编码）。
             _labels = getattr(self, "_vae_labels", None) or {}
-            _loaders = getattr(self, "_loader_names", None) or {}
             for _slot, _mkey in (("vae1", "josia_vae1"), ("vae2", "josia_vae2")):
-                _nm = _labels.get(_slot) or _loaders.get(_slot) or ""
+                _nm = _labels.get(_slot) or ""
                 if _nm and _nm != "端口接线":
                     metadata[_mkey] = _nm
         output = {"latent_format_version_0": torch.tensor([])}
@@ -2016,6 +2050,22 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
                             self._loader_names.get("vae2", ""), self._vae_labels)
                     vae2 = _vae_cache.get("vae2") if 需要音频解码 else None
 
+                    # 🔴 落盘元数据：无论是否解码，都按「本节点 VAE1/VAE2 下拉的实际选择」补记正确的
+                    #    VAE 名（解码那一路 _resolve_vae 已写入真实用到的 VAE，这里补「未解码」的空档）。
+                    #    这样即使本次只存 Latent 不解码，也能记下用户真正选的 VAE，而不是模型加载节点
+                    #    当时选中的 VAE（那会误导解码）—— 详见 _save_latent 处的红线说明。
+                    for _which, _ph in (("vae1", VAE1_PLACEHOLDER), ("vae2", PLACEHOLDER_VAE2)):
+                        if self._vae_labels.get(_which):
+                            continue
+                        _choice = g("VAE1" if _which == "vae1" else "VAE2", _ph)
+                        if _choice == USE_JOSIA_VAE:
+                            # 用户明确选了「使用Josia模型加载VAE」⇒ 记联动源 VAE 名（本节点真会去用它解码）
+                            self._vae_labels[_which] = self._loader_names.get(_which, "")
+                        elif _choice != _ph:
+                            # 用户手动选了某个真实 VAE 文件 ⇒ 直接记该文件名
+                            self._vae_labels[_which] = _choice
+                        # 占位符 ⇒ 不记录（避免给出错误暗示）
+
                     # 🔴 解码前先存潜空间（OOM 保护）：
                     #    解码是显存大头，OOM 时若还没存潜空间就会彻底报废数据；
                     #    先落下 .latent，即使后续解码爆显存，也能用「Josia加载Latent」节点
@@ -2051,6 +2101,12 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
                             print(f"{WATERMARK} ℹ️ 接入的是纯音频潜空间，本次只解音频。")
                         # 🔴 只有**真的要出这一路的产物**才解码（否则用户选「不保存X」就白省了）
                         if video_lat is not None and 需要视频解码:
+                            if vae is None:
+                                raise ValueError(
+                                    "Josia媒体保存：需要 VAE 才能解码 Latent，但 VAE1 当前没有可用的 VAE。"
+                                    "请在「VAE1」里选一个 VAE（或选「使用Josia模型加载VAE」并确保 Josia模型加载"
+                                    "节点已选 VAE），再执行节点。")
+                            _check_vae_for_latent(vae, video_lat)
                             images = self._decode(vae, video_lat, 解码方式, 分块尺寸, 分块重叠,
                                                   时间分块, 时间重叠, 解码精度)
                             if 图像 is not None:
@@ -2060,6 +2116,7 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
                                 print(f"{WATERMARK} ⚠️ 潜空间里检测到音频路，但没有可用的音频 VAE —— 音频不会被解码。"
                                       f"请在「VAE2」下拉里选一个音频 VAE，或给「Audio_VAE」端口接线。")
                             else:
+                                _check_vae_for_latent(vae2, audio_lat)
                                 音频_latent = self._decode_audio(vae2, audio_lat)
 
                     if 音频_latent is not None:

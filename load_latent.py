@@ -679,7 +679,7 @@ def _register_routes():
                 info["kind"] = "音视频混合潜空间"
                 shapes = [tuple(p.shape) for p in parts]
                 info["shape"] = " ＋ ".join(str(s) for s in shapes)
-                info["parts"] = [len(shapes), sum(1 for s in shapes if len(s) == 5)]  # [总路数, 视频路数]
+                info["parts"] = [len(shapes), sum(1 for s in shapes if len(s) == 5 and int(s[2]) > 1)]  # [总路数, 视频路数]
                 # 视频路（5D）取空间与时间维度
                 vid = next((s for s in shapes if len(s) == 5), None)
                 if vid:
@@ -707,10 +707,15 @@ def _register_routes():
                     info["frames"] = 1
                     info["pixel_h"] = int(sh[-2]) * 8
                     info["pixel_w"] = int(sh[-1]) * 8
-                elif len(sh) == 5:    # [B,C,T,H,W] 视频潜空间
-                    # 🔴 frames＝潜空间时间帧 T（VAE 时间压缩后），非播放帧数；
-                    #    不提供「≈播放帧数」估算（理由见上方 NestedTensor 分支注释）。
-                    info["kind"] = "视频潜空间"
+                elif len(sh) == 5:    # [B,C,T,H,W]
+                    # 🔴 T=1 ≠ 视频：Qwen / Fun 系会产出「单帧视频形态」(B,C,1,H,W)，
+                    #    按张量结构它是 5 维，但只有 1 个时间帧 —— 与「Josia媒体保存」的
+                    #    解码判定同口径（5 维 T=1 ⇒ 图像），否则信息窗会出现
+                    #    「文件类型=图像、数据类型=视频潜空间」的自相矛盾。
+                    if int(sh[2]) > 1:
+                        info["kind"] = "视频潜空间"
+                    else:
+                        info["kind"] = "图像潜空间"
                     info["frames"] = int(sh[2])
                     info["pixel_h"] = int(sh[-2]) * 8
                     info["pixel_w"] = int(sh[-1]) * 8

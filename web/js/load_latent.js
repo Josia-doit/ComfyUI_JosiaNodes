@@ -517,12 +517,23 @@ app.registerExtension({
       // 🔴 高度**完全归信息窗管**：每次 grow 双向校正到 _targetH（可增可减），
       //    信息窗永不出现滚动条；用户拖拽只允许改宽度（onResize 把高度拴回 _targetH）。
       let _growing = false;
+      let _remeasureTimer = null;   // 测量不可信时的重测定时器（同一时刻只排一个）
       // 🔴 batchBox 有上下各 1px 边框，scrollHeight 不含边框 ⇒ 高度恰好差 2px，
       //    信息窗底角被节点边界裁成直角（哥哥截图实测）；再留 2px 取整余量 ⇒ 共补 4px。
       const BATCH_BORDER = 2;
       const H_SLACK = 2;
       function grow() {
         if (_growing) return;
+        // 🔴 重启 / 切工作流后，DOM 面板可能还没挂进文档（或内容还没渲染），
+        //    此时 batchBox.scrollHeight 量到 0 —— 拿 0 去算 _targetH 会把节点压到
+        //    最小高度（哥哥实测：重启后节点折叠，手动刷新才恢复）。测量不可信时
+        //    **保持当前高度不动**，并安排一次重测。
+        if (!batchBox.isConnected || !(batchBox.scrollHeight > 0)) {
+          if (!_remeasureTimer) {
+            _remeasureTimer = setTimeout(() => { _remeasureTimer = null; grow(); }, 250);
+          }
+          return;
+        }
         _growing = true;
         try {
           batchBox.style.maxHeight = "none";
@@ -541,6 +552,14 @@ app.registerExtension({
           node.setDirtyCanvas?.(true, true);
         } finally { _growing = false; }
       }
+
+      // 🔴 内容尺寸变化自动校高：重启后 DOM 面板挂载、任务池清单异步渲染出来，
+      //    都会触发这里 —— 不依赖「执行事件 / 手动刷新」才有机会 grow()，
+      //    根治「重启后节点折叠到只剩两行」。
+      try {
+        const _ro = new ResizeObserver(() => { try { grow(); } catch (e) { /* 忽略 */ } });
+        _ro.observe(batchBox);
+      } catch (e) { /* 老环境无 ResizeObserver：靠 grow 自身的重测定时器兜底 */ }
 
       /* ================== 上方区：当前文件详情（第 1 行三列 + 第 2 行整行）================== */
       // 🔴 版式（哥哥定）：第 1 行 文件名 / 文件类型 / 数据类型；第 2 行 **VAE类型 独占整行**。
@@ -667,6 +686,7 @@ app.registerExtension({
         grow();
       }
       node._jllRenderBatch = renderBatch;
+      node._jllGrow = grow;   // 🔴 onConfigure 等外部时机也要补测高度（重启折叠修复）
 
       // 点列表项 ⇒ 拉详情到上方区
       async function selectFile(name) {
@@ -961,6 +981,11 @@ app.registerExtension({
         if (!hasKey) node._jllLegacy = String(node.id ?? "");
       } catch (e) { /* 忽略 */ }
       if (node._jllRefresh) requestAnimationFrame(() => { node._jllRefresh(); });
+      // 🔴 重启 / 切工作流恢复后，DOM 面板挂载与任务池渲染都晚于 onConfigure，
+      //    多轮补测高度（grow 自带「测量不可信不动尺寸」守卫，早跑也无害）。
+      [0, 150, 500, 1200].forEach((ms) => setTimeout(() => {
+        try { node._jllGrow?.(); } catch (e) { /* 忽略 */ }
+      }, ms));
       return r;
     };
 

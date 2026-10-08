@@ -1133,9 +1133,8 @@ app.registerExtension({
         W[name] = getWidget(node, name);
       }
 
-      // VAE 注册表快照 + 自动切换闸门（Point 3：识别 Josia 模型加载节点）
+      // VAE 注册表快照（Point 3：识别 Josia 模型加载节点）
       let vaeShared = null;            // /josia_media_save/vae_list 返回：Josia 模型加载节点是否载入了 VAE
-      let _jmsJosiaAutoDone = false;   // 「使用Josia模型加载VAE」自动切换只触发一次的闸门（节点消失后复位可再触发）
 
       // 🔴🔴 VAE 联动的判定依据（2026-09-21 修）：**看图里有没有「Josia模型加载」节点**，
       //    而不是「注册表里有没有 VAE」。
@@ -1628,8 +1627,8 @@ app.registerExtension({
         "无损模式 / 质量模式。\n• 无损模式：像素逐位一致，体积最大、最慢。\n" +
         "• 质量模式：按「质量」编码，体积小得多；质量 100 也仍是有损编码（≠ 无损模式）。\n" +
         "• PNG 恒无损，本开关对它无意义。";
-      const numQ = mkNumber(node, W["质量"], { label: "质量", step: 5, width: 42, min: 1, max: 100 });
-      numQ.title = "「质量模式」下的画质（越高越好、文件越大）。「无损模式」下此值被忽略。步进 5。";
+      const numQ = mkNumber(node, W["质量"], { label: "质量", step: 1, width: 42, min: 1, max: 100 });
+      numQ.title = "「质量模式」下的画质（越高越好、文件越大）。「无损模式」下此值被忽略。步进 1，可直接调到 100。";
       const capCompress = mkCapsule(COMPRESS_STEPS,
         () => compressToStep(W["压缩级别"]?.value),
         (v) => { setWidgetValue(node, W["压缩级别"], v); node._jmsRefresh?.(); },
@@ -1899,7 +1898,7 @@ app.registerExtension({
         },
       });
       dropV1.el.title =
-        "解码主 VAE。\n• 「使用Josia模型加载VAE」= 复用「Josia模型加载」节点载入的 VAE，无需连线（检测到该节点时自动选中一次）。\n" +
+        "解码主 VAE。\n• 「使用Josia模型加载VAE」= 复用「Josia模型加载」节点载入的 VAE，无需连线（需手动选择；不选则不使用模型加载节点的 VAE）。\n" +
         "• 也可手动选 models/vae 里的模型。\n• 给「Video_VAE」端口接线后本项自动灰化（接线优先）。";
       // 🔴 同一行等分撑满：flex 基准 220px（够放下「使用Josia模型加载VAE」整串，不再挤成省略号）。
       //    两个下拉基准和 > 行宽时，.jms-row 的 flex-wrap 会把它们分到两行，各自撑满。
@@ -1907,7 +1906,19 @@ app.registerExtension({
       dropV1.el.style.minWidth = "0";
       rowVAE.appendChild(dropV1.el);
 
-      const dropV2 = mkDrop(node, W["VAE2"], { label: "VAE2" });
+      const dropV2 = mkDrop(node, W["VAE2"], {
+        label: "VAE2",
+        // 无 Josia 模型加载节点时，下拉里去掉「使用Josia模型加载VAE」这一项（与 VAE1 一致）
+        items: () => {
+          const all = comboValues(W["VAE2"], node) || [];
+          const josia = josiaVaePresent();
+          if (josia) return all;
+          return all.filter((v) => {
+            const value = (v && typeof v === "object") ? v.value : v;
+            return value !== USE_JOSIA_VAE;
+          });
+        },
+      });
       dropV2.el.title =
         "解码**音频路**潜空间用的 VAE（LTX / MiniMax H3 等双 VAE）。\n" +
         "• 「🎵 请选择模型…」= 不使用音频 VAE。\n• 想同时保存音频时，在这里选模型，或直接给「Audio_VAE」端口接线（接线后本项灰化）。\n" +
@@ -2104,28 +2115,17 @@ app.registerExtension({
       // 节点消失则去掉该选项并把已选中的降级为占位符。
       // 🔴 判定＝「图里有该节点」或「注册表里已有 VAE」（见 josiaVaePresent），与创建先后无关。
       // VAE2 的候选里有没有「使用Josia模型加载VAE」这一项（后端 _vae2_choices 决定）
-      function vae2HasJosiaOption() {
-        try {
-          const vals = comboValues(W["VAE2"], node) || [];
-          return vals.length ? vals.indexOf(USE_JOSIA_VAE) >= 0 : true;
-        } catch (e) { return true; }
-      }
       function syncJosiaVae() {
         const josiaPresent = josiaVaePresent();
         const v1 = String(W["VAE1"]?.value ?? "");
         const v2 = String(W["VAE2"]?.value ?? "");
-        if (josiaPresent) {
-          if (v1 === VAE1_PLACEHOLDER) setWidgetValue(node, W["VAE1"], USE_JOSIA_VAE);
-          // 🔴 VAE2 跟随 VAE1 一起切到共享 VAE（哥哥明确要求）——
-          //    以前只切 VAE1，VAE2 一直停在占位符上，看着像「只有 VAE1 联动」。
-          if (v2 === PLACEHOLDER_VAE2 && vae2HasJosiaOption()) {
-            setWidgetValue(node, W["VAE2"], USE_JOSIA_VAE);
-          }
-          _jmsJosiaAutoDone = true;
-        } else {
+        // 🔴🔴 2026-10-07 修（哥哥反馈）：绝不自动切换。是否使用「Josia模型加载」联动完全由用户手动
+        //    决定 —— 只有用户**自己**在下拉里选了「使用Josia模型加载VAE」时才绑定模型加载节点；选了
+        //    真实 VAE 或停在默认「🎨 请选择模型…」都不要碰模型加载节点，也不要强行用模型加载来加载模型。
+        //    图里有模型加载节点时，下拉里保留该项（可手动选）；模型加载节点被移除时，已选中的联动项回落占位符。
+        if (!josiaPresent) {
           if (v1 === USE_JOSIA_VAE) setWidgetValue(node, W["VAE1"], VAE1_PLACEHOLDER);
           if (v2 === USE_JOSIA_VAE) setWidgetValue(node, W["VAE2"], PLACEHOLDER_VAE2);
-          _jmsJosiaAutoDone = false;
         }
       }
 
@@ -2171,7 +2171,8 @@ app.registerExtension({
           if (W["质量"] && prevQ !== undefined && W["质量"].value === 100) {
             W["质量"].value = prevQ;
           }
-          numQ._input.value = String(W["质量"]?.value ?? numQ._input.value);
+          // 🔴 用户正在手输质量时（焦点在输入框）不覆盖，否则未提交的输入会被刷新刷回旧值（如输入 100 变 90）
+          if (document.activeElement !== numQ._input) numQ._input.value = String(W["质量"]?.value ?? numQ._input.value);
         }
         grayCtl(capLossless, imgNone || alwaysLossless || !LOSSLESS_CAPABLE.test(fmt),
           imgNone ? "已选「不保存图像」—— 不落盘图像，本项无意义。"
@@ -2753,7 +2754,7 @@ app.registerExtension({
         const tail = absFolderOf(cur) ? cur.replace(/^.*[\\/]/, "") : cur.split(/[\\/]/).pop();
         const name = (tail && !/[\\/]/.test(tail)) ? tail : DEFAULT_NAME;
         setWidgetValue(node, W["filename_prefix"], String(p).replace(/[\\/]+$/, "") + "\\" + name);
-        fileWrap._input.value = String(W["filename_prefix"]?.value ?? "");
+        if (document.activeElement !== fileWrap._input) fileWrap._input.value = String(W["filename_prefix"]?.value ?? "");
         refresh();
       }
       // 🔴「📁 选择」优先调用 **Windows 原生「选择文件夹」对话框**

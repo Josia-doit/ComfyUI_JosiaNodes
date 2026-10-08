@@ -253,9 +253,10 @@ function setWidgetValue(node, w, v) {
   try { app.graph?.setDirtyCanvas(true, true); } catch (e) { /* 忽略 */ }
 }
 
-// VAE 自动联动（口径与 Josia媒体保存 完全一致）：
-//   图内有「Josia模型加载」节点 ⇒ 下拉里**加入**「使用Josia模型加载VAE」并自动选中；
+// VAE 联动（口径与 Josia媒体保存 完全一致）：
+//   图内有「Josia模型加载」节点 ⇒ 下拉里**加入**「使用Josia模型加载VAE」（需用户手动选，不自动选中）；
 //   该节点被删除             ⇒ 下拉里**移掉**该项，并把选中它的实例回落到「请选择VAE模型」。
+//   🔴 只有用户自己选了「使用Josia模型加载VAE」才绑定模型加载节点；选真实 VAE / 默认占位符都不碰。
 // 🔴 这里动的是**展示层**（options.values）：后端 INPUT_TYPES 里该项必须常驻，
 //    否则 execution.validate_inputs 会拿提交值与后端候选比对 ⇒ value_not_in_list，节点跑不起来。
 function syncJosiaVae(node) {
@@ -281,10 +282,10 @@ function syncJosiaVae(node) {
   const wired = isPortWired(node, "vae");
   w.disabled = wired;
 
-  // 3) 自动切换 / 回落（只有在没接线时才有意义）
-  if (present) {
-    if (!wired && cur === VAE_PLACEHOLDER) setWidgetValue(node, w, USE_JOSIA_VAE);
-  } else if (cur === USE_JOSIA_VAE) {
+  // 3) 回落：仅当模型加载节点被移除、且当前选中的是联动项时，回落占位符。
+  //    🔴🔴 2026-10-07 修（哥哥反馈）：**绝不自动切换**到联动项——是否使用「Josia模型加载」
+  //        联动完全由用户手动决定；选了真实 VAE 或停在默认占位符都不要碰模型加载节点。
+  if (!present && cur === USE_JOSIA_VAE) {
     setWidgetValue(node, w, VAE_PLACEHOLDER);
   }
 }
