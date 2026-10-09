@@ -325,11 +325,23 @@ const getWidget = (node, name) => node.widgets?.find((w) => w.name === name);
 function setWidgetValue(node, w, v) {
   if (!w) return;
   try {
-    if (typeof w.setValue === "function") w.setValue(v);
-    else w.value = v;
+    if (typeof w.setValue === "function") {
+      // 🔴 这个 ComfyUI 构建版的 NumberWidget / BooleanWidget 的签名是
+      //    setValue(value, { e, node, canvas })：第二参解构出 canvas / node，
+      //    缺失即抛「Cannot destructure property 'e' / 'graph_mouse'」，
+      //    导致「质量」「无损」等数值 / 开关控件设值即回弹（输入 100 变回 90）。
+      //    必须补全 node 与 canvas（canvas 缺失时用空对象兜底，避免 r.graph_mouse 再炸）。
+      w.setValue(v, { e: undefined, node: node, canvas: (typeof app !== "undefined" && app && app.canvas) ? app.canvas : {} });
+    } else {
+      w.value = v;
+    }
   } catch (e) {
-    w.value = v;
+    // 🔴 兜底：极少数旧构件无 setValue → 直接赋值；赋值 setter 本身也不抛错。
+    try { w.value = v; } catch (e2) { /* 忽略 */ }
   }
+  // 🔴 反向同步自定义输入框 / 下拉显示（mkNumber / mkText / mkDrop 注册了 _jmsSyncInput），
+  //    否则外部改值（恢复默认、第三方重建）后界面显示停在旧值、与真实值错位（信息窗也读旧值）。
+  try { w._jmsSyncInput?.(); } catch (e) { /* 忽略 */ }
   try { app.graph?.setDirtyCanvas(true, true); } catch (e) { /* 忽略 */ }
 }
 
@@ -545,6 +557,9 @@ function mkDrop(node, widget, { width, label, items = null, decorate = null, onC
       console.warn(`[Josia媒体保存] 下拉「${label || "?"}」无候选（comboValues 为空），请检查后端选项是否提供。`);
     }
   } catch (e) { /* 忽略 */ }
+  // 🔴 反向同步钩子：外部改 widget.value 时重绘下拉显示（与输入框同理），
+  //    否则「恢复默认」/ 第三方重建后下拉还停在旧值。
+  try { widget._jmsSyncInput = sync; } catch (e) {}
   // 🔴 一并把 listItems 交出去：调用点（分块行定宽）要按「真实候选标签」量宽 ——
   //    候选标签可能被 decorate 改过（加 ⭐ / 加 Emoji），只读 comboValues 会量偏 ⇒ 文本被挤。
   return { el: wrap, sync, btn, items: listItems };
@@ -694,6 +709,9 @@ function mkNumber(node, widget, { width, label, step = 1, wstep, min, max, prec 
   wrap.appendChild(up);
   wrap.appendChild(dn);
   wrap._input = inp;
+  // 🔴 反向同步钩子：外部改 widget.value（如「恢复默认」/ 第三方重建）时回写输入框，
+  //    否则输入框会停在旧值、与信息窗 / widget 真实值不一致。
+  try { widget._jmsSyncInput = () => { try { inp.value = (widget.value ?? ""); } catch (e) {} }; } catch (e) {}
   return wrap;
 }
 
@@ -736,6 +754,8 @@ function mkText(node, widget, { label } = {}) {
   inp.addEventListener("wheel", (e) => e.stopPropagation(), { passive: true });
   wrap.appendChild(inp);
   wrap._input = inp;
+  // 🔴 反向同步钩子：与 mkNumber 同理，外部改 widget.value 时回写文本框。
+  try { widget._jmsSyncInput = () => { try { inp.value = (widget.value ?? ""); } catch (e) {} }; } catch (e) {}
   return wrap;
 }
 
@@ -984,6 +1004,7 @@ function buildVideoGrid(items, opts) {
         singleBox.style.width = "100%";
         singleBox.style.height = height() + "px";
         badge.textContent = (cur + 1) + "/" + n;
+        badge.style.display = n > 1 ? "" : "none";   // 单视频不显示角标
       }
     } catch (e) { /* 忽略 */ }
   }
@@ -1008,6 +1029,7 @@ function buildVideoGrid(items, opts) {
           idx.textContent = (i + 1) + "/" + n;
           cell.appendChild(vids[i]);
           cell.appendChild(idx);
+          idx.style.display = n > 1 ? "" : "none";   // 单格（n<=1）不显示「1/1」角标，保持原生单视频观感
           cell.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); open(i); });
           cell.addEventListener("pointerdown", (e) => e.stopPropagation());
           cells[i] = cell;
@@ -1116,6 +1138,58 @@ app.registerExtension({
       });
     }
 
+    // 🔴 第三方「重建/刷新」节点（ComfyUI-Manager 的 node_info_copy / KJNodes 的 fixNode）
+    //    把源节点 id（数字，origin_id）当成节点对象传给 LGraphNode.connect，而新版前端 connect
+    //    要求节点对象（要调 findInputSlot）→ 抛 `TypeError: t.findInputSlot is not a function`，
+    //    导致旧节点没被移除、画布留下「新节点 + 旧节点（带本节点自定义面板、旧值）」重影，
+    //    信息窗读到旧节点的值（典型表现：CRF 改过之后信息窗仍显示旧值）。
+    //    这里把数字 id 解析回节点对象，让重建正常收尾、旧节点被移除，不再留重影。只拦截数字，
+    //    其余参数原样交回原实现，不影响任何正常调用。
+    if (!window._jmsConnectNumericPatched) {
+      const _LG = window.LiteGraph;
+      const _LN = _LG && _LG.LGraphNode;
+      if (_LN && _LN.prototype && typeof _LN.prototype.connect === "function") {
+        const _origConnect = _LN.prototype.connect;
+        _LN.prototype.connect = function (slot, target_node, target_slot) {
+          let tn = target_node;
+          if (typeof tn === "number") {
+            try {
+              const g = this.graph;
+              const resolved = (g && typeof g.getNodeById === "function")
+                ? g.getNodeById(tn)
+                : (typeof _LG.getNodeById === "function" ? _LG.getNodeById(tn) : null);
+              if (resolved) tn = resolved;
+            } catch (e) { /* 解析失败保持原语义 */ }
+          }
+          return _origConnect.call(this, slot, tn, target_slot);
+        };
+        window._jmsConnectNumericPatched = true;
+      }
+    }
+
+    // 🔴 自带「重建本节点」右键菜单：第三方重建对本节点会留重影（见上方 connect 补丁说明），
+    //    这里提供一个**确定可靠**的右键项——直接把当前节点所有参数恢复默认、保留全部连线与节点本身
+    //    （不重建新节点 ⇒ 不会留重影、不会丢面板、不会读旧值）。等价于面板上「♻️ 恢复默认」按钮，
+    //    但放在右键菜单里，满足「右键重建＝恢复默认＋保留连接」的操作习惯。
+    const origGetExtraMenuOptions = nodeType.prototype.getExtraMenuOptions;
+    nodeType.prototype.getExtraMenuOptions = function (...args) {
+      if (typeof origGetExtraMenuOptions === "function") {
+        try { origGetExtraMenuOptions.apply(this, args); } catch (e) { /* 忽略 */ }
+      }
+      const options = args[args.length - 1];
+      if (Array.isArray(options)) {
+        const node = this;
+        options.push({
+          content: "♻️ 重建本节点（恢复默认·保留连接）",
+          callback: () => {
+            try { node._jmsResetAllDefaults?.(); } catch (e) {
+              console.error("[Josia媒体保存] 右键重建失败：", e);
+            }
+          },
+        });
+      }
+    };
+
     const onNodeCreated = nodeType.prototype.onNodeCreated;
     const onConfigure = nodeType.prototype.onConfigure;
     const origResize = nodeType.prototype.onResize;
@@ -1132,6 +1206,24 @@ app.registerExtension({
         "解码精度", "清理缓存", "清理时机", "写入元数据", "临时预览", "VAE1", "VAE2"]) {
         W[name] = getWidget(node, name);
       }
+      // 🔴 控件默认值快照：ComfyUI 的 number 控件**不**把默认值存进 `widget.options.default`
+      //    （options 里只有 min/max/step…），导致「恢复默认」只能复位下拉、复位不了数字字段
+      //    （CRF / 质量 / 帧率等改过之后「恢复默认」没反应）。这里在 onNodeCreated 此刻
+      //    （widget.value 还是 INPUT_TYPES 默认值——onConfigure 在它之后才套用工作流保存值）
+      //    把每个控件当前值快照为「出厂默认」，供 resetAllDefaults 复位使用。
+      node._jmsDefaults = {};
+      for (const name of Object.keys(W)) {
+        try { node._jmsDefaults[name] = W[name] ? W[name].value : undefined; } catch (e) {}
+      }
+
+      // 🔴 信息窗读取参数值一律走「实时解析当前节点 widget」（而非构建期闭包 W）：
+      //    第三方重建/刷新可能换了 widget 对象、或本节点被重影时，闭包 W 会指向旧节点/旧对象，
+      //    导致信息窗显示陈旧值（如 CRF 改过之后仍显示旧值）。实时解析保证信息窗永远反映当前值。
+      const liveVal = (name) => {
+        const w = (node.widgets || []).find((x) => x && x.name === name);
+        const src = w || W[name];
+        return src ? src.value : undefined;
+      };
 
       // VAE 注册表快照（Point 3：识别 Josia 模型加载节点）
       let vaeShared = null;            // /josia_media_save/vae_list 返回：Josia 模型加载节点是否载入了 VAE
@@ -1434,34 +1526,101 @@ app.registerExtension({
           }
         } catch (e) { /* 忽略 */ }
       }
+      // 🔴 官方预览 widget（video-preview / $$canvas-image-preview / $$comfy_animation_preview）
+      //    由 ComfyUI 官方 NodePreview composable 全权负责创建 / 显示 / 切换 / 销毁——
+      //    我们**完全不碰**它（不 splice、不 hide、不 show）。单图/多图/单视频只设 node.images
+      //    + previewMediaType 即可，显示全交给 composable（与官方 SaveImage / VHS 完全同机制）。
+      //    只有自绘宫格 / 音频分支才用 suppressOfficialPreview() 把 node.images 置空让官方自动卸掉。
       // what: "all"（默认，图像+视频）｜"image"｜"video"
       function clearPreviewCache(what) {
         const image = (!what || what === "all" || what === "image");
         const video = (!what || what === "all" || what === "video");
-        if (image) {
-          removePreviewWidget("$$canvas-image-preview");
-          removePreviewWidget("$$comfy_animation_preview");
-        }
-        if (video) removePreviewWidget("video-preview");
-        try { if (image) { node.imgs = []; node.images = undefined; } } catch (e) { /* 忽略 */ }
-        try { if (video) { node.videos = []; node.videoContainer = undefined; } } catch (e) { /* 忽略 */ }
+        // 🔴 只清官方数据源 + 卸掉「自绘」widget；**不**手动 hide 官方预览 widget
+        //    （官方 composable 会随 node.images 变化自动卸掉，手动 hide 只会留下错误隐藏态）。
+        if (image) { try { node.imgs = []; node.images = undefined; } catch (e) { /* 忽略 */ } }
+        if (video) { try { node.videos = []; node.videoContainer = undefined; } catch (e) { /* 忽略 */ } }
+        removeSelfDrawn();   // 删自绘宫格 / 音频 widget
+        node.setDirtyCanvas?.(true, true);
       }
 
       // ---------- 多视频宫格预览 ----------
       // 🔴 官方播放器（video-preview）只显示批量里的**第一个**视频 ⇒ 多个视频时换成自绘宫格。
       //    单视频不动（官方那套更原生）；只有本次落盘 ≥2 个视频文件才接管。
       const GRID_WIDGET = "josia-video-grid";
-      function killOfficialPlayer() {
-        try { removePreviewWidget("video-preview"); node.videoContainer = undefined; } catch (e) { /* 忽略 */ }
-      }
+      // 🔴 多视频宫格只在「自绘宫格在位」时存在；官方 video-preview 由 suppressOfficialPreview
+      //    通过清空 node.images 自动卸掉，无需我们手动操作官方 widget。
       function removeVideoGrid() {
-        try { stopGridGuard(); } catch (e) { /* 忽略 */ }
         try {
           const g = node._jmsVideoGrid;
           if (g && g.api && g.api.destroy) g.api.destroy();
         } catch (e) { /* 忽略 */ }
         node._jmsVideoGrid = null;
         try { removePreviewWidget(GRID_WIDGET); } catch (e) { /* 忽略 */ }
+      }
+      // 🔴 自绘音频预览 widget（原生 <audio controls>，浏览器原生控件，不套自定义皮肤）。
+      const AUDIO_WIDGET = "josia-audio-preview";
+      function showAudioPreview(item) {
+        try { removePreviewWidget(AUDIO_WIDGET); } catch (e) { /* 忽略 */ }
+        try {
+          const wrap = document.createElement("div");
+          wrap.className = "jms-audio-box";
+          wrap.style.pointerEvents = "none";
+          wrap.style.boxSizing = "border-box";
+          wrap.style.width = "100%";
+          const au = document.createElement("audio");
+          au.src = item.url;
+          au.controls = true;
+          au.style.width = "100%";
+          au.style.display = "block";
+          au.style.pointerEvents = "auto";
+          wrap.appendChild(au);
+          const w = node.addDOMWidget(AUDIO_WIDGET, "audio", wrap, {
+            canvasOnly: true, hideOnZoom: false,
+          });
+          w.serialize = false;
+          // 🔴 高度固定 42px、宽度跟随节点 ⇒ 不撑节点、不留空白，与图像/视频预览同口径。
+          w.computeLayoutSize = () => ({ minHeight: 42, maxHeight: 42, minWidth: 40 });
+          node.setDirtyCanvas?.(true, true);
+        } catch (e) { /* 忽略 */ }
+      }
+      // 🔴 每次生成先卸掉「我们自己的」预览 widget（自绘宫格 + 自绘音频）。
+      //    官方三通道（video-preview / $$canvas-image-preview / $$comfy_animation_preview）
+      //    不在这里动 —— 单视频 / 单图 / 多图 / 音频要交还官方或原生控件，只有「自绘宫格接管」
+      //    的分支才在下方用 suppressOfficialPreview() 把 node.images 置空、让官方自动卸掉它的预览 widget。
+      //    关键：单视频 / 单图分支**不能**把 node.images 置 undefined，否则官方 useNodeVideo /
+      //    useNodeImage 拿不到数据 ⇒ 预览整块消失（哥哥报的「切回单视频不显示」根因之一）。
+      //    哥哥要求：每次生成都保持全新待触发状态，节点高度随内容自适应，杜绝状态纠缠。
+      function removeSelfDrawn() {
+        removeVideoGrid();                        // 停僵尸守卫 + 删自绘宫格 widget
+        removePreviewWidget(AUDIO_WIDGET);         // 删自绘音频 widget
+      }
+      // 🔴 抑制官方预览（自绘宫格 / 音频分支用）。
+      //    取证（前端 1.52.7 源码）：官方 tick（unsafeUpdatePreviews）每次新输出都会从
+      //    nodeOutputStore **按 URL 无条件重建**预览——它读 store 不读 node.images，只清
+      //    node.images 拦不住；且图像 ↔ 视频 ↔ 宫格跨轨时官方**从不互删**对方通道的 widget，
+      //    于是旧图挂在播放器上/下、越叠越多（哥哥实测），只有切工作流重建节点才恢复。
+      //    修法两手：
+      //    ① node.isLoading —— 官方 useNodePreview.showPreview 的唯一读写点（全前端仅此一处），
+      //       置 true 后官方装载彻底休眠（宫格 / 音频接管期间）；恢复装载时置回 false。
+      //    ② 三条官方通道 widget 一并按官方同款移除法（onRemove + splice，官方
+      //       removeCanvasImagePreview / removeAnimatedPreview 原样）清干净，
+      //       onRemove 会触发官方 AbortController 释放事件监听；下轮交还官方时按
+      //       hasWidget 守卫可靠重建。此前「宫格→单视频不显示」的真因是只删 widget
+      //       没清 node.videoContainer ⇒ useNodeVideo 把 <video> 塞进无人引用的旧 div。
+      const OFFICIAL_VIDEO_WIDGET = "video-preview";
+      const OFFICIAL_ANIM_WIDGET = "$$comfy_animation_preview";
+      const OFFICIAL_CANVAS_IMG_WIDGET = "$$canvas-image-preview";
+      function suppressOfficialPreview() {
+        try { node.imgs = []; node.images = undefined; node.videos = []; node.videoContainer = undefined; } catch (e) { /* 忽略 */ }
+        try { node.isLoading = true; node.previewMediaType = "image"; } catch (e) { /* 忽略 */ }
+        removePreviewWidget(OFFICIAL_VIDEO_WIDGET);
+        removePreviewWidget(OFFICIAL_ANIM_WIDGET);
+        removePreviewWidget(OFFICIAL_CANVAS_IMG_WIDGET);
+      }
+      // 恢复官方装载：解闸 + 卸掉「另外两条通道」的残留 widget（本通道的交给官方自己复用/重建）
+      function reviveOfficialPreview(removeNames) {
+        try { node.isLoading = false; } catch (e) { /* 忽略 */ }
+        for (const _n of removeNames) removePreviewWidget(_n);
       }
       // 预览区「可用高度」**直接量**：宫格 widget 的 y 偏移官方布局每次都会回写，
       // avail ＝ bodyHeight − w.y − 底部留白。不再用「总高 − 宫格高」反推固定部分 ——
@@ -1482,54 +1641,10 @@ app.registerExtension({
           g.api.setAvail(avail);
         } catch (e) { /* 忽略 */ }
       }
-      // 🔴 官方预览 widget 的「僵尸复活」守卫：useNodeVideo / 动图预览都是**异步**加载完才把
-      //    widget 追加进 node.widgets（大文件可 > 900ms），旧的固定四拍清不干净 ⇒ 官方播放器
-      //    挂在宫格下方占一大块高度（2026-09-29 实测：MP4 宫格下方超长空白）。宫格在位期间
-      //    每 400ms 巡检一次，见一个删一个；20s 后自动收队（下次执行重装宫格时会重启）。
-      let _gridGuard = 0;
-      function removeOfficialPreviewWidgets() {
-        let removed = false;
-        for (const nm of ["video-preview", "$$comfy_animation_preview", "$$canvas-image-preview"]) {
-          try {
-            const idx = (node.widgets || []).findIndex((x) => x && x.name === nm);
-            if (idx > -1) {
-              const w0 = node.widgets[idx];
-              w0.onRemove?.();
-              node.widgets.splice(idx, 1);
-              removed = true;
-            }
-          } catch (e) { /* 忽略 */ }
-        }
-        return removed;
-      }
-      function startGridGuard() {
-        stopGridGuard();
-        const t0 = Date.now();
-        removeOfficialPreviewWidgets();
-        _gridGuard = setInterval(() => {
-          try {
-            if (!node._jmsVideoGrid) return stopGridGuard();
-            let dirty = removeOfficialPreviewWidgets();
-            // node.imgs 也一并按住：官方动画预览的数据源，留着会被 fitHeight 当成「有图别收高」
-            try { if (node.imgs && node.imgs.length) { node.imgs = []; node.images = undefined; dirty = true; } } catch (e) { /* 忽略 */ }
-            if (dirty) {
-              node.setDirtyCanvas?.(true, true);
-              // 🔴 僵尸删掉后没人收高 ⇒ 节点留在被官方播放器撑爆的高度、下方一大片空白
-              //    （2026-09-29 实测：批量解码后节点尺寸暴涨）。删完立即重跑贴合 + 重量预览可用高。
-              scheduleHeal();
-              requestAnimationFrame(syncGridAvail);
-            }
-            if (Date.now() - t0 > 20000) stopGridGuard();
-          } catch (e) { /* 忽略 */ }
-        }, 400);
-      }
-      function stopGridGuard() {
-        if (_gridGuard) { clearInterval(_gridGuard); _gridGuard = 0; }
-      }
+      // （自绘宫格不再需要僵尸守卫：官方预览已由 suppressOfficialPreview 通过清空 node.images 自动卸掉）
       function installVideoGrid(items) {
         try {
           removeVideoGrid();
-          killOfficialPlayer();
           const g = buildVideoGrid(items, {
             width: Math.max(160, (Number(node.size?.[0]) || 240) - 20),   // −20＝DOM 左右边距，与 measure 口径一致
             onChange: () => {
@@ -1561,7 +1676,6 @@ app.registerExtension({
             };
           };
           node._jmsVideoGrid = g;
-          startGridGuard();
           requestAnimationFrame(syncGridAvail);
           node.setDirtyCanvas?.(true, true);
         } catch (e) { /* 宫格失败不影响主流程 */ }
@@ -1733,7 +1847,7 @@ app.registerExtension({
               // 11px 字号下数字的近似字宽；+14px 给输入框自身的内边距与光标
               // 🔴 帧率两颗（输入/输出）按哥哥要求再缩 ~10%（0.88 系数），给视频格式让更多行宽
               const FPS_SHRINK = new Set([numFps, numOutFps]);
-              const want = Math.ceil((VID_NUM_CH.get(e2) || 4) * 7.4 * (FPS_SHRINK.has(e2) ? 0.88 : 1)) + 14;
+              const want = Math.max(42, Math.ceil((VID_NUM_CH.get(e2) || 4) * 7.4 * (FPS_SHRINK.has(e2) ? 0.748 : 1)) + 14);
               inp.style.flex = "0 0 auto";
               inp.style.minWidth = "0";
               inp.style.width = want + "px";
@@ -1781,6 +1895,31 @@ app.registerExtension({
       dropAQ.el.title = "有损音频码率；FLAC/WAV 为无损，本项灰化显示「无损」。";
       audBox.appendChild(dropAud.el);
       audBox.appendChild(dropAQ.el);
+      // 🔴 音质胶囊：以自身最长候选（「无损」）为基准 +30% 写死（哥哥要求加宽 30%），
+      //    不随当前选中值伸缩 ⇒ 切到任意音质选项胶囊宽度恒定、整行不跳。
+      let aqWidthFixed = false;
+      function sizeAqDrop() {
+        if (aqWidthFixed) return;
+        try {
+          const btn = dropAQ.el.querySelector(".jms-drop-btn");
+          if (!btn) return;
+          let labels = [];
+          try { labels = ((dropAQ.items ? dropAQ.items() : []) || []).map((it) => String(it?.label ?? it?.value ?? "")); } catch (e) { labels = []; }
+          const longest = labels.reduce((a, b) => (b.length > a.length ? b : a), "") || "无损";
+          const old = btn.textContent;
+          btn.textContent = longest;
+          dropAQ.el.style.flex = "0 0 auto";
+          dropAQ.el.style.width = "auto";
+          const w = dropAQ.el.offsetWidth;
+          btn.textContent = old;
+          if (!(w > 0)) return;
+          dropAQ.el.style.width = Math.ceil(w * 1.3) + "px";
+          dropAQ.el.style.minWidth = "0";
+          dropAQ.el.style.overflow = "hidden";
+          aqWidthFixed = true;
+        } catch (e) { /* 量宽失败保持自适应，不致命 */ }
+      }
+      node._jmsSizeAqRow = sizeAqDrop;
 
       row2.appendChild(imgBox);
       row2.appendChild(vidBox);
@@ -1982,15 +2121,21 @@ app.registerExtension({
 
       // 🔴 「恢复默认」（哥哥要求）：一键把**所有**参数拉回「刚载入节点时的默认值」，并释放
       //    预览缓存 —— 参数被调乱时不用逐个回忆默认值；预览窗错乱时等于做一次软复位。
-      //    默认值取自 widget.options.default（＝后端 INPUT_TYPES 里那一份，与新建节点完全一致），
-      //    不在这里硬编码常量 ⇒ 后端改默认值时此处自动跟随。
+      //    默认值取自「后端 INPUT_TYPES 默认值」：number 控件不把默认值存进 options.default，
+      //    故优先用 onNodeCreated 快照的 node._jmsDefaults（＝ INPUT_TYPES 出厂默认，与新建节点一致）；
+      //    下拉（COMBO）控件 options.default 存在时仍以它为准。不在这里硬编码常量 ⇒ 后端改默认值时自动跟随。
       function resetAllDefaults() {
         try {
+          const defs = node._jmsDefaults || {};
           for (const name of Object.keys(W)) {
             const w = W[name];
-            if (!w || !w.options) continue;
-            if (!Object.prototype.hasOwnProperty.call(w.options, "default")) continue;
-            setWidgetValue(node, w, w.options.default);
+            if (!w) continue;
+            // 默认值的来源：下拉控件优先 options.default；number 等没有该键时回退到出厂快照。
+            const dv = (w.options && Object.prototype.hasOwnProperty.call(w.options, "default"))
+              ? w.options.default
+              : defs[name];
+            if (dv === undefined) continue;
+            setWidgetValue(node, w, dv);
             // 顺带触发原生 widget 自己的回调：有些控件靠它刷新内部状态
             try { w.callback?.(w.value); } catch (e2) { /* 忽略 */ }
           }
@@ -2022,6 +2167,8 @@ app.registerExtension({
         applyLayout();
         try { node.setDirtyCanvas?.(true, true); } catch (e) { /* 忽略 */ }
       }
+      // 🔴 暴露给右键「重建本节点」菜单调用（见 beforeRegisterNodeDef 里的 getExtraMenuOptions 补丁）。
+      node._jmsResetAllDefaults = resetAllDefaults;
       // 🔴「恢复默认」：点击不立即执行，而是**原地变形**——外框深灰大胶囊内露出
       //    「确认(红)/取消(蓝)」两颗小胶囊 + 中间竖线（风格仿「清理缓存」长条）。
       //    每颗小胶囊内部有铺满的 thumb 色块（仿清理缓存选中项的色块），文字垂直居中。
@@ -2153,6 +2300,8 @@ app.registerExtension({
         if (tab === "video") { try { node._jmsSizeVidRow?.(); } catch (e) { /* 忽略 */ } }
         // 音频下拉刚显示出来 ⇒ 立刻量一次固定宽度（隐藏时 offsetWidth 为 0，量不到）
         if (tab === "audio") { try { node._jmsSizeAudRow?.(); } catch (e) { /* 忽略 */ } }
+        // 🔴 音质胶囊固定宽度（哥哥要求加宽 30%）：与音频格式胶囊同理，刚显示出来才量得到真实宽度
+        if (tab === "audio") { try { node._jmsSizeAqRow?.(); } catch (e) { /* 忽略 */ } }
 
         // 图像细项：🔴 **一律常驻显示**，不支持的项只灰化禁用（隐藏会让本行胶囊宽度突变，
         //    切格式时整行突然跳一下 —— 哥哥明确要求尺寸恒定、不要视觉割裂）。
@@ -2168,8 +2317,12 @@ app.registerExtension({
           numQ._input.value = "100";
         } else {
           // 普通（有损）格式：若之前被绝对无损格式改成 100，这里还原到记忆值。
+          // 🔴 还原后立刻清空 prevQ（否则此后每次把质量调到 100 都会被本判定反复拉回旧值，
+          //    表现为「质量调不到 100 / 滚轮推不到 100 / 输入 100 变回 90」—— 默认格式 PNG 是
+          //    绝对无损，节点一创建 prevQ 就被记成默认质量，切到 WebP 等普通格式必中此坑）。
           if (W["质量"] && prevQ !== undefined && W["质量"].value === 100) {
             W["质量"].value = prevQ;
+            prevQ = undefined;
           }
           // 🔴 用户正在手输质量时（焦点在输入框）不覆盖，否则未提交的输入会被刷新刷回旧值（如输入 100 变 90）
           if (document.activeElement !== numQ._input) numQ._input.value = String(W["质量"]?.value ?? numQ._input.value);
@@ -2289,6 +2442,54 @@ app.registerExtension({
         try { killImgDrag(); } catch (err) { /* 忽略 */ }
       }
       node._jmsRefresh = refresh;
+      // 🔴 还原上次执行结果（切换工作流 / 刷新网页 / 复制节点后由 onConfigure 调用）：
+      //    把信息窗的落盘文件名 + 状态行 + 预览图都恢复出来（这些数据之前是内存变量，
+      //    节点一重建就归零 ⇒ 信息窗变「待机中」、预览丢失）。
+      node._jmsRestoreLastRun = function () {
+        const raw = node.properties && node.properties._jmsLastRun;
+        if (!raw) return;
+        try {
+          const d = JSON.parse(raw);
+          if (d && d.info) lastRun = d.info;
+          if (typeof d.saved === "string") lastSaved = d.saved;
+          if (typeof d.status === "string") setStatus(d.status, !!d.statusErr);
+          updateInfo();
+          const pv = d.preview;
+          if (pv && Array.isArray(pv.items) && pv.items.length) {
+            try { removeSelfDrawn(); } catch (e) { /* 忽略 */ }
+            if (pv.kind === "grid") {
+              // 宫格接管：闸掉官方装载 + 清官方三通道残留（store 里旧输出否则会叠官方播放器）
+              suppressOfficialPreview();
+              installVideoGrid(pv.items);
+            } else if (pv.kind === "audio") {
+              suppressOfficialPreview();
+              showAudioPreview(pv.items[0]);
+            } else if (pv.kind === "video") {
+              // 官方单视频：解闸 + 清图像/动画通道残留
+              reviveOfficialPreview([OFFICIAL_CANVAS_IMG_WIDGET, OFFICIAL_ANIM_WIDGET]);
+              try { node.imgs = []; } catch (e) { /* 忽略 */ }
+              try {
+                node.previewMediaType = "video";
+                node.images = pv.items.slice();
+                node.setDirtyCanvas?.(true, true);
+              } catch (e) { /* 忽略 */ }
+            } else {
+              // 官方图像：解闸 + 清视频/动画通道残留
+              reviveOfficialPreview([OFFICIAL_VIDEO_WIDGET, OFFICIAL_ANIM_WIDGET]);
+              try {
+                node.previewMediaType = "image";
+                node.videoContainer = undefined;
+                node.images = pv.items.slice();
+                node.setDirtyCanvas?.(true, true);
+              } catch (e) { /* 忽略 */ }
+            }
+          }
+        } catch (e) { /* 损坏的持久化数据忽略，不影响节点使用 */ }
+      };
+      // 🔴 执行结束后把本次结果写入 node.properties（跨重载 / 工作流切换存活）。
+      node._jmsPersistLastRun = function (payload) {
+        try { node.properties._jmsLastRun = JSON.stringify(payload || {}); } catch (e) { /* 序列化失败忽略 */ }
+      };
       // 供 onConfigure 复用：把「分类」恢复成工作流里保存的那一个，
       // 并保证「非视频分类 ⇒ 视频格式=关」（旧工作流里遗留的 MP4 在这里被清掉）。
       node._jmsSyncTab = (v) => {
@@ -2397,15 +2598,15 @@ app.registerExtension({
             let qualityBit;
             if (ALWAYS_LOSSLESS.has(fmtBase)) {
               qualityBit = "无损";
-            } else if (LOSSLESS_CAPABLE.test(fmtBase) && !!W["无损"]?.value) {
+            } else if (LOSSLESS_CAPABLE.test(fmtBase) && !!liveVal("无损")) {
               qualityBit = "无损模式";
             } else {
-              qualityBit = "质量 " + String(W["质量"]?.value ?? "");
+              qualityBit = "质量 " + String(liveVal("质量") ?? "");
             }
             const bits = [qualityBit];
             if (PNGISH.test(f)) {
-              const st = COMPRESS_STEPS.find((s) => Number(s.value) === compressToStep(W["压缩级别"]?.value));
-              bits.push("压缩级别 " + (st ? st.label : String(W["压缩级别"]?.value ?? "")));
+              const st = COMPRESS_STEPS.find((s) => Number(s.value) === compressToStep(liveVal("压缩级别")));
+              bits.push("压缩级别 " + (st ? st.label : String(liveVal("压缩级别") ?? "")));
             }
             return RS(" ｜ ", bits);
           }
@@ -2414,18 +2615,18 @@ app.registerExtension({
             //    输出帧率 = 0（默认）⇒ 显示与「输入帧率」相同的值（＝跟随，不转换）；
             //    输出帧率 > 0 ⇒ 显示真实值并**整段标醒目黄** —— 误操作 / 忘了改回默认时立刻可见。
             //    名称与下方胶囊严格一致：输入帧率 / 输出帧率。
-            const inFpsRaw = W["帧率"]?.value;
+            const inFpsRaw = liveVal("帧率");
             const inFps = String(inFpsRaw ?? "");
-            const outFpsNum = Number(W["输出帧率"]?.value);
+            const outFpsNum = Number(liveVal("输出帧率"));
             const outChanged = isFinite(outFpsNum) && outFpsNum > 0;
             const fpsSegs = [RX("输入帧率 " + inFps), RX(" · ")];
             if (outChanged) fpsSegs.push(RHW("输出帧率 " + outFpsNum));
             else fpsSegs.push("输出帧率 " + (inFps !== "" ? inFps : "—"));
-            const groups = ["编码 " + String(W["视频编码"]?.value ?? ""), fpsSegs];
-            if (AV_CONTAINERS.includes(f)) groups.push("CRF " + String(W["视频质量"]?.value ?? ""));
+            const groups = ["编码 " + String(liveVal("视频编码") ?? ""), fpsSegs];
+            if (AV_CONTAINERS.includes(f)) groups.push("CRF " + String(liveVal("视频质量") ?? ""));
             return RS(" ｜ ", groups);
           }
-          return RS(" ｜ ", [AUDIO_LOSSLESS.has(f) ? "无损音质" : "音质 " + String(W["音频质量"]?.value ?? "")]);
+          return RS(" ｜ ", [AUDIO_LOSSLESS.has(f) ? "无损音质" : "音质 " + String(liveVal("音频质量") ?? "")]);
         } catch (e) { return ""; }
       }
 
@@ -2873,30 +3074,27 @@ app.registerExtension({
           //    onRemove + splice 写法，保证事件监听随 AbortController 一起释放）。
           const _outNames = (message?.images || []).map((d) => String(d?.filename || ""));
           const _isVideoOut = _outNames.some((n) => /\.(mp4|mkv|webm)$/i.test(n));
-          if (_isVideoOut) {
-            // 视频（MP4/MKV/WebM）：清掉上一轮的静态图/动图预览，播放器由官方复用。
-            clearPreviewCache("image");
-          } else if (_outNames.length) {
-            // 静图 / 动图（GIF/APNG/动图WebP）：移除上一轮的视频播放器
-            // （顺带丢掉那个被冻结的高度下限 —— 下次视频会自动按当前宽度重建）。
-            clearPreviewCache("video");
-          }
-          // 🔴🔴 关键修正（治「从视频切回图像后新图没有预览」）：
-          //    官方 useNodeImage / useNodeVideo **只在构造时**写一次 node.previewMediaType，
-          //    此后没有任何地方重置 ⇒ 视频跑过一次后它**永远是 'video'**；而官方分轨判定是
-          //      `isVideo = isVideoOutput(output) || isVideoNode(this)`，其中
-          //      `isVideoNode = previewMediaType==='video' || !!videoContainer`。
-          //    于是切回图像模式时它仍被当成视频节点 ⇒ 拿 PNG 去 <video> 加载必然 onerror
-          //    ⇒ 图像预览永远不出现，只剩信息窗日志。这里按本次产物显式写回正确的通道类型。
-          if (_outNames.length) {
+          // 🔴🔴 每次生成都从「干净预览状态」出发（哥哥要求：单图＝原生图像保存样式、
+          //    多图＝原生多图宫格、单视频＝原生视频保存样式、多视频＝自绘宫格、音频＝原生音频播放器；
+          //    无论上轮是什么，本轮回退到初始待触发状态、按真实产物重建，杜绝状态纠缠）。
+          //    按本次产物显式写回官方分轨开关 previewMediaType（官方只在构造时写一次、
+          //    之后永不重置 ⇒ 视频跑过一次后永远是 'video'，切回图像会拿 PNG 去 <video> 加载
+          //    而失败，故这里必须按真实产物纠正）。
+          if (_outNames.length || (message?.audio || []).length) {
             try { node.previewMediaType = _isVideoOut ? "video" : "image"; } catch (e) { /* 忽略 */ }
           }
 
-          // 🔴 批量预览宫格：官方播放器只取第一个条目 ⇒ 批量时换成自绘宫格。
-          //    ① 视频（mp4/mkv/webm）：≥2 个才接管（单视频官方播放器更原生）；
-          //    ② 动图WebP：官方动画预览只有一个、且小到看不清 ⇒ **≥1 个就接管**，
-          //       用 <img> 渲染 + 大尺寸档（哥哥 2026-09-29 实测反馈）。
-          //       判定用「视频容器」当前值 —— 静态图 WebP 的输出同为 .webp 扩展名，不能只看扩展名。
+          // 🔴 预览装配（按真实产物类型分轨）：
+          //    · 动图WebP ≥1 个 ⇒ 自绘宫格（官方 video-preview 放不了 webp，原生动画预览又太小）。
+          //    · 视频 ≥2 个 ⇒ 自绘宫格（官方 video-preview 只取第一个，看不到其余）。
+          //    · 视频 ==1 个 ⇒ 交回官方原生 video-preview（fitDimensionsToNodeWidth 按真实比例算容器
+          //      ⇒ 无黑边、无叉号、无点击激活，等同保存视频节点的原生观感，高度随内容自适应）。
+          //    · 音频 ≥1 个 ⇒ 原生 <audio controls>（浏览器原生控件，不套自定义皮肤）。
+          //    · 其余（静图 / 无产物）⇒ 交回官方原生图像预览（原生多图宫格 / 单图样式）。
+          //    各分支自行决定：单视频 / 单图 / 多图 / 音频 ⇒ 卸掉自绘 widget 后交还官方或原生控件
+          //    （node.images 指回本次真实条目，靠官方 isNewOutput 可靠重建，绝不清空）；
+          //    只有「自绘宫格接管」的多视频 / 动图WebP 才清空官方图像数据并杀掉官方播放器。
+          //    彻底解决「先宫格后切回单视频不显示」及「视频→图像新图不出现」。低帧率丢帧不强行改帧率（哥哥既定）。
           const _mkItems = (arr, kind) => (arr || []).map((d) => ({
             kind,
             url: api.apiURL("/view?" + new URLSearchParams({
@@ -2908,28 +3106,69 @@ app.registerExtension({
           }));
           const _vidItems = _mkItems((message?.images || [])
             .filter((d) => /\.(mp4|mkv|webm)$/i.test(String(d?.filename || ""))), "video");
+          const _audItems = _mkItems((message?.audio || [])
+            .filter((d) => /\.(mp3|wav|flac|ogg|m4a|aac)$/i.test(String(d?.filename || ""))), "audio");
           const _animWebp = String(W["视频容器"]?.value || "") === "动图WebP";
           const _animItems = _animWebp
             ? _mkItems((message?.images || [])
               .filter((d) => /\.webp$/i.test(String(d?.filename || ""))), "img")
             : [];
+
+          // 🔴 先卸掉上一轮可能残留的「自绘」预览（宫格 / 音频）；官方通道稍后按产物决定。
+          removeSelfDrawn();
+
+          // 🔴 本次预览来源（供执行结束后序列化进 node.properties，使切换工作流 / 刷新后预览能恢复）。
+          let previewPayload = null;
+
           if (_animItems.length >= 1) {
-            clearPreviewCache("image");   // node.imgs 会喂给官方动画预览 ⇒ 重复且小，一并清掉
+            // 动图WebP：官方 video-preview 放不了 webp，原生动画预览又太小 ⇒ 自绘宫格接管。
+            // 把官方数据源清空（composable 自动卸掉它的预览 widget），不手动删官方 widget。
+            suppressOfficialPreview();
             installVideoGrid(_animItems);
+            previewPayload = { kind: "grid", items: _animItems };
           } else if (_vidItems.length >= 2) {
+            // 多视频：官方 video-preview 只取第一个 ⇒ 自绘宫格接管（同上抑制官方）。
+            suppressOfficialPreview();
             installVideoGrid(_vidItems);
+            previewPayload = { kind: "grid", items: _vidItems };
+          } else if (_vidItems.length === 1) {
+            // 🔴 单视频：交回官方原生 video-preview。解闸官方装载 + 清掉图像/动画两条
+            //    通道的残留 widget（官方跨轨从不互删）；node.imgs 置空挡住官方 tick 尾部
+            //    的 showCanvasImagePreview（否则旧图会叠在播放器上）。
+            reviveOfficialPreview([OFFICIAL_CANVAS_IMG_WIDGET, OFFICIAL_ANIM_WIDGET]);
+            try { node.imgs = []; } catch (e) { /* 忽略 */ }
+            //    用新数组引用强制 isNewOutput 重建 ⇒ 宫格→单视频切换也能可靠恢复，无黑边/无叉/无点击激活。
+            try { node.images = (message?.images || []).slice(); node.previewMediaType = "video"; } catch (e) { /* 忽略 */ }
+            previewPayload = { kind: "video", items: (message?.images || []).slice() };
+            node.setDirtyCanvas?.(true, true);
+          } else if (_audItems.length >= 1) {
+            // 音频：原生 <audio controls>（浏览器原生控件）；抑制官方预览避免抢占。
+            suppressOfficialPreview();
+            showAudioPreview(_audItems[0]);
+            previewPayload = { kind: "audio", items: _audItems };
           } else {
-            removeVideoGrid();
+            // 🔴 静图 / 无产物：交回官方原生图像预览（原生多图宫格 / 单图样式）。
+            //    解闸官方装载 + 清掉视频/动画两条通道的残留 widget（官方跨轨从不互删——
+            //    哥哥实测「图→视频→图，两预览叠加」），videoContainer 一并清掉避免
+            //    isVideoNode 误判；本通道 widget 交给官方按 hasWidget 守卫复用/重建。
+            reviveOfficialPreview([OFFICIAL_VIDEO_WIDGET, OFFICIAL_ANIM_WIDGET]);
+            try { node.previewMediaType = "image"; node.videoContainer = undefined; } catch (e) { /* 忽略 */ }
+            try { if (_outNames.length) { node.images = (message?.images || []).slice(); previewPayload = { kind: "image", items: (message?.images || []).slice() }; } } catch (e) { /* 忽略 */ }
+            node.setDirtyCanvas?.(true, true);
           }
 
           // 🔴 保存结果属于「当前操作日志」⇒ 只写状态行，绝不覆盖上面三行的显示信息。
           // 视频/动图经过「输出帧率」转换后，把实际落盘的播放帧率也带回状态行，方便核对。
           const _afps = message?.josia_info?.actual_fps;
           const fpsSuffix = (_afps !== undefined && _afps !== null) ? `｜输出帧率 ${_afps} fps` : "";
+          // 🔴 先算好「状态行文本 + 是否错误」再统一 setStatus，并缓存下来供持久化还原用。
+          let _statusText = "✅ 运行完成（本次没有产物落盘）。";
+          let _statusErr = false;
           if (message?.josia_info?.error) {
             // 后端软失败（save_media 已被 try 包裹）：信息窗已用红字显示完整异常，
             // 状态行只给一句提示，不要再用 ✅ 误导。
-            setStatus("❌ 执行出错：详情见信息窗（可整窗复制反馈）", true);
+            _statusText = "❌ 执行出错：详情见信息窗（可整窗复制反馈）";
+            _statusErr = true;
           } else if (allNames.length) {
             lastSaved = allNames.length === 1 ? allNames[0]
               : allNames.length === 2 ? (allNames[0] + "、" + allNames[1])
@@ -2937,16 +3176,27 @@ app.registerExtension({
             // 🔴 批量循环：有失败文件时在状态行追加提示（详情在日志里）
             const _bfail = message?.josia_info?.batch_failed;
             const _bsum = _bfail ? `｜⚠️ 失败 ${_bfail} 个已跳过` : "";
-            setStatus(`✅ 已保存 ${allNames.length} 个媒体文件（${parts}）：${lastSaved}${fpsSuffix}${_bsum}`);
+            _statusText = `✅ 已保存 ${allNames.length} 个媒体文件（${parts}）：${lastSaved}${fpsSuffix}${_bsum}`;
           } else if (parts) {
             lastSaved = parts;
-            setStatus(`✅ 已保存：${lastSaved}${fpsSuffix}`);
+            _statusText = `✅ 已保存：${lastSaved}${fpsSuffix}`;
           } else if (message?.josia_info?.skip_msg) {
             // 🔴 批量模式池跑空：后端给了明确的「已全部完成/未载入」提示，别再笼统说「没有产物落盘」。
-            setStatus(String(message.josia_info.skip_msg));
-          } else {
-            setStatus("✅ 运行完成（本次没有产物落盘）。");
+            _statusText = String(message.josia_info.skip_msg);
           }
+          setStatus(_statusText, _statusErr);
+          // 🔴 把本次执行结果（落盘信息 + 状态 + 预览来源）序列化进 node.properties，
+          //    使「切换工作流 / 刷新网页 / 复制节点」后信息窗文件名与预览图都能恢复
+          //    （此前是内存变量，节点一重建就归零 ⇒ 信息窗变「待机中」、预览丢失）。
+          try {
+            node._jmsPersistLastRun({
+              info: lastRun,
+              saved: lastSaved,
+              status: _statusText,
+              statusErr: _statusErr,
+              preview: previewPayload,
+            });
+          } catch (e) { /* 序列化失败不影响本次运行 */ }
           refresh();
           loadVaeState();
           // 🔴 官方把出图结果挂到画布预览（node.imgs）发生在这一帧之后 ⇒ 再补几拍刷新，
@@ -3134,6 +3384,8 @@ app.registerExtension({
         node._jmsDropStaleInputs?.();
         node._jmsSyncTab?.(node.properties?.jms_tab);
         node._jmsRefresh();
+        // 🔴 还原上次执行结果：信息窗文件名 + 状态 + 预览图（切换工作流 / 刷新后不再变「待机中」）。
+        node._jmsRestoreLastRun?.();
       });
       return r;
     };

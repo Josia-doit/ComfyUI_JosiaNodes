@@ -513,16 +513,22 @@ def _next_counter(folder, name):
     兼容两种历史命名，否则旧产物会被当成不存在、序号从头再来 ⇒ 直接覆盖：
       · 旧：`<名>_<5位序号>_.<扩展>`（原生风格，尾部带下划线）
       · 新：`<名>_<4位序号>.<扩展>`（本节点现行，序号后无下划线）
-    前缀里若写了 `%0001%` 这类数字通配符，序号出现在**通配符原来的位置**，按位置建正则。
+    前缀里若写了 `%0001%` 这类数字通配符，序号出现在**通配符原来的位置**，**按通配符位数精确匹配**
+    （例如 `%01%` 只认 2 位、不匹配 `001` 这种 3 位），且整段文件名锚定结尾 —— 否则换不同位数序号时会
+    误把其它位数的已有文件算进来 ⇒ 落盘序号被错误后推、与本应空闲的短位数序号「互相躲避」。
     """
     if not os.path.isdir(folder):
         return 1
     m0 = _COUNTER_WILD_RE.search(name or "")
     if m0:
-        pat = re.compile(re.escape((name or "")[:m0.start()]) + r"(\d+)"
-                         + re.escape((name or "")[m0.end():]))
+        width = max(1, min(12, len(m0.group(1))))
+        prefix = re.escape((name or "")[:m0.start()])
+        suffix = re.escape((name or "")[m0.end():])
+        # 仅匹配「前缀 + 恰好 width 位数字 + 后缀」的完整文件名（锚定 ^…$），
+        # 不同位数的序号各自独立计数、互不躲避。
+        pat = re.compile("^" + prefix + r"(\d{" + str(width) + "})" + suffix + "$")
     else:
-        pat = re.compile(re.escape(name or "") + r"_(\d+)")
+        pat = re.compile("^" + re.escape(name or "") + r"_(\d+)$")
     best = 0
     try:
         for f in os.listdir(folder):
@@ -1091,8 +1097,8 @@ class JosiaMediaSave:
     FUNCTION = "save_media"
     OUTPUT_NODE = True
 
-    RETURN_TYPES = ("IMAGE", "STRING", "LATENT", "LATENT", "LATENT")
-    RETURN_NAMES = ("图像", "路径", "Latent", "Video_Latent", "Audio_Latent")
+    RETURN_TYPES = ("IMAGE", "STRING", "STRING", "LATENT", "LATENT", "LATENT")
+    RETURN_NAMES = ("图像", "视频", "音频", "Latent", "Video_Latent", "Audio_Latent")
     OUTPUT_TOOLTIPS = (
         "透传给下游的图像（「图像」或「Latent」解码后的结果）。",
         "本次落盘的主文件路径（相对 ComfyUI 输出目录）。",
@@ -1926,7 +1932,7 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
                             # 🔴 前端状态行直接显示这句：池跑空不再是一句莫名的「没有产物落盘」
                             "skip_msg": "💤 任务池已全部完成（或尚未载入文件）—— 本次无待解码 Latent，已跳过。",
                         }},
-                        "result": (None, "", None, None, None)}
+                        "result": (None, "", "", None, None, None)}
 
             # ================================================================
             # 🔁 内置 for 循环：首个工作项＝本次接入的 Latent；若带批量标记 ⇒
@@ -2327,7 +2333,7 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
                                     or 提前保存的潜空间路径 or None,
                 }
                 print(f"{WATERMARK} ❌ 执行出错（详情已写入前端信息窗）：\n{_stk}")
-                return {"ui": ui, "result": (None, "", None, None, None)}
+                return {"ui": ui, "result": (None, "", "", None, None, None)}
             # 🔴 落地校验（整轮）：一个产物都没有 ⇒ 区分「全失败」与「配置空转」，保持旧版语义
             if not (results["images"] or results["audio"] or results["latents"]):
                 raise ValueError(
@@ -2430,7 +2436,21 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
                     parts.append(f"Latent {len(results['latents'])} 个")
                 print(f"{WATERMARK} ✅ 保存完成：{'，'.join(parts) if parts else '无'} "
                       f"| 目录 {folder_type} | 耗时 {cost:.2f}s")
-            return {"ui": ui, "result": (images, rel, last.get("Latent"), video_lat, audio_lat)}
+            # 视频/音频端口：输出各自资产的绝对路径（未生成则空串），供下游节点直接接入。
+            #   视频类资产（mp4/webm/mkv 与动图 WebP）落在 images 通道，音频落在 audio 通道。
+            vid_path = ""
+            aud_path = ""
+            for _d in results["images"]:
+                if _d.get("josia_kind") in ("video", "animated"):
+                    _fn = _d.get("filename")
+                    if _fn:
+                        vid_path = os.path.join(full_folder, _fn)
+                        break
+            if results["audio"]:
+                _fn = results["audio"][0].get("filename")
+                if _fn:
+                    aud_path = os.path.join(full_folder, _fn)
+            return {"ui": ui, "result": (images, vid_path, aud_path, last.get("Latent"), video_lat, audio_lat)}
 
 
         except ValueError as _ve:
@@ -2453,9 +2473,63 @@ Save Audio / Save Latent 的能力汇聚到一个节点：
                 "early_latent": 提前保存的潜空间路径 or None,
             }
             print(f"[Josia媒体保存] \u274c 执行出错（详情已写入前端信息窗）：\n{_stack}")
-            return {"ui": ui, "result": (None, "", None, None, None)}
+            return {"ui": ui, "result": (None, "", "", None, None, None)}
+def _ext_link_root():
+    """output 下收纳「外部目录链接」的固定容器目录。"""
+    return os.path.join(folder_paths.get_output_directory(), "_josia_ext")
+
+
+def _prune_dangling_ext_links():
+    """清掉 _josia_ext 里指向已消失目标的死链接（目录被删后 /view 不再指向空处）。"""
+    root = _ext_link_root()
+    try:
+        for _name in os.listdir(root):
+            _p = os.path.join(root, _name)
+            # exists() 会穿透链接：目标还在 ⇒ True；目标被删 ⇒ False（链接本身还在）
+            if not os.path.exists(_p):
+                try:
+                    os.remove(_p)
+                except OSError:
+                    pass
+    except OSError:
+        pass
+
+
+def _serve_rel_sub(folder):
+    """把 output/temp 之外的绝对目录接入 ComfyUI 的 /view 服务。
+
+    官方 /view 只认 output/input/temp 三个根目录，直接把文件落到任意绝对路径
+    会让节点预览、任务队列缩略图全部 404。这里在 output/_josia_ext/ 下建一个
+    指向该目录的 NTFS 目录连接（junction）/ 目录符号链接，/view、官方预览、
+    队列缩略图都按「output 的普通子目录」原生解析，无需复制文件。
+    链接名取路径哈希 ⇒ 同一目录重复使用同一链接，不会堆积。
+    失败（无权限等）返回 ""，退化为「文件照常落盘、仅预览不可用」。
+    """
+    try:
+        root = _ext_link_root()
+        os.makedirs(root, exist_ok=True)
+        import hashlib
+        _h = hashlib.md5(os.path.normcase(os.path.normpath(folder)).encode("utf-8")).hexdigest()[:12]
+        _link = os.path.join(root, _h)
+        if not os.path.exists(_link):
+            _prune_dangling_ext_links()
+            if os.name == "nt":
+                import _winapi
+                _winapi.CreateJunction(folder, _link)
+            else:
+                os.symlink(folder, _link, target_is_directory=True)
+        return "_josia_ext/" + _h
+    except Exception:
+        return ""
+
+
 def _rel_sub(folder):
-    """把绝对目录换算成 ComfyUI 的相对子目录（output/temp 下的一级子路径）。"""
+    """把绝对目录换算成 ComfyUI /view 可解析的相对子目录。
+
+    在 output / temp 树内 ⇒ 直接给相对路径；之外 ⇒ 建 junction/符号链接接入
+    （见 _serve_rel_sub），保证「手动选择文件夹」保存的文件同样有官方预览、
+    任务队列缩略图和「打开」按钮可用。
+    """
     for base in (folder_paths.get_output_directory(), folder_paths.get_temp_directory()):
         try:
             if os.path.normcase(folder).startswith(os.path.normcase(base)):
@@ -2463,7 +2537,7 @@ def _rel_sub(folder):
                 return "" if rest == "." else rest.replace("\\", "/")
         except Exception:
             continue
-    return ""
+    return _serve_rel_sub(folder)
 
 
 def _list_drives():
