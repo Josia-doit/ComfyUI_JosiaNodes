@@ -35,3 +35,6 @@ temp/
 
 # 本地备份（每次同步 E→F 前的快照，仅本地保留，不推送 GitHub）
 backup/
+
+# 用户配置缓存（触发词 / 预览图等，运行时生成，不推送 GitHub；目录由 lora_trigger.py 启动时创建）
+user_config/

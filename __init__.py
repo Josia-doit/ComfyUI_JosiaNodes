@@ -83,6 +83,12 @@ try:
 except Exception as _e:
     print(f"[JosiaNodes] ⚠️ 依赖检测路由注册失败：{_e}")
 
+# ==================== LoRA 堆叠 · 触发词配置路由（user_config/lora_trigger 读写） ====================
+try:
+    import lora_trigger  # 注册 /josia_lora_trigger/* 并确保用户配置目录存在
+except Exception as _e:
+    print(f"[JosiaNodes] ⚠️ 触发词配置路由注册失败：{_e}")
+
 # ==================== 最终验证输出 ====================
 if NODE_CLASS_MAPPINGS:
     print(f"[JosiaNodes] ✅ JosiaNodes 加载成功，注册节点数：{len(NODE_CLASS_MAPPINGS)}"

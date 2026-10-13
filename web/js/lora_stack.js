@@ -308,7 +308,7 @@ function drawNode(n, c) {
     const tOn = n.properties.ts ?? true;
     const gd = !tOn;
 
-    n._ha = { ts: null, co: null, cL: null, cR: null, cD: null, sw: [], na: [], tr: [], ar: [], ed: [], sy: [] };
+    n._ha = { ts: null, co: null, cL: null, cR: null, cD: null, tg: null, sw: [], na: [], tr: [], ar: [], ed: [], sy: [], rows: [] };
 
     let y = PT;
 
@@ -337,7 +337,8 @@ function drawNode(n, c) {
     // 按钮可用宽度 = 模块左边界 - PX - 固定间距
     const gapBtn = 16; // 按钮区和数量区之间的固定间距
     const btnAvail = nLAx - PX - gapBtn;
-    const btnW = Math.max(85, Math.floor((btnAvail - 8) / 2));
+    // 三个按钮（总控 / 加载模式 / 🏷️ 触发词）三等分
+    const btnW = Math.max(70, Math.floor((btnAvail - 16) / 3));
     const btnAH = HH - 8;
     const btnAY = y + (HH - btnAH) / 2;
 
@@ -349,6 +350,11 @@ function drawNode(n, c) {
     const cpuOn = n.properties.co ?? false;
     n._ha.co = { x: cpuX, y: btnAY, w: btnW, h: btnAH };
     drawBtn(c, cpuX, btnAY, btnW, btnAH, cpuOn ? "内存加载" : "显存加载", cpuOn, "#7a4c15", gd);
+    // 🏷️ 触发词（悬浮面板开关，激活态由 lora_trigger.js 的 openGroups 提供）
+    const tgX = PX + (btnW + 8) * 2;
+    const tgOn = !!(window.JosiaLoraTrigger && window.JosiaLoraTrigger.isOpen && window.JosiaLoraTrigger.isOpen(n));
+    n._ha.tg = { x: tgX, y: btnAY, w: btnW, h: btnAH };
+    drawBtn(c, tgX, btnAY, btnW, btnAH, "🏷️ 触发词", tgOn, "#5a3a8d", gd);
 
     // 数量箭头
     const ah = HH - 8;
@@ -372,6 +378,8 @@ function drawNode(n, c) {
     for (let i = 0; i < n._ac; i++) {
         const s = n._st[i]; if (!s) continue;
         if (i > 0) { y += SG / 2; drawDv(c, PX, y, W - PX * 2); y += SG / 2; }
+        // 记录每组第一行的 y（触发词悬浮面板定位 / 三角尾巴指向用，见 lora_trigger.js）
+        n._ha.rows.push(y);
         const la = drawName(c, n, W, y, i + 1, s, gd);
         n._ha.sw.push(la.sw); n._ha.na.push(la.na);
         y += LH + LG;
@@ -460,6 +468,12 @@ function onMD(n, e, lp) {
     if (h.cL && ht(mx, my, h.cL)) { n._ac = cl(n._ac - 1, 1, MG); writeSt(n); app.graph?.setDirtyCanvas?.(true, false); return true; }
     if (h.cR && ht(mx, my, h.cR)) { n._ac = cl(n._ac + 1, 1, MG); writeSt(n); app.graph?.setDirtyCanvas?.(true, false); return true; }
     if (h.cD && ht(mx, my, h.cD)) { showCM(n, e); return true; }
+    // 🏷️ 触发词：开关节点右侧悬浮面板组（lora_trigger.js）
+    if (h.tg && ht(mx, my, h.tg)) {
+        window.JosiaLoraTrigger?.toggle(n);
+        app.graph?.setDirtyCanvas?.(true, false);
+        return true;
+    }
 
     for (const s of h.sw) {
         if (ht(mx, my, s)) {
@@ -587,6 +601,17 @@ function showLM(n, e, gi) {
 // ═════════════════════════════════════════════
 // 扩展
 // ═════════════════════════════════════════════
+// ═════════════════════════════════════════════
+// 布局桥（供 lora_trigger.js 读取，避免其反向解析内部状态）
+// ═════════════════════════════════════════════
+window.JosiaLoraStackLayout = function (n) {
+    return {
+        ac: n._ac || 1,
+        names: (n._st || []).map(s => s && s.name),
+        rows: (n._ha && n._ha.rows) || [],
+    };
+};
+
 app.registerExtension({
     name: "JosiaLoraStack",
     async beforeRegisterNodeDef(nt, nd) {
@@ -620,6 +645,12 @@ app.registerExtension({
         nt.prototype.onMouseMove = function(e, lp, c) { if (onMM(this, e, lp)) return true; return omm?.call(this, e, lp, c) ?? false; };
         const omu = nt.prototype.onMouseUp;
         nt.prototype.onMouseUp = function(e, lp, c) { if (onMU(this, e, lp)) return true; return omu?.call(this, e, lp, c) ?? false; };
+        // 节点被删除：关闭它的触发词悬浮面板（lora_trigger.js 经 window 桥接管）
+        const orm = nt.prototype.onRemoved;
+        nt.prototype.onRemoved = function() {
+            try { window.JosiaLoraTrigger?.close(this); } catch (_e) { /* 面板模块未加载 */ }
+            return orm?.apply(this, arguments);
+        };
         const om = nt.prototype.getExtraMenuOptions;
         nt.prototype.getExtraMenuOptions = function(c, o) {
             om?.call(this, c, o); const self = this;
@@ -636,6 +667,14 @@ app.registerExtension({
         if (node.type !== NT && node.comfyClass !== NN) return;
         const self = node;
         function dk() { init(self); killW(self); readSt(self); self.size[1] = nH(self._ac); app.graph?.setDirtyCanvas?.(true, false); }
+        function restoreTrigger() {
+            // 加载完成后节点必须仍属于当前 graph 才恢复，避免工作流切换中间态产生僵尸
+            if (self.graph !== app.graph) return;
+            if (self.properties?._jmsLoraTriggerOpen && window.JosiaLoraTrigger?.open) {
+                window.JosiaLoraTrigger.open(self);
+            }
+        }
         setTimeout(() => { requestAnimationFrame(dk); }, 10);
+        setTimeout(() => { requestAnimationFrame(restoreTrigger); }, 180);
     },
 });
