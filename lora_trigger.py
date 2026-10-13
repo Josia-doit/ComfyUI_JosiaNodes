@@ -473,6 +473,117 @@ def register_routes():
                 uniq.append(n)
         return _json_ok({"success": True, "loras": uniq})
 
+    @PromptServer.instance.routes.get("/josia_lora_trigger/export")
+    async def export_configs(request):
+        """导出全部 LoRA 触发词配置（含预览图 base64）为单个 JSON，便于本地备份。
+
+        返回：{success, version, exported_at, configs:[{key, lora, text, updated, image}]}
+        image 为 data:image/webp;base64,... 或 null。
+        """
+        try:
+            configs = list_configs()
+            out = []
+            for c in configs:
+                key = c.get("key", "")
+                item = {
+                    "key": key,
+                    "lora": c.get("lora", ""),
+                    "text": c.get("text", ""),
+                    "updated": c.get("updated", 0),
+                    "image": None,
+                }
+                _, webp_path = _paths(key)
+                if os.path.isfile(webp_path):
+                    try:
+                        with open(webp_path, "rb") as f:
+                            b = f.read()
+                        item["image"] = "data:image/webp;base64," + base64.b64encode(b).decode("ascii")
+                    except Exception as e:
+                        print(f"[JosiaLoraTrigger] ⚠️ 导出图片失败 {key}: {e}")
+                out.append(item)
+            return _json_ok({
+                "success": True,
+                "version": 1,
+                "exported_at": int(time.time()),
+                "configs": out,
+            })
+        except Exception as e:
+            return _json_ok({"success": False, "error": str(e)})
+
+    @PromptServer.instance.routes.post("/josia_lora_trigger/import")
+    async def import_configs(request):
+        """从导出文件恢复配置：逐条写回 json + webp（合并已有、新增缺失，不删除未包含项）。
+
+        body: {configs:[{key, lora, text, updated, image}]}
+        返回：{success, imported, skipped, errors}
+        """
+        try:
+            body = await request.json()
+        except Exception:
+            return _json_ok({"success": False, "error": "bad json"})
+        items = body.get("configs") if isinstance(body, dict) else None
+        if not isinstance(items, list):
+            return _json_ok({"success": False, "error": "bad configs"})
+        ensure_dirs()
+        imported, skipped = 0, 0
+        errors = []
+        for it in items:
+            if not isinstance(it, dict):
+                skipped += 1
+                continue
+            key = key_of(str(it.get("key", "")))
+            lora = norm_lora(it.get("lora", ""))
+            if not key or not lora:
+                skipped += 1
+                continue
+            text = str(it.get("text", "") or "")[:MAX_TEXT_LEN]
+            try:
+                updated = int(it.get("updated") or 0)
+            except Exception:
+                updated = 0
+            # 写 json（save_cfg 会重置 updated 为当前时间，随后按需保留原时间）
+            try:
+                save_cfg(key, lora_name=lora, text=text)
+            except Exception as e:
+                errors.append(f"{lora}: {e}")
+                skipped += 1
+                continue
+            if updated:
+                try:
+                    json_path, _ = _paths(key)
+                    with open(json_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    data["updated"] = updated
+                    tmp = json_path + ".tmp"
+                    with open(tmp, "w", encoding="utf-8") as f:
+                        json.dump(data, f, ensure_ascii=False)
+                    os.replace(tmp, json_path)
+                except Exception:
+                    pass
+            # 写图片：dataURL 直接落 webp（导出时已是压缩后的 webp，不再二次压缩）
+            img = it.get("image")
+            raw = parse_data_url(img) if isinstance(img, str) else None
+            if raw:
+                if len(raw) > 20 * 1024 * 1024:
+                    errors.append(f"{lora}: image too large")
+                    skipped += 1
+                    continue
+                _, webp_path = _paths(key)
+                try:
+                    tmp = webp_path + ".tmp"
+                    with open(tmp, "wb") as f:
+                        f.write(raw)
+                    os.replace(tmp, webp_path)
+                except Exception as e:
+                    errors.append(f"{lora}: image write failed: {e}")
+            imported += 1
+        return _json_ok({
+            "success": True,
+            "imported": imported,
+            "skipped": skipped,
+            "errors": errors[:10],
+        })
+
     print("[JosiaLoraTrigger] ✅ 触发词配置路由已注册（/josia_lora_trigger/*）")
     return True
 

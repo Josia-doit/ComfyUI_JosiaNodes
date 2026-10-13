@@ -230,6 +230,7 @@ const CSS = `
     padding:8px 14px;border-top:1px solid #444;
 }
 .josia-lt-mgr-tip{font-size:11px;color:#777;word-break:break-all}
+.josia-lt-mgr-hint{display:block;margin-top:4px;font-size:11px;line-height:1.6;color:#9a9a9a}
 .josia-lt-mgr-actions{display:flex;gap:8px;flex:0 0 auto}
 .josia-lt-mgr-btn{
     height:22px;padding:0 12px;border:1px solid #555;border-radius:4px;
@@ -1235,6 +1236,72 @@ async function openManager() {
             alert("打开目录失败：" + (e && e.message ? e.message : String(e)));
         }
     });
+    // 导出配置（备份）：把所有触发词与预览图导出为单个本地 JSON 文件
+    const exportBtn = document.createElement("button");
+    exportBtn.type = "button";
+    exportBtn.className = "josia-lt-mgr-btn";
+    exportBtn.textContent = "导出配置";
+    exportBtn.title = "把所有触发词与预览图导出为单个本地文件（备份用）";
+    exportBtn.addEventListener("click", async () => {
+        try {
+            const r = await fetch(`${API}/export`);
+            const d = await r.json().catch(() => null);
+            if (!d || !d.success) { alert("导出失败：" + ((d && d.error) || "未知错误")); return; }
+            const blob = new Blob([JSON.stringify(d, null, 2)], { type: "application/json" });
+            const a = document.createElement("a");
+            const t = new Date();
+            const pad = (n) => String(n).padStart(2, "0");
+            const fn = `josia_lora_trigger_backup_${t.getFullYear()}${pad(t.getMonth() + 1)}${pad(t.getDate())}.json`;
+            a.href = URL.createObjectURL(blob);
+            a.download = fn;
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(() => { try { URL.revokeObjectURL(a.href); a.remove(); } catch (_) { /* */ } }, 1000);
+        } catch (e) {
+            alert("导出失败：" + (e && e.message ? e.message : String(e)));
+        }
+    });
+    // 导入配置（恢复）：从导出文件读回，逐条写回本地目录
+    const importInput = document.createElement("input");
+    importInput.type = "file";
+    importInput.accept = "application/json,.json";
+    importInput.style.display = "none";
+    importInput.addEventListener("change", async () => {
+        const file = importInput.files && importInput.files[0];
+        if (!file) return;
+        try {
+            const text = await file.text();
+            const data = JSON.parse(text);
+            const configs = Array.isArray(data) ? data : (data && data.configs);
+            if (!Array.isArray(configs)) { alert("文件格式不正确（应为导出的备份 JSON）"); importInput.value = ""; return; }
+            const r = await fetch(`${API}/import`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ configs }),
+            });
+            const d = await r.json().catch(() => null);
+            if (d && d.success) {
+                await loadConfigs(true);
+                await renderTable();
+                await refreshLoraSelect(false);
+                let msg = `已导入 ${d.imported || 0} 条配置`;
+                if (d.skipped) msg += `，跳过 ${d.skipped} 条无效`;
+                alert(msg);
+            } else {
+                alert("导入失败：" + ((d && d.error) || "未知错误"));
+            }
+        } catch (e) {
+            alert("导入失败：" + (e && e.message ? e.message : String(e)));
+        }
+        importInput.value = "";
+    });
+    document.body.appendChild(importInput);
+    const importBtn = document.createElement("button");
+    importBtn.type = "button";
+    importBtn.className = "josia-lt-mgr-btn";
+    importBtn.textContent = "导入配置";
+    importBtn.title = "从「导出配置」生成的备份文件恢复触发词与预览图";
+    importBtn.addEventListener("click", () => importInput.click());
     const refreshBtn = document.createElement("button");
     refreshBtn.type = "button";
     refreshBtn.className = "josia-lt-mgr-btn";
@@ -1249,6 +1316,8 @@ async function openManager() {
     doneBtn.textContent = "完成";
     doneBtn.addEventListener("click", closeManager);
     actions.appendChild(openBtn);
+    actions.appendChild(exportBtn);
+    actions.appendChild(importBtn);
     actions.appendChild(refreshBtn);
     actions.appendChild(doneBtn);
     foot.appendChild(tip);
@@ -1266,6 +1335,11 @@ async function openManager() {
         const d = await r.json();
         if (d && d.success && d.dir) {
             tip.textContent = "配置目录：" + d.dir;
+            const hint = document.createElement("div");
+            hint.className = "josia-lt-mgr-hint";
+            hint.textContent = "这些配置都是本地文件：可直接复制上面的目录备份；或点「导出配置」下载单个文件，" +
+                "重装 / 换电脑后用「导入配置」一键恢复。也可点「打开目录」直接进入该文件夹手动管理。";
+            tip.appendChild(hint);
         }
     } catch (_) { /* 忽略 */ }
 
