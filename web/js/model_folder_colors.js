@@ -103,6 +103,8 @@ import { app } from "/scripts/app.js";
 const SETTING_ID = "JosiaNodes.ModelFolderColors";
 const HL_SETTING_ID = "JosiaNodes.ComboSelectedHighlight";
 const FILTER_SETTING_ID = "JosiaNodes.ComboQuickFilter";
+const MENU_SMART_SETTING_ID = "JosiaNodes.ComboMenuSmart";
+const MENU_MAXH_SETTING_ID = "JosiaNodes.ComboMenuMaxHeight";
 const MARK = "📂 ";
 /** JosiaCheckpointPlus 父级类别前缀（checkpoint_plus.js 注入）：整段浅灰弱化，不占 12 色环 */
 const PARENT_MARK = "💻 ";
@@ -177,6 +179,10 @@ function primaryColor(key) {
 let _enabled = true;
 let _hlEnabled = true;
 let _filterEnabled = true;
+/** 下拉菜单智能定位（限高 + 空间不足自动向上弹出） */
+let _menuSmart = true;
+/** 下拉菜单最大高度（像素）；0 = 按屏幕高度自动 */
+let _menuMaxH = 0;
 /** 已装饰 widget 的色表登记处 —— 下拉列表与折叠态共用，保证两处颜色一致 */
 const MAPS = [];
 
@@ -295,11 +301,22 @@ function highlightContainer(el) {
   }
 }
 
-/** 1.0：包装 widget 实例的 onClick —— 原方法同步建完菜单后立刻标记当前值 */
+/**
+ * 1.0：包装 widget 实例的 onClick —— 原方法同步建完菜单后立刻标记当前值。
+ * 🔴 幂等标记必须打在**函数对象**上（`__josiaMfcHl`），不能打实例：
+ *    子图节点的 widgets 是 getter 代理，每次访问都新建实例（实例标记必然丢），
+ *    而 onClick 经代理 setter 写回内部真实 widget —— 按实例判断会每次多包一层。
+ */
 function installMenuHook(w) {
-  if (!w || w.type !== "combo" || w._josiaHlWrapped) return false;
+  if (!w || w.type !== "combo") return false;
   const orig = w.onClick;
   if (typeof orig !== "function") return false; // legacy widget.mouse 分支 → 放弃，不报错
+  if (orig.__josiaMfcHl) {
+    // 已包过（另一批代理实例先行）——沿用原包装，只补实例字段
+    w._josiaHlWrapped = orig;
+    w._josiaHlOrigClick = orig.__josiaMfcHlOrig;
+    return true;
+  }
   const wrapped = function (evt) {
     const r = orig.apply(this, arguments);
     try {
@@ -307,6 +324,8 @@ function installMenuHook(w) {
     } catch (e) {}
     return r;
   };
+  wrapped.__josiaMfcHl = true;
+  wrapped.__josiaMfcHlOrig = orig;
   w._josiaHlOrigClick = orig;
   w._josiaHlWrapped = wrapped;
   w.onClick = wrapped;
@@ -314,8 +333,18 @@ function installMenuHook(w) {
 }
 
 function removeMenuHook(w) {
-  if (!w || !w._josiaHlWrapped) return false;
-  if (typeof w._josiaHlOrigClick === "function") w.onClick = w._josiaHlOrigClick;
+  if (!w) return false;
+  const cur = w.onClick;
+  if (!cur || !cur.__josiaMfcHl) {
+    delete w._josiaHlOrigClick;
+    delete w._josiaHlWrapped;
+    return false;
+  }
+  const orig = cur.__josiaMfcHlOrig;
+  try {
+    if (typeof orig === "function") w.onClick = orig;
+    else delete w.onClick;
+  } catch (e) {}
   delete w._josiaHlOrigClick;
   delete w._josiaHlWrapped;
   return true;
@@ -377,7 +406,15 @@ function readValues(w) {
 function decorateWidget(w) {
   if (!w || w.type !== "combo") return false;
   installMenuHook(w); // 高亮：所有 combo 都要，和「有没有子文件夹」无关
-  if (w._josiaMfcWrapped && w._josiaMfcMap) return true; // 已装饰过（值后到场景靠这里放行重装饰）
+  const opts = w.options || (w.options = {});
+  // 🔴 幂等状态全部挂 options（共享对象），不挂实例：子图节点的 widgets 是
+  //    getter 代理，每次访问新建实例（实例标记必丢），按实例判断会每次多包一层
+  //    getOptionLabel —— MARK 越积越多，菜单最终糊成一排 📂；MAPS 也会爆涨。
+  if (opts.__josiaMfcWrapped && opts.__josiaMfcMap) {
+    w._josiaMfcMap = opts.__josiaMfcMap;
+    w._josiaMfcWrapped = true;
+    return true; // 已装饰过（值后到场景靠这里放行重装饰）
+  }
   const values = readValues(w);
   if (!values || !values.length) return false;
 
@@ -389,14 +426,15 @@ function decorateWidget(w) {
   if (!keys.size) return false; // 没有子文件夹 → 这个下拉不处理
 
   const map = buildColorMap(keys);
+  opts.__josiaMfcMap = map;
   w._josiaMfcMap = map;
   if (MAPS.indexOf(map) < 0) MAPS.push(map);
 
-  // 链式保留原有 getOptionLabel（例如云端资源映射），只在其结果上加 📂
-  if (!w._josiaMfcWrapped) {
-    const prev = w.options.getOptionLabel;
-    w._josiaMfcPrev = prev;
-    w._josiaMfcWrapped = function (value) {
+  // 链式保留原有 getOptionLabel（例如云端资源映射），只在其结果上加 📂。
+  // 已包过（跨代理实例）就沿用，不重复包；wrapped 上记最原始的前任供卸载还原。
+  if (!opts.getOptionLabel || !opts.getOptionLabel.__josiaMfc) {
+    const prev = opts.getOptionLabel;
+    const wrapped = function (value) {
       let base;
       try {
         base = typeof prev === "function" ? prev(value) : value;
@@ -412,8 +450,12 @@ function decorateWidget(w) {
       if (idx < 0) return base; // 显示名与实际路径无关（云端等）→ 不硬塞
       return base.slice(0, idx) + MARK + base.slice(idx);
     };
-    w.options.getOptionLabel = w._josiaMfcWrapped;
+    wrapped.__josiaMfc = true;
+    wrapped.__josiaMfcOrig = prev;
+    opts.getOptionLabel = wrapped;
   }
+  opts.__josiaMfcWrapped = true;
+  w._josiaMfcWrapped = true;
   return true;
 }
 
@@ -421,16 +463,25 @@ function undecorateWidget(w) {
   if (!w) return false;
   // 只有「高亮」开关也关着才卸钩子，否则关着色会把高亮一起带走
   if (!_hlEnabled) removeMenuHook(w);
-  if (!w._josiaMfcWrapped) return false;
+  const opts = w.options || {};
+  delete w._josiaMfcWrapped;
+  if (!opts.__josiaMfcWrapped) {
+    delete w._josiaMfcMap;
+    return false;
+  }
   try {
-    if (w._josiaMfcPrev === undefined) delete w.options.getOptionLabel;
-    else w.options.getOptionLabel = w._josiaMfcPrev;
+    const cur = opts.getOptionLabel;
+    if (cur && cur.__josiaMfc) {
+      const orig = cur.__josiaMfcOrig;
+      if (orig === undefined) delete opts.getOptionLabel;
+      else opts.getOptionLabel = orig; // 恢复到最原始的前任（可能跨过多层代理）
+    }
   } catch (e) {}
-  const map = w._josiaMfcMap;
+  const map = opts.__josiaMfcMap;
   const i = MAPS.indexOf(map);
   if (i >= 0) MAPS.splice(i, 1);
-  delete w._josiaMfcWrapped;
-  delete w._josiaMfcPrev;
+  delete opts.__josiaMfcWrapped;
+  delete opts.__josiaMfcMap;
   delete w._josiaMfcMap;
   return true;
 }
@@ -869,15 +920,55 @@ function applyMatchHighlight(root, query) {
   }
 }
 
-/** 1.0 菜单：底部/顶部溢出视口时把菜单拉回来（照官方 contextMenuFilter 的算法） */
+/** 菜单距视口边缘的留白 */
+const MENU_EDGE = 8;
+
+/**
+ * 菜单最大高度：0 = 按屏幕高度自动（2K 屏 800 / 1K 屏 500 / 小屏 340），
+ * 与「屏幕分辨率的一定比例」等价；填了具体像素就用填的值。
+ */
+function menuCapHeight() {
+  if (_menuMaxH > 0) return _menuMaxH;
+  const h = window.innerHeight || document.documentElement.clientHeight || 900;
+  if (h >= 1400) return 800; // 2560×1440 一档
+  if (h >= 1000) return 500; // 1920×1080 一档
+  return 340; // 小屏兜底
+}
+
+/**
+ * 1.0 菜单布局：先按「最大高度」限高（覆盖官方 80vh），空间不足时**向上翻**，
+ * 锚点是当前 rect.top（官方已按点击位置放好）；上方也放不下才贴底。
+ * 节点靠近屏幕底部时，官方行为会把 80vh 的菜单压成一小条，这里改成整条翻上去。
+ * 关「智能定位」设置时完全不动，跟随官方。
+ */
 function repositionMenu(root) {
+  if (!root || !root.style || !_menuSmart) return;
   try {
+    const cap = menuCapHeight();
+    if (cap > 0) root.style.maxHeight = cap + "px";
     const r = root.getBoundingClientRect();
     const vh = window.innerHeight || document.documentElement.clientHeight;
-    if (r.bottom > vh - 8) {
-      root.style.top = Math.max(8, vh - r.height - 8) + "px";
+    const vw = window.innerWidth || document.documentElement.clientWidth;
+    if (r.bottom > vh - MENU_EDGE) {
+      // 上翻优先：菜单底边落到锚点上方 6px；上方也塞不下才贴底
+      let top = r.top - r.height - 6;
+      if (top < MENU_EDGE) top = Math.max(MENU_EDGE, vh - r.height - MENU_EDGE);
+      root.style.top = top + "px";
+    } else if (r.top < MENU_EDGE) {
+      root.style.top = MENU_EDGE + "px";
     }
-    if (r.top < 0) root.style.top = "8px";
+    const r2 = root.getBoundingClientRect();
+    if (r2.right > vw - 4) root.style.left = Math.max(4, vw - r2.width - 4) + "px";
+    else if (r2.left < 4) root.style.left = "4px";
+  } catch (e) {}
+}
+
+/** 关「智能定位」时还原官方限高（位置留待下次开下拉自然复位） */
+function resetMenuCap() {
+  try {
+    for (const root of document.querySelectorAll(SEL_MENU_ROOT)) {
+      if (root.style) root.style.maxHeight = "";
+    }
   } catch (e) {}
 }
 
@@ -1100,12 +1191,31 @@ function prepareDarkMenu(ctx, root) {
   if (_enabled) colorizeContainer(root); // 先上 📂 色，高亮才有底色可继承
   if (_hlEnabled) highlightContainer(root);
   if (_filterEnabled) installMenuFilter(ctx, root);
+  // 无论有没有筛选框都要限高/翻方向（条目 ≤4 不装筛选框，同样可能溢出）
+  requestAnimationFrame(() => {
+    try {
+      if (root.isConnected) repositionMenu(root);
+    } catch (e) {}
+  });
 }
 
 function installGlobalPatches() {
   patchCanvasWidgetClick();
   patchContextMenu();
 }
+
+/**
+ * 供自定义 UI 节点（如 LoRA 堆叠的自绘下拉）记录「当前选中值」：
+ * 它们的点击不走画布 processWidgetClick，不开这条通道，dark 菜单的当前值
+ * 高亮就取不到值。窗口期内该值必须是某菜单的条目才会被采用（防误伤）。
+ */
+window.JosiaMFC = window.JosiaMFC || {};
+window.JosiaMFC.noteComboValue = function (v) {
+  try {
+    _lastComboValue = String(v ?? "");
+    _lastComboAt = performance.now();
+  } catch (e) {}
+};
 
 /**
  * 动态候选项后到 / 克隆 / 工作流加载的自愈：新增节点时补装饰（hook 事件而非轮询）。
@@ -1347,6 +1457,46 @@ app.registerExtension({
         }
       },
     },
+    {
+      id: MENU_SMART_SETTING_ID,
+      name: "下拉菜单智能定位",
+      type: "boolean",
+      defaultValue: true,
+      category: ["⚡️JosiaNodes", "下拉菜单"],
+      tooltip:
+        "下拉菜单高度不超过「最大高度」，节点靠近屏幕底部时菜单整体向上弹出，" +
+        "不再被压成一小条。关闭后完全跟随官方默认行为（80vh 限高、可能被压短）。",
+      onChange: (v) => {
+        _menuSmart = !!v;
+        if (_menuSmart) {
+          for (const root of document.querySelectorAll(SEL_MENU_ROOT)) {
+            if (root.isConnected) repositionMenu(root);
+          }
+        } else {
+          resetMenuCap();
+        }
+      },
+    },
+    {
+      id: MENU_MAXH_SETTING_ID,
+      name: "下拉菜单最大高度",
+      type: "number",
+      defaultValue: 0,
+      category: ["⚡️JosiaNodes", "下拉菜单"],
+      tooltip:
+        "像素值。0 = 按屏幕高度自动（2K 屏约 800、1K 屏约 500、更小屏约 340）；" +
+        "填具体数值则所有下拉都按这个高度上限弹出（空间不足时自动向上翻）。",
+      onChange: (v) => {
+        let n = Number(v);
+        if (!isFinite(n) || n < 0) n = 0;
+        _menuMaxH = Math.min(Math.round(n), 4000);
+        if (_menuSmart) {
+          for (const root of document.querySelectorAll(SEL_MENU_ROOT)) {
+            if (root.isConnected) repositionMenu(root);
+          }
+        }
+      },
+    },
   ],
 
   init() {
@@ -1356,6 +1506,10 @@ app.registerExtension({
     if (hv !== undefined && hv !== null) _hlEnabled = !!hv;
     const fv = readSetting(FILTER_SETTING_ID);
     if (fv !== undefined && fv !== null) _filterEnabled = !!fv;
+    const sm = readSetting(MENU_SMART_SETTING_ID);
+    if (sm !== undefined && sm !== null) _menuSmart = !!sm;
+    const mh = Number(readSetting(MENU_MAXH_SETTING_ID));
+    if (isFinite(mh) && mh >= 0) _menuMaxH = Math.min(Math.round(mh), 4000);
     installGlobalPatches();
     installObserver();
   },

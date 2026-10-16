@@ -591,11 +591,30 @@ function showCM(n, e) {
 
 function showLM(n, e, gi) {
     const list = getLst(n), cur = n._st[gi]?.name || "None";
+    // 记录当前值：我们的下拉点击不走画布 processWidgetClick，高亮/着色兜底
+    // 走这条全局通道拿「当前选中项」（窗口期内校验是本品格条目才会采用）。
+    try { window.JosiaMFC?.noteComboValue?.(cur); } catch (e2) {}
     const items = list.map(nm => ({
         content: nm === cur ? `✓ ${nm}` : nm,
+        value: nm,
         callback: () => { if (n._st[gi]) { n._st[gi].name = nm; writeSt(n); app.graph?.setDirtyCanvas?.(true, false); } },
     }));
-    new LiteGraph.ContextMenu(items, { event: e, callback: null, parentMenu: null });
+    // className:'dark' = 官方 combo 下拉专用标记：JosiaNodes 的下拉增强
+    //（📂 子文件夹着色 / 已选项高亮 / 快速筛选）只接管 dark 菜单。
+    const ctx = new LiteGraph.ContextMenu(items, { event: e, callback: null, parentMenu: null, className: "dark" });
+    // 官方 addItem 对对象条目会把整个对象字符串化写进 dataset.value
+    // （"[object Object]"），只有纯字符串/函数条目才是真值；而子文件夹着色
+    // 与当前值高亮的兜底推导都依赖 dataset.value = 纯文件名 ⇒ 建完后补写。
+    // 时机：构造器内已同步 addItem 完所有条目，而增强逻辑在 microtask 里跑，
+    // 这里同步补写必然早于它。
+    try {
+        const kids = ctx.root && ctx.root.children ? [...ctx.root.children] : [];
+        for (let i = 0; i < kids.length && i < items.length; i++) {
+            if (kids[i].classList && kids[i].classList.contains("litemenu-entry")) {
+                kids[i].dataset.value = items[i].value;
+            }
+        }
+    } catch (e3) {}
 }
 
 // ═════════════════════════════════════════════
