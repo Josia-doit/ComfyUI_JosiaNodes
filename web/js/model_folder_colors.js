@@ -9,7 +9,7 @@
  *
  * 开关：设置 → ⚡️JosiaNodes → 模型列表 → 「模型子文件夹着色」，默认开启。
  *
- * ── 实现要点（全部依据前端源码取证，comfyui_frontend 1.51.10）─────────────
+ * ── 实现要点（全部依据前端源码取证，comfyui_frontend 1.53.6）─────────────
  *
  * ① 显示钩子用官方的 `widget.options.getOptionLabel`。已核对它是**纯显示层**，
  *    不会污染 value：
@@ -32,6 +32,9 @@
  * ③ 为什么不用「patch LiteGraph.ContextMenu.prototype」：ComboWidget 引用的是
  *    **模块作用域**里的 ContextMenu，并不保证等于 `window.LiteGraph.ContextMenu`，
  *    打补丁可能静默失效。改成对 document.body 做 MutationObserver，与实现类无关。
+ *    （下拉高亮/筛选则走构造器包装，见 ⑦⑧——`window.LiteGraph.ContextMenu`
+ *     就是 ComboWidget 引用的那个命名空间属性，官方核心扩展 contextMenuFilter
+ *     同样这么打补丁，已验证可行。）
  *
  * ④ 为什么「拆文本节点 + 复用前一个兄弟节点」而不是整体 innerHTML 替换：
  *    Vue 的 `{{ option.label }}` 是单文本子节点（PatchFlags.TEXT），更新时会对
@@ -44,33 +47,62 @@
  * ⑤ 1.0 节点折叠态是 canvas 单色绘制，无法只给文件夹段上色 ⇒ 按约定保留统一的
  *    📂 前缀、不着色。
  *
+ * ⑥ 下拉菜单着色的兜底：万一某个 widget 没被装饰到（动态候选项后到、克隆竞态
+ *    等），菜单条目仍可用 `dataset.value`（addItem 写入的原始值）推导子文件夹
+ *    并上色 ⇒ 下拉里的着色不依赖装饰时序。
+ *
  * ── 「下拉已选项高亮」（独立开关，作用于**所有** combo，不要求有子文件夹）───────
  *
- * ⑥ 怎么知道"哪一项是当前值"：
+ * ⑦ 怎么知道"哪一项是当前值"：
  *    · 2.0 Vue：reka-ui 的 ListboxItem 会输出 `role="option"` +
  *      `data-state="checked"|"unchecked"`（`ListboxItem.js:67/75`），官方自己就用
  *      `data-[state=checked]:bg-primary-background/20` 做淡高亮 ⇒ 直接读属性即可，
  *      零猜测。
  *    · 1.0 canvas 菜单：ContextMenu.addItem **完全不写选中态**（源码已核对：
  *      className 只有 `litemenu-entry submenu` + 可选 `disabled/separator/has_submenu`）。
- *      但 `element.dataset.value = String(value)` 保留着**原始值**，而当前值只有
- *      ComboWidget 自己知道。`LGraphCanvas.processWidgetClick` 是
- *      `pointer.onClick = () => widgetInstance.onClick({e,node,canvas})` ——
- *      **实例属性调用**，因此给 widget 实例包一层 onClick 是最贴合的注入点：
- *      原方法同步建完菜单并挂到 body 之后再回来标记，时序天然正确。
- *    · 兜底：onClick 包不上（legacy `widget.mouse` 分支）时只是**不生效**，不报错。
+ *      但 `element.dataset.value = String(value)` 保留着**原始值**（L287），
+ *      而当前值只有 widget 自己知道。
+ *      ⚠️ 早期版本给 widget 实例包 `onClick` 取 `this.value`——在**子图节点**上
+ *      必然失效：SubgraphNode.widgets 是 getter，每次访问都新建代理对象
+ *      （SubgraphNode.ts L126-142）；且画布点击走
+ *      `toConcreteWidget(widget, node, false)` 再造临时实例
+ *      （LGraphCanvas.ts L3111-3118），实例钩子随用随丢。着色只因写在
+ *      共享 options 对象上才幸存。
+ *      ✅ 现机制（全局补丁，与 widget 实例无关）：
+ *        · 包 `LGraphCanvas.prototype.processWidgetClick`：画布上每次点 combo
+ *          都会经过它（含子图代理），记录**原始 widget 的当前值**；
+ *        · 包 `LiteGraph.ContextMenu` 构造器：dark 菜单（仅 combo 用）建好后，
+ *          用记录值给根节点写 `dataset.josiaCur`，并立即着色 + 高亮。
+ *          加了「该值必须真是本菜单某一条目」的校验，杜绝误伤其它 dark 菜单。
+ *        · 实例 `onClick` 包装保留作补充路径（程序内直接调 widget.onClick 的场景）。
  *
- * ⑦ 高亮底色 = 该行 📂 段的颜色（直接读 splitTextNode 写好的 span，零重复计算）；
+ * ⑧ 高亮底色 = 该行 📂 段的颜色（直接读 splitTextNode 写好的 span，零重复计算）；
  *    无 📂（根目录模型 / 无子文件夹的 combo）→ 用 HL_ACCENT。为让白字可读，
  *    底色统一压暗 30%。只写 inline style，不动 DOM 结构、不动 class（Vue 只管
  *    class，不会打架）；每次处理都重设一遍，所以 colorize 把标题色写回也不会
  *    把白字冲掉。
+ *
+ * ── 「下拉快速筛选」（独立开关，1.0 菜单 + 2.0 Vue 全覆盖）──────────────────
+ *
+ * ⑨ 1.0 canvas 菜单：官方核心扩展 contextMenuFilter 自带筛选框，但它的出现条件
+ *    是 `values.length > 4`——而着色开启后 ComboWidget 走 addItem 空值路径
+ *    （ComboWidget.ts L149-172），条件被打破，官方筛选框**消失**。本扩展补上：
+ *      · dark 菜单且条目 > 4 ⇒ 在菜单顶部插入筛选输入框（复用官方
+ *        `comfy-context-menu-filter` 类，样式与官方完全一致；若官方框因故存在，
+ *        先移除它，避免双输入框互相打架）；
+ *      · 输入即筛：不匹配的条目 `display:none`，匹配字符包黄底 span；
+ *      · 键盘：↑/↓ 在可见条目间移动光标（白色描边，不抢选中高亮的彩底），
+ *        Enter 选中光标项，Esc 关闭菜单；底部溢出时自动上移菜单。
+ *    ⑩ 2.0 Vue 下拉：官方 Combobox 已内置即时筛选（>4 选项出现搜索框），
+ *     本扩展只做增强——钩住搜索框的 input 事件，给可见选项的匹配字符加黄底。
+ *     黄底 span 与 📂 色 span 共存：匹配字符深色字、其余不变。
  */
 
 import { app } from "/scripts/app.js";
 
 const SETTING_ID = "JosiaNodes.ModelFolderColors";
 const HL_SETTING_ID = "JosiaNodes.ComboSelectedHighlight";
+const FILTER_SETTING_ID = "JosiaNodes.ComboQuickFilter";
 const MARK = "📂 ";
 /** JosiaCheckpointPlus 父级类别前缀（checkpoint_plus.js 注入）：整段浅灰弱化，不占 12 色环 */
 const PARENT_MARK = "💻 ";
@@ -144,6 +176,7 @@ function primaryColor(key) {
 // ─────────────────────────── widget 装饰 ───────────────────────────
 let _enabled = true;
 let _hlEnabled = true;
+let _filterEnabled = true;
 /** 已装饰 widget 的色表登记处 —— 下拉列表与折叠态共用，保证两处颜色一致 */
 const MAPS = [];
 
@@ -153,15 +186,36 @@ const HL_DARKEN = 0.3; // 底色压暗比例：保证白字对比度
 const HL_FG = "#ffffff";
 const HL_ROW_SEL = 'span[data-josia-mfc="1"]';
 
-/** #RRGGBB 各通道乘 (1-f)。非法输入原样返回，绝不抛错。 */
+/** 解析 #RRGGBB / #RGB / rgb(r,g,b) / rgba(...) → [r,g,b]；非法返回 null，绝不抛错。
+ *  🔴 必须吃 rgb()：`span.style.color` 经 CSSOM 读回是 rgb() 形式，只认 hex 会让
+ *  压暗静默失效（底色退化成原色甚至白色）。 */
+function parseColor(c) {
+  const s = String(c == null ? "" : c).trim();
+  let m = /^#([0-9a-f]{6})$/i.exec(s);
+  if (m) {
+    const n = parseInt(m[1], 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+  m = /^#([0-9a-f]{3})$/i.exec(s);
+  if (m) {
+    const h = m[1];
+    return [
+      parseInt(h[0] + h[0], 16),
+      parseInt(h[1] + h[1], 16),
+      parseInt(h[2] + h[2], 16)
+    ];
+  }
+  m = /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i.exec(s);
+  if (m) return [+m[1], +m[2], +m[3]];
+  return null;
+}
+
+/** 颜色各通道乘 (1-f)。非法输入原样返回，绝不抛错。 */
 function darkenHex(hex, f) {
-  const m = /^#([0-9a-f]{6})$/i.exec(String(hex || "").trim());
-  if (!m) return hex;
-  const n = parseInt(m[1], 16);
-  const ch = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((v) =>
-    Math.round(v * (1 - f))
-  );
-  return "#" + ch.map((v) => v.toString(16).padStart(2, "0")).join("");
+  const ch = parseColor(hex);
+  if (!ch) return hex;
+  const d = ch.map((v) => Math.round(v * (1 - f)));
+  return "#" + d.map((v) => v.toString(16).padStart(2, "0")).join("");
 }
 
 function rowSpan(entry) {
@@ -206,7 +260,7 @@ function applyRowHighlight(entry, hex) {
 
 /**
  * 处理一个下拉容器：把「当前值那一行」涂成彩色底 + 白字。
- * 1.0 菜单的当前值记在容器 `dataset.josiaCur`（见 installMenuHook）；
+ * 1.0 菜单的当前值记在容器 `dataset.josiaCur`（见 markOpenMenu / prepareDarkMenu）；
  * 2.0 Vue 直接问 reka 的 `data-state="checked"`。
  */
 function highlightContainer(el) {
@@ -323,6 +377,7 @@ function readValues(w) {
 function decorateWidget(w) {
   if (!w || w.type !== "combo") return false;
   installMenuHook(w); // 高亮：所有 combo 都要，和「有没有子文件夹」无关
+  if (w._josiaMfcWrapped && w._josiaMfcMap) return true; // 已装饰过（值后到场景靠这里放行重装饰）
   const values = readValues(w);
   if (!values || !values.length) return false;
 
@@ -411,7 +466,14 @@ const SEL_MENU = "div.litemenu-entry";
 const SEL_STATE_ITEM = '[role="option"][data-state]';
 const SEL_VUE_OVERLAY = '[data-testid="widget-select-default-overlay"]';
 const SEL_VUE_TRIGGER = '[data-testid="widget-select-default-trigger"]';
+const SEL_VUE_SEARCH = '[data-testid="widget-select-default-search-input"]';
 const SEL_SCAN = `${SEL_MENU}, ${SEL_VUE_OVERLAY}, ${SEL_VUE_TRIGGER}`;
+/** 收尾帧的扫描范围：容器根（菜单根含全部条目 / Vue 浮层 / 折叠态触发器）。
+ *  取色要看见同框所有条目才会选出覆盖键最多的色表，必须按根扫。 */
+const SEL_SCAN_ROOT = `${SEL_MENU_ROOT}, ${SEL_VUE_OVERLAY}, ${SEL_VUE_TRIGGER}`;
+/** 官方核心扩展的筛选输入类名；我们的输入框复用它，样式与官方完全一致 */
+const NATIVE_FILTER_CLASS = "comfy-context-menu-filter";
+const OUR_FILTER_CLASS = "josia-menu-filter";
 
 /**
  * 从下拉项文本里切出着色分段。兼容三种形态：
@@ -461,6 +523,33 @@ function parseLabel(text) {
   }
 
   return { pre, gray, head, key, rest };
+}
+
+/**
+ * 着色兜底：widget 没被 decorate 到（动态值后到 / 克隆竞态）时，**dark combo 菜单**的
+ * 条目仍带 `dataset.value`（addItem 写入的原始值）。显示名与值一致（常规文件下拉）
+ * 即可按值推导出同一套分段，视觉与 getOptionLabel 路径完全相同（含 📂 前缀）。
+ * 显示名与值无关（云端映射等）返回 null，不硬塞。
+ * 🔴 只认 dark 菜单：ContextMenu.addItem 给**所有**菜单项都写 dataset.value
+ *    （右键菜单 / 添加节点菜单也有），不限定会把原生菜单一起着色。
+ */
+function fallbackInfo(entry, text) {
+  const v = entry?.dataset?.value;
+  if (v == null) return null;
+  const s = String(v).replace(/\\/g, "/");
+  const i = s.lastIndexOf("/");
+  if (i <= 0) return null;
+  const key = s.slice(0, i).toLowerCase();
+  const norm = String(text).replace(/\\/g, "/");
+  const idx = norm.toLowerCase().indexOf(key);
+  if (idx < 0) return null; // 显示名与路径无关 → 不猜
+  return {
+    pre: idx > 0 ? norm.slice(0, idx) : "",
+    gray: "",
+    head: MARK + norm.slice(idx, idx + key.length),
+    key,
+    rest: norm.slice(idx + key.length),
+  };
 }
 
 /**
@@ -524,6 +613,7 @@ function splitTextNode(tn, info, hex) {
 
   // 写 nodeValue 会再触发一次 characterData；此时已不带标记，会自然收敛
   if (tn.nodeValue !== info.rest) tn.nodeValue = info.rest;
+  tn._josiaTn = 1; // 标记：这是 colorize 负责收尾的规范文本节点（匹配高亮要保护它）
   return true;
 }
 
@@ -540,21 +630,81 @@ const LABEL_CACHE = new Map();
  *      因而不会出现重复色；
  *   ③ 都没有 → 纯名字主色兜底。
  */
+/**
+ * 解析彩色 📂 段的文本 = MARK + 文件夹键。🔴 与 parseLabel 的分工：
+ *   parseLabel 要求 mark 之后还有「/文件名」（拆分用）；
+ *   而 📂 段自身只是「📂 文件夹」（fallbackInfo 产物不带斜杠），
+ *   直接用 parseLabel 会返回 null ⇒ 每帧颜色刷新会漏。
+ */
+function parseSubSpan(text) {
+  const s = String(text == null ? "" : text);
+  if (s.indexOf(MARK) !== 0) return null;
+  const key = s
+    .slice(MARK.length)
+    .replace(/\\/g, "/")
+    .replace(/^\/+|\/+$/g, "")
+    .trim();
+  if (!key) return null;
+  return { head: s, key: key.toLowerCase(), rest: "" };
+}
+
 function colorizeContainer(el) {
   if (!el || !el.isConnected) return;
 
+  // ① 已拆分的彩色 📂 段：highlight 每帧会把当前值那一行的 span 涂成 HL_FG 白，
+  //    若不把文件夹色写回，下一轮 highlight 就会把白色当成文件夹色，底色退化成
+  //    纯白（白字白底整行看不见）。🔴 按 span 查而不按文本节点查——筛选时它的
+  //    文本被匹配高亮包在 span[data-josia-mh] 里，按文本节点查会漏。
+  const refresh = [];
+  try {
+    for (const sp of el.querySelectorAll('span[data-josia-mfc="1"]')) {
+      const info = parseSubSpan(sp.textContent || "");
+      if (info && info.head) refresh.push({ sp, info });
+    }
+  } catch (e) {}
+
+  // ② 未拆分的文本节点 → 拆分上色
   const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
   const entries = [];
   let node;
   while ((node = walker.nextNode())) {
     if (node.parentElement?.dataset?.josiaMfc) continue; // 我们自己插入的拆分段 → 跳过
-    const info = parseLabel(node.nodeValue);
+    // 匹配高亮的包装/黄 span 内部文本 → 跳过（兜底推导会误读碎片）
+    if (node.parentElement?.closest?.('span[data-josia-mh], span.josia-match')) continue;
+    // Vue 全量重写规范文本节点时，它前面的匹配高亮包装已是陈旧片段 → 先摘掉
+    if (node._josiaTn && node.nodeValue && /📂|💻/.test(node.nodeValue)) {
+      let sib = node.previousSibling;
+      while (sib && sib.nodeType === 1 && sib.dataset && sib.dataset.josiaMh) {
+        const prev = sib.previousSibling;
+        sib.remove();
+        sib = prev;
+      }
+    }
+    let info = parseLabel(node.nodeValue);
+    if (!info) {
+      // 兜底：仅 dark（combo）菜单、且条目还没有我们的拆分段结构时，才按
+      // dataset.value 推导。🔴 两条限定都必不可少：
+      //   · dark——右键/添加节点等原生菜单的条目也有 dataset.value；
+      //   · 无既有结构——已装饰条目的 rest 尾段可能含文件夹名子串
+      //     （Klein/Klein_9B_… 的尾段就有 klein），不限定会重复插 span 并把
+      //     正确大小写的标题冲成小写。
+      let entry = null;
+      try {
+        const root = node.parentElement?.closest?.(SEL_MENU_ROOT);
+        if (root && root.classList && root.classList.contains("dark")) {
+          const e = node.parentElement.closest(SEL_MENU);
+          if (e && !e.querySelector("span[data-josia-mfc]")) entry = e;
+        }
+      } catch (e) {}
+      if (entry) info = fallbackInfo(entry, node.nodeValue);
+    }
     if (info) entries.push({ tn: node, info });
   }
-  if (!entries.length) return;
+  if (!entries.length && !refresh.length) return;
 
   const keys = new Set();
   for (const e of entries) if (e.info.key) keys.add(e.info.key);
+  for (const r of refresh) if (r.info.key) keys.add(r.info.key);
   const multi = keys.size > 1; // 多个文件夹同框 ⇒ 这是一份真正的下拉列表
   let best = null;
   let bestScore = -1;
@@ -567,34 +717,471 @@ function colorizeContainer(el) {
     }
   }
 
+  // 颜色来源优先级（拆分与刷新共用）：
+  //   ① 容器里只有一个文件夹（已选值）→ 查 LABEL_CACHE，与列表那一行对齐；
+  //   ② 选一张「覆盖本容器 key 最多」的色表 —— 保证同一个下拉里的颜色来自同一张表，
+  //      因而不会出现重复色；
+  //   ③ 都没有 → 纯名字主色兜底。
+  const resolveHex = (info) => {
+    if (!info.head) return null;
+    const full = info.head + info.rest;
+    if (!multi) {
+      const cached = LABEL_CACHE.get(full); // ① 用户真的展开过列表 → 直接沿用那一行的颜色
+      if (cached) return cached;
+      // ② 没缓存（例如刚打开工作流、还没点开下拉）→ 找任一含该 key 的色表，
+      //    优先最近登记的（更可能是当前节点自己的那张表），避免退化成裸哈希色。
+      for (let i = MAPS.length - 1; i >= 0; i--) {
+        const c = MAPS[i].get(info.key);
+        if (c) return c;
+      }
+    }
+    if (best) {
+      const c = best.get(info.key); // ③ 同框多行 → 用覆盖键最多的表，天然去重
+      if (c) return c;
+    }
+    return primaryColor(info.key); // ④ 兜底
+  };
+
   for (const { tn, info } of entries) {
     let hex = null;
     if (info.head) {
-      const full = info.head + info.rest;
-      if (!multi) {
-        hex = LABEL_CACHE.get(full); // ① 用户真的展开过列表 → 直接沿用那一行的颜色
-        if (!hex) {
-          // ② 没缓存（例如刚打开工作流、还没点开下拉）→ 找任一含该 key 的色表，
-          //    优先最近登记的（更可能是当前节点自己的那张表），避免退化成裸哈希色。
-          for (let i = MAPS.length - 1; i >= 0; i--) {
-            const c = MAPS[i].get(info.key);
-            if (c) {
-              hex = c;
-              break;
-            }
-          }
-        }
-      }
-      if (!hex && best) hex = best.get(info.key); // ③ 同框多行 → 用覆盖键最多的表，天然去重
-      if (!hex) hex = primaryColor(info.key); // ④ 兜底
+      hex = resolveHex(info);
       if (multi) {
         if (LABEL_CACHE.size > 4096) LABEL_CACHE.clear();
-        LABEL_CACHE.set(full, hex);
+        LABEL_CACHE.set(info.head + info.rest, hex);
       }
     }
     try {
       splitTextNode(tn, info, hex);
     } catch (e) {}
+  }
+  for (const { sp, info } of refresh) {
+    const hex = resolveHex(info);
+    if (hex) sp.style.color = hex;
+  }
+}
+
+// ─────────────────────── 快速筛选（1.0 菜单 + 2.0 Vue） ───────────────────────
+const MATCH_BG = "#ffd60a"; // 匹配字符黄底
+const MATCH_FG = "#1f1f1f"; // 黄底上的深色字，保证对比度
+const FILTER_MIN_ITEMS = 4; // 条目 > 4 才出现筛选框（与官方阈值一致）
+
+/**
+ * 还原一个容器内所有匹配高亮。
+ * 黄 span → 纯文本；包装 span → 文本**并进后面的规范文本节点**后删除包装
+ * （规范节点是 Vue 持有的引用，绝不能拆走或 normalize 掉）；最后把我们自己的
+ * 拆分段容器内部相邻文本合并回去。幂等：调用后结构回到「colorize 之后的纯净态」。
+ */
+function clearMatchHighlight(root) {
+  if (!root?.querySelectorAll) return;
+  // ① 黄 span → 纯文本（原地，父容器不变）
+  for (const sp of root.querySelectorAll("span.josia-match")) {
+    sp.replaceWith(document.createTextNode(sp.textContent));
+  }
+  // ② 包装 span → 文本并进后续规范文本节点（Vue 引用保护），删掉包装
+  for (const wrap of root.querySelectorAll("span[data-josia-mh]")) {
+    let sib = wrap.nextSibling;
+    while (sib && sib.nodeType !== 3) sib = sib.nextSibling;
+    if (sib && sib._josiaTn) {
+      sib.nodeValue = wrap.textContent + sib.nodeValue;
+      wrap.remove();
+    } else {
+      wrap.replaceWith(document.createTextNode(wrap.textContent));
+    }
+  }
+  // ③ 我们自己的拆分段容器（sub/dir/pre）内部合并相邻文本节点
+  for (const sp of root.querySelectorAll("span[data-josia-mfc]")) {
+    try {
+      sp.normalize();
+    } catch (e) {}
+  }
+}
+
+/**
+ * 给容器内所有文本节点的匹配字符包黄底 span。
+ * 逐文本节点独立匹配（不跨 📂 分段）；规范文本节点（colorize 收尾的那个）只缩
+ * 成尾段、片段装进前置包装 span，保证 Vue 重写 / colorize 重入时语义不破。
+ */
+function applyMatchHighlight(root, query) {
+  if (!root || !query) {
+    clearMatchHighlight(root);
+    return;
+  }
+  clearMatchHighlight(root); // 先还原到纯净态，再重建（幂等）
+  const q = query.toLowerCase();
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const targets = [];
+  let node;
+  while ((node = walker.nextNode())) {
+    if (!node.nodeValue) continue;
+    targets.push(node);
+  }
+  for (const tn of targets) {
+    const text = tn.nodeValue;
+    const lower = text.toLowerCase();
+    if (lower.indexOf(q) < 0) continue;
+    // 切分为 [文本, 匹配, 文本, 匹配, …]
+    const parts = [];
+    let i = 0;
+    while (i < text.length) {
+      const j = lower.indexOf(q, i);
+      if (j < 0) {
+        parts.push(text.slice(i));
+        break;
+      }
+      if (j > i) parts.push(text.slice(i, j));
+      parts.push({ m: text.slice(j, j + q.length) });
+      i = j + q.length;
+    }
+    const makeMatch = (t) => {
+      const sp = document.createElement("span");
+      sp.className = "josia-match";
+      sp.textContent = t;
+      sp.style.backgroundColor = MATCH_BG;
+      sp.style.color = MATCH_FG;
+      return sp;
+    };
+    if (tn._josiaTn) {
+      // 规范节点：尾段留在原节点，其余装进前置包装 span（Vue 仍持有原节点引用）
+      const last = parts[parts.length - 1];
+      tn.nodeValue = last && typeof last === "string" ? last : "";
+      const wrap = document.createElement("span");
+      wrap.dataset.josiaMh = "1";
+      for (let k = 0; k < parts.length - 1; k++) {
+        const p = parts[k];
+        wrap.appendChild(
+          typeof p === "string" ? document.createTextNode(p) : makeMatch(p.m)
+        );
+      }
+      if (wrap.childNodes.length) tn.parentNode.insertBefore(wrap, tn);
+    } else {
+      // 普通文本节点（sub/dir/pre span 内部等）：包进包装 span 后就地替换。
+      // 🔴 必须带包装：裸文本/裸黄 span 会被 colorize 的兜底推导当候选误读。
+      const wrap = document.createElement("span");
+      wrap.dataset.josiaMh = "1";
+      for (const p of parts) {
+        wrap.appendChild(
+          typeof p === "string" ? document.createTextNode(p) : makeMatch(p.m)
+        );
+      }
+      tn.parentNode.replaceChild(wrap, tn);
+    }
+  }
+}
+
+/** 1.0 菜单：底部/顶部溢出视口时把菜单拉回来（照官方 contextMenuFilter 的算法） */
+function repositionMenu(root) {
+  try {
+    const r = root.getBoundingClientRect();
+    const vh = window.innerHeight || document.documentElement.clientHeight;
+    if (r.bottom > vh - 8) {
+      root.style.top = Math.max(8, vh - r.height - 8) + "px";
+    }
+    if (r.top < 0) root.style.top = "8px";
+  } catch (e) {}
+}
+
+/**
+ * 给 1.0 dark 菜单装筛选输入框（条目 > FILTER_MIN_ITEMS 才装）。
+ * 官方原生筛选框（非着色 combo 会有）先移除——它的方向键逻辑会把选中行涂成
+ * 灰底，和我们的彩底选中高亮打架；统一用我们这套（筛选 + 黄匹配 + 键盘）。
+ */
+function installMenuFilter(ctx, root) {
+  if (root.querySelector("input")) return;
+  const items = [...root.querySelectorAll(SEL_MENU)];
+  if (items.length <= FILTER_MIN_ITEMS) return;
+
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = `${NATIVE_FILTER_CLASS} ${OUR_FILTER_CLASS}`;
+  input.placeholder = "筛选…";
+  input.spellcheck = false;
+  input.setAttribute("data-josia-mfc-filter", "1");
+  root.prepend(input);
+
+  let visible = items.slice();
+  let cursor = -1;
+
+  const applyCursor = () => {
+    for (const it of items) it.style.outline = "";
+    if (cursor >= 0 && items[cursor]) {
+      items[cursor].style.outline = "1px solid rgba(255,255,255,.9)";
+      items[cursor].style.outlineOffset = "-1px";
+      try {
+        items[cursor].scrollIntoView({ block: "nearest" });
+      } catch (e) {}
+    }
+  };
+  const stepCursor = (dir) => {
+    if (!visible.length) {
+      cursor = -1;
+      applyCursor();
+      return;
+    }
+    let i = cursor < 0 ? (dir > 0 ? items.length - 1 : 0) : cursor;
+    for (let k = 0; k < items.length; k++) {
+      i = (i + dir + items.length) % items.length;
+      if (visible.indexOf(items[i]) >= 0) {
+        cursor = i;
+        break;
+      }
+    }
+    applyCursor();
+  };
+
+  // 初始光标落在「当前值」那一行（筛选后也优先可见的当前值）
+  const cur = root.dataset.josiaCur;
+  if (cur !== undefined) {
+    const i = items.findIndex((e) => e.dataset.value === cur);
+    if (i >= 0) cursor = i;
+  }
+  if (cursor < 0 && visible.length) cursor = items.indexOf(visible[0]);
+
+  input.addEventListener("input", () => {
+    const q = input.value.trim().toLowerCase();
+    visible = [];
+    for (const it of items) {
+      const show = !q || (it.textContent || "").toLowerCase().indexOf(q) >= 0;
+      it.style.display = show ? "" : "none";
+      if (show) visible.push(it);
+    }
+    cursor = visible.length ? items.indexOf(visible[0]) : -1;
+    applyCursor();
+    applyMatchHighlight(root, q);
+    repositionMenu(root);
+  });
+
+  input.addEventListener("keydown", (ev) => {
+    switch (ev.key) {
+      case "ArrowDown":
+        ev.preventDefault();
+        stepCursor(1);
+        break;
+      case "ArrowUp":
+        ev.preventDefault();
+        stepCursor(-1);
+        break;
+      case "Enter":
+        ev.preventDefault();
+        if (cursor >= 0 && items[cursor]) items[cursor].click();
+        break;
+      case "Escape":
+        ev.preventDefault();
+        try {
+          ctx.close();
+        } catch (e) {}
+        break;
+      default:
+        break;
+    }
+  });
+
+  requestAnimationFrame(() => {
+    try {
+      input.focus({ preventScroll: true });
+    } catch (e) {}
+    repositionMenu(root);
+  });
+}
+
+/** 关闭筛选开关：摘掉已开菜单里的筛选框，还原条目显示与匹配高亮 */
+function clearAllFilters() {
+  try {
+    for (const root of document.querySelectorAll(SEL_MENU_ROOT)) {
+      const input = root.querySelector(`input.${OUR_FILTER_CLASS}`);
+      if (input) input.remove();
+      for (const it of root.querySelectorAll(SEL_MENU)) {
+        it.style.display = "";
+        it.style.outline = "";
+      }
+      clearMatchHighlight(root);
+    }
+    for (const ov of document.querySelectorAll(SEL_VUE_OVERLAY)) {
+      clearMatchHighlight(ov);
+    }
+  } catch (e) {}
+}
+
+// ─────────────────── 全局补丁：让高亮/筛选适配所有场景 ───────────────────
+/**
+ * 子图节点（以及一切「widget 对象会换」的场景）上，实例钩子随用随丢：
+ *   · SubgraphNode.widgets 是 getter，每次访问新建代理（SubgraphNode.ts L126-142）
+ *   · 画布点击 toConcreteWidget 再造临时实例（LGraphCanvas.ts L3111-3118）
+ * 所以改成两条与 widget 实例无关的全局通道：
+ *   ① 包 LGraphCanvas.prototype.processWidgetClick —— 画布上每次点 combo 都经过
+ *      它（代理也带 .value / .type），记录原始当前值；
+ *   ② 包 LiteGraph.ContextMenu 构造器 —— dark 菜单（仅 combo 用 className:'dark'）
+ *      建好后，用记录值写 dataset.josiaCur 并即时着色 + 高亮 + 装筛选框。
+ *      与官方核心扩展 contextMenuFilter 同一打法（它也是这么包的）。
+ */
+let _lastComboValue; // 最近一次画布 combo 点击的当前值
+let _lastComboAt = 0; // 记录时间（performance.now），超窗口视为陈旧
+const COMBO_RECORD_WINDOW = 1500;
+
+function patchCanvasWidgetClick() {
+  const LG = window.LiteGraph;
+  const Canvas = LG && LG.LGraphCanvas;
+  if (!Canvas || !Canvas.prototype || Canvas.prototype.__josiaMfcPWC) return;
+  const orig = Canvas.prototype.processWidgetClick;
+  if (typeof orig !== "function") return;
+  const wrapped = function (e, node, widget, pointer) {
+    const r = orig.apply(this, arguments);
+    try {
+      if (widget && widget.type === "combo") {
+        _lastComboValue = String(widget.value ?? "");
+        _lastComboAt = performance.now();
+      }
+    } catch (err) {}
+    return r;
+  };
+  wrapped.__josiaMfcPWC = true;
+  Canvas.prototype.processWidgetClick = wrapped;
+}
+
+function patchContextMenu() {
+  const LG = window.LiteGraph;
+  if (!LG || typeof LG.ContextMenu !== "function" || LG.ContextMenu.__josiaMfcCM) return;
+  const Orig = LG.ContextMenu;
+  function Patched(values, options) {
+    const ctx = new Orig(values, options);
+    try {
+      // className:'dark' 只有 combo 下拉用（ComboWidget.ts L153/L181）
+      if (options && options.className === "dark") onDarkMenu(ctx);
+    } catch (e) {}
+    return ctx;
+  }
+  Patched.prototype = Orig.prototype;
+  Patched.__josiaMfcCM = true;
+  LG.ContextMenu = Patched;
+}
+
+function onDarkMenu(ctx) {
+  const root = ctx && ctx.root;
+  if (!root) return;
+  try {
+    // 官方原生筛选框先移除（非着色 combo 会带上它），避免双输入框打架
+    const native = root.querySelector(`input.${NATIVE_FILTER_CLASS}`);
+    if (native) native.remove();
+  } catch (e) {}
+  // ComboWidget 建完菜单后同步 addItem；microtask 时机必然晚于整轮 onClick，
+  // 此时实例钩子（若装了）也已写好 dataset.josiaCur。
+  queueMicrotask(() => {
+    try {
+      if (root.isConnected) prepareDarkMenu(ctx, root);
+    } catch (e) {}
+  });
+}
+
+/** dark 菜单就绪：补装饰（动态值后到/克隆竞态自愈）→ 标记当前值 → 着色 → 高亮 → 装筛选框 */
+function prepareDarkMenu(ctx, root) {
+  let entries;
+  try {
+    entries = root.querySelectorAll(SEL_MENU);
+  } catch (e) {
+    return;
+  }
+  if (!entries || !entries.length) return;
+
+  applyAll(); // 自愈：onNodeCreated 时值还没到的 widget，现在补上着色包装
+  hookGraphNodeAdded(app.graph); // app.graph 可能已换过（切工作流/子图），补绑
+
+  if (root.dataset.josiaCur === undefined && _hlEnabled) {
+    const v = _lastComboValue;
+    // 双重校验：记录要新，且该值必须真是本菜单的某一条 ⇒ 杜绝误伤别的 dark 菜单
+    if (v !== undefined && performance.now() - _lastComboAt < COMBO_RECORD_WINDOW) {
+      for (const e of entries) {
+        if (e.dataset && e.dataset.value === v) {
+          root.dataset.josiaCur = v;
+          break;
+        }
+      }
+    }
+  }
+  if (_enabled) colorizeContainer(root); // 先上 📂 色，高亮才有底色可继承
+  if (_hlEnabled) highlightContainer(root);
+  if (_filterEnabled) installMenuFilter(ctx, root);
+}
+
+function installGlobalPatches() {
+  patchCanvasWidgetClick();
+  patchContextMenu();
+}
+
+/**
+ * 动态候选项后到 / 克隆 / 工作流加载的自愈：新增节点时补装饰（hook 事件而非轮询）。
+ * 必须链式保留前端自己的 onNodeAdded；app.graph 会随切工作流/进退子图更换，
+ * 每次 prepareDarkMenu（开下拉，低频）都检查补绑。
+ */
+function hookGraphNodeAdded(g) {
+  try {
+    if (!g || g.__josiaMfcNodeAdded) return;
+    const prev = typeof g.onNodeAdded === "function" ? g.onNodeAdded : null;
+    g.__josiaMfcNodeAdded = (node) => {
+      if (prev) {
+        try {
+          prev(node);
+        } catch (e) {}
+      }
+      requestAnimationFrame(() => {
+        try {
+          applyAll();
+        } catch (e) {}
+      });
+    };
+    g.onNodeAdded = g.__josiaMfcNodeAdded;
+  } catch (e) {}
+}
+
+// ─────────────────────────── 2.0 Vue 筛选增强 ───────────────────────────
+/** 给 Vue 下拉的官方搜索框绑一次 input 监听（幂等） */
+function bindVueSearch(overlay) {
+  try {
+    const input = overlay.querySelector(SEL_VUE_SEARCH);
+    if (!input || input.__josiaMfcBound) return;
+    input.__josiaMfcBound = true;
+    input.addEventListener("input", () => scheduleColorize());
+  } catch (e) {}
+}
+
+/**
+ * 每帧颜色/高亮收尾：Vue overlay 还要按官方搜索框的当前输入补黄底高亮
+ * （筛选本身官方 Combobox 已做，这里只增强匹配字符的黄色背景）；
+ * 1.0 菜单的黄匹配也要随每帧 colorize 重建（colorize 会重写 sub 段文本）。
+ */
+function applyVueFilterPass() {
+  for (const ov of document.querySelectorAll(SEL_VUE_OVERLAY)) {
+    if (!ov.isConnected) continue;
+    bindVueSearch(ov);
+    // 预标记选项标签的文本节点为「规范节点」：无子文件夹的选项从没被 colorize
+    // 处理过，不标记的话匹配高亮会直接换掉 Vue 持有的文本节点（引用失效）。
+    try {
+      for (const opt of ov.querySelectorAll(SEL_STATE_ITEM)) {
+        const host = opt.querySelector("span.truncate") || opt;
+        for (const c of host.childNodes) {
+          if (c.nodeType === 3 && c.nodeValue) c._josiaTn = 1;
+        }
+      }
+    } catch (e) {}
+    let q = "";
+    try {
+      const input = ov.querySelector(SEL_VUE_SEARCH);
+      q = input ? String(input.value || "").trim() : "";
+    } catch (e) {}
+    if (_filterEnabled && q) applyMatchHighlight(ov, q.toLowerCase());
+    else clearMatchHighlight(ov);
+  }
+}
+
+function applyCanvasFilterPass() {
+  for (const root of document.querySelectorAll(SEL_MENU_ROOT)) {
+    if (!root.isConnected) continue;
+    let input = null;
+    try {
+      input = root.querySelector(`input.${OUR_FILTER_CLASS}`);
+    } catch (e) {}
+    if (!input) continue;
+    const q = String(input.value || "").trim().toLowerCase();
+    applyMatchHighlight(root, q); // q 空时内部即 clear
   }
 }
 
@@ -605,9 +1192,16 @@ function scheduleColorize() {
   requestAnimationFrame(() => {
     _scheduled = false;
     try {
-      for (const el of document.querySelectorAll(SEL_SCAN)) {
+      // 🔴 扫「根」而不是「条目」：colorize 的取色要看同框所有条目才会选出
+      //    覆盖键最多的色表（multi/best），逐条目扫会把多行下拉当成单行，
+      //    每帧刷新时颜色可能和兄弟行不一致。
+      for (const el of document.querySelectorAll(SEL_SCAN_ROOT)) {
         if (_enabled) colorizeContainer(el); // 先上 📂 色，高亮才有底色可继承
         if (_hlEnabled) highlightContainer(el); // 再按选中态涂底/反白
+      }
+      if (_filterEnabled) {
+        applyVueFilterPass();
+        applyCanvasFilterPass();
       }
     } catch (e) {}
   });
@@ -616,14 +1210,21 @@ function scheduleColorize() {
 /** 这个新增/变更的节点值不值得管 —— 尽量廉价，避免给全局 UI 添负担 */
 function isInteresting(n) {
   if (!n) return false;
+  // 我们自己的匹配高亮结构（包装 span / 黄 span 及其内部文本）→ 不关，
+  // 否则 applyMatchHighlight 的每次重建都会再触发一轮调度，形成空转
   if (n.nodeType === 3) {
     const v = n.nodeValue;
-    return (
+    if (
       typeof v === "string" &&
-      (v.indexOf(MARK) >= 0 || v.indexOf(PARENT_MARK) >= 0)
-    );
+      (v.indexOf(MARK) >= 0 || v.indexOf(PARENT_MARK) >= 0) &&
+      !(n.parentElement?.closest?.('span[data-josia-mh], span.josia-match'))
+    ) {
+      return true;
+    }
+    return false;
   }
   if (n.nodeType !== 1) return false;
+  if (n.closest?.('span[data-josia-mh], span.josia-match')) return false;
   if (n.matches?.(SEL_SCAN)) return true;
   if (n.querySelector?.(SEL_SCAN)) return true;
   // reka-ui 的分批挂载：item 可能晚于 overlay 单独插入，此时要顺着祖先找回 overlay
@@ -634,8 +1235,9 @@ function installObserver() {
   if (!window.MutationObserver || window.__josiaMfcObserver) return;
   const start = () => {
     if (!document.body || window.__josiaMfcObserver) return;
+    installGlobalPatches(); // LiteGraph 此时必然就绪，补一次（幂等）
     const obs = new MutationObserver((records) => {
-      if (!_enabled && !_hlEnabled) return; // 两个开关都关才彻底歇工
+      if (!_enabled && !_hlEnabled && !_filterEnabled) return; // 三个开关都关才彻底歇工
       for (const r of records) {
         if (r.type === "characterData") {
           if (isInteresting(r.target)) return scheduleColorize();
@@ -726,6 +1328,25 @@ app.registerExtension({
         }
       },
     },
+    {
+      id: FILTER_SETTING_ID,
+      name: "下拉快速筛选",
+      type: "boolean",
+      defaultValue: true,
+      category: ["⚡️JosiaNodes", "下拉筛选"],
+      tooltip:
+        "下拉列表顶部出现筛选框，输入即筛选包含所输入字符的选项，" +
+        "匹配字符带黄色背景。方向键移动、回车选中、Esc 关闭。" +
+        "只影响显示，不改变实际取值。",
+      onChange: (v) => {
+        _filterEnabled = !!v;
+        if (_filterEnabled) {
+          scheduleColorize();
+        } else {
+          clearAllFilters();
+        }
+      },
+    },
   ],
 
   init() {
@@ -733,12 +1354,17 @@ app.registerExtension({
     if (v !== undefined && v !== null) _enabled = !!v;
     const hv = readSetting(HL_SETTING_ID);
     if (hv !== undefined && hv !== null) _hlEnabled = !!hv;
+    const fv = readSetting(FILTER_SETTING_ID);
+    if (fv !== undefined && fv !== null) _filterEnabled = !!fv;
+    installGlobalPatches();
     installObserver();
   },
 
   async setup() {
+    installGlobalPatches();
     installObserver();
     applyAll();
+    hookGraphNodeAdded(app.graph);
   },
 
   async beforeRegisterNodeDef(nodeType /*, nodeData */) {
@@ -746,7 +1372,7 @@ app.registerExtension({
     nodeType.prototype.onNodeCreated = function () {
       orig?.apply(this, arguments);
       const node = this;
-      if (!_enabled && !_hlEnabled) return; // 任一开关开着都要跑（高亮不依赖着色）
+      if (!_enabled && !_hlEnabled && !_filterEnabled) return; // 任一开关开着都要跑（高亮不依赖着色）
       const run = () => {
         if (!node.widgets) return;
         for (const w of node.widgets) decorateWidget(w);
