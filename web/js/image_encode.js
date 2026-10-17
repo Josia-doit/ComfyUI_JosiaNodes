@@ -317,49 +317,25 @@ function isPortWired(node, portName) {
 
 // 「图像」端口接线 ⇒ 灰化「选择图像」下拉（端口优先）
 function syncUploadCombo(node) {
-  const up = getWidget(node, "选择图像");
+  const up = getWidget(node, "image");
   if (!up) return;
-  up.disabled = isPortWired(node, "image");
+  up.disabled = isPortWired(node, "image_in");
 }
 
-/* ── 官方遮罩编辑器（MaskEditor）兼容桥 ─────────────────────────────────
- * 症状：在遮罩编辑器里画完保存，本节点预览更新了，但「选择图像」仍指向原文件
- *      ⇒ 后端按旧文件跑 ⇒ 「遮罩」输出恒为空。
- * 根因：官方保存链 writeImageWidgetValue（前端 imageWidgetAdapter.ts，1.53.6 实锤）
- *      硬编码只回写名为 "image" 的 widget，找不到就静默 return ——
- *      原生「加载图像」的控件恰好叫 image 所以正常；本节点叫「选择图像」⇒ 丢。
- * 修法：补一个隐藏影子 widget（名字必须是 image）接住回写：
- *   · serialize = false          ⇒ 不写入工作流（LGraphNode.serialiseWidgetValues）
- *   · options.serialize = false  ⇒ 不进执行 prompt（graphToPrompt）
- *   ⇒ 与 optional 的 image 输入端口、后端参数零交互，纯前端桥。
- *   · value 用访问器双向镜像「选择图像」：读＝下拉当前值；写＝剥掉 " [input]"
- *     注解后转发到下拉（MaskEditor 存的就是这个带 alpha 的新图 ⇒ 后端能拿到
- *     真遮罩；下拉换文件影子跟着变 ⇒ 下次打开编辑器续编的是新文件）。 */
-function installMaskEditorBridge(node) {
+// 把控件键名 image 显示成中文「选择图像」（官方遮罩编辑器要求控件键名必须是 image，
+// 但用户看到的不必是英文；借 widget.label 覆盖显示，不影响内部键名与遮罩编辑器的读写）。
+function ensureComboLabel(node) {
   try {
-    const combo = getWidget(node, "选择图像");
-    if (!combo || (node.widgets || []).some((w) => w && w.name === "image")) return;
-    const shadow = node.addWidget("text", "image", "", () => {}, { serialize: false });
-    shadow.hidden = true;
-    shadow.serialize = false;                               // 工作流持久化排除
-    if (shadow.options) shadow.options.serialize = false;   // 执行 prompt 排除
-    Object.defineProperty(shadow, "value", {
-      configurable: true,
-      get() { return combo.value; },
-      set(v) {
-        try {
-          if (typeof v !== "string" || !v) return;
-          const bare = String(v).replace(/\s*\[(input|output|temp)\]\s*$/, "");
-          if (!bare || bare === combo.value) return;
-          setWidgetValue(node, combo, bare);
-          try { if (combo.inputEl) combo.inputEl.value = bare; } catch (e) { /* 忽略 */ }
-          try { if (typeof combo.callback === "function") combo.callback.call(combo, bare); } catch (e) { /* 忽略 */ }
-          try { app.graph?.setDirtyCanvas(true, true); } catch (e) { /* 忽略 */ }
-        } catch (e) { /* 忽略 */ }
-      },
-    });
-  } catch (e) { /* 旧内核无此机制时忽略 */ }
+    const w = getWidget(node, "image");
+    if (w && w.label !== "选择图像") w.label = "选择图像";
+  } catch (e) { /* 忽略 */ }
 }
+
+/* ── 官方遮罩编辑器兼容 ───────────────────────────────────────────────
+ * 本节点把上传控件键名直接取为 "image"（见 INPUT_TYPES），与官方「加载图像」一致，
+ * 所以官方 readImageWidgetValue / writeImageWidgetValue 能直接读写本控件、
+ * WidgetValueStore 跟踪的是真实 live 值 —— 遮罩编辑器开箱即用，无需影子桥。
+ * 中文显示名「选择图像」由 ensureComboLabel 借 widget.label 设置。 */
 
 function syncAll(node) {
   const st = getWidget(node, "缩放类型");
@@ -411,8 +387,8 @@ app.registerExtension({
       installGraphHooks(this);
       // 借 upload 按钮的绘制链补「输出分辨率」那一行
       try { patchUploadDraw(this); } catch (e) { /* 忽略 */ }
-      // 挂官方遮罩编辑器兼容桥（保存后回写「选择图像」）
-      try { installMaskEditorBridge(this); } catch (e) { /* 忽略 */ }
+      // 官方遮罩编辑器开箱即用（控件键名已是 image）；补中文显示名
+      try { ensureComboLabel(this); } catch (e) { /* 忽略 */ }
       return r;
     };
 
@@ -422,7 +398,7 @@ app.registerExtension({
       syncAll(this);
       // 载入工作流后 widget 是重建的，要重新挂一次
       try { patchUploadDraw(this); } catch (e) { /* 忽略 */ }
-      try { installMaskEditorBridge(this); } catch (e) { /* 忽略 */ }
+      try { ensureComboLabel(this); } catch (e) { /* 忽略 */ }
       return r;
     };
 

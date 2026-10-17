@@ -1395,7 +1395,7 @@ app.registerExtension({
       name: "模型子文件夹着色",
       type: "boolean",
       defaultValue: true,
-      category: ["⚡️JosiaNodes", "模型列表"],
+      category: ["⚡️JosiaNodes", "下拉列表增强"],
       tooltip:
         "在所有模型/文件下拉里，给子文件夹加 📂 前缀，并按文件夹名分配一个稳定颜色。" +
         "同名文件夹永远同色；同一个下拉内不会出现重复颜色。只影响显示，不改变实际路径。",
@@ -1419,7 +1419,7 @@ app.registerExtension({
       name: "下拉已选项高亮",
       type: "boolean",
       defaultValue: true,
-      category: ["⚡️JosiaNodes", "下拉高亮"],
+      category: ["⚡️JosiaNodes", "下拉列表增强"],
       tooltip:
         "在所有下拉列表里，把「当前已选中」的那一项涂成彩色底 + 白色文字。" +
         "底色跟随该行的 📂 子文件夹颜色；没有子文件夹时用固定强调色。" +
@@ -1443,7 +1443,7 @@ app.registerExtension({
       name: "下拉快速筛选",
       type: "boolean",
       defaultValue: true,
-      category: ["⚡️JosiaNodes", "下拉筛选"],
+      category: ["⚡️JosiaNodes", "下拉列表增强"],
       tooltip:
         "下拉列表顶部出现筛选框，输入即筛选包含所输入字符的选项，" +
         "匹配字符带黄色背景。方向键移动、回车选中、Esc 关闭。" +
@@ -1462,7 +1462,7 @@ app.registerExtension({
       name: "下拉菜单智能定位",
       type: "boolean",
       defaultValue: true,
-      category: ["⚡️JosiaNodes", "下拉菜单"],
+      category: ["⚡️JosiaNodes", "下拉列表增强"],
       tooltip:
         "下拉菜单高度不超过「最大高度」，节点靠近屏幕底部时菜单整体向上弹出，" +
         "不再被压成一小条。关闭后完全跟随官方默认行为（80vh 限高、可能被压短）。",
@@ -1482,7 +1482,7 @@ app.registerExtension({
       name: "下拉菜单最大高度",
       type: "number",
       defaultValue: 0,
-      category: ["⚡️JosiaNodes", "下拉菜单"],
+      category: ["⚡️JosiaNodes", "下拉列表增强"],
       tooltip:
         "像素值。0 = 按屏幕高度自动（2K 屏约 800、1K 屏约 500、更小屏约 340）；" +
         "填具体数值则所有下拉都按这个高度上限弹出（空间不足时自动向上翻）。",

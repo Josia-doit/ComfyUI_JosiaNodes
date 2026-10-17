@@ -5,7 +5,7 @@ Josia 图像编码节点
 
 核心特性：
 1. 图像来源（二选一，端口优先）
-   · 「选择图像」下拉：原生上传按钮 + 原生图片预览（image_upload 机制，与加载图像一致），
+   · 「选择图像」下拉（内部键名 image）：原生上传按钮 + 原生图片预览（image_upload 机制，与加载图像一致），
      文件落在 input 目录，后端按文件名加载（复用原生 LoadImage.load_image：含 alpha 转遮罩）。
    · 「图像」输入端口：接上游图像，直接透传（端口接线时上传下拉自动灰化）。
    · 遮罩：优先用「遮罩」端口；没接端口且上传图带 alpha 通道时，用原生逻辑转出遮罩。
@@ -89,17 +89,18 @@ CHANNEL_TOOLTIP = (
     "• 自动 ＝ 上游给几通道就透传几通道：三通道进 ⇒ 三通道出，四通道进 ⇒ 四通道出。最省心。\n"
     "• RGB ＝ 强制三通道（RGB）。第四通道（透明度）不跟图像走，改成从「遮罩」端口出来，"
     "遮罩越亮＝越透明（与原生加载图像一致的口径）。\n"
-    "• RGBA ＝ 强制四通道（RGB + A）：第四通道按下面顺序取透明度 —— ①「遮罩」端口接线了就用它合并"
-    "（alpha ＝ 1 − 遮罩，遮罩亮＝透明，等于把原生「合并图像Alpha」内置进来）；"
-    "② 没接线就用上传图自带的透明度；③ 都没有或上游是三通道就补成全不透明。"
-    "「遮罩」输出端口照旧会给出一路（遮罩亮＝越透明）。\n"
+    "• RGBA ＝ 强制四通道（RGB + A），要**透明出图**就用它。第四通道的透明度按下面顺序取 —— "
+    "① 从「遮罩」**输入**端口喂了**外部**遮罩，就把它合并进 alpha（alpha ＝ 1 − 遮罩，遮罩亮＝透明，"
+    "等于把原生「合并图像Alpha」内置进来）；"
+    "② 没喂外部遮罩时，图像自带的透明度（上传 PNG 的 alpha / 遮罩编辑器烘焙的透明度 / 上游四通道）原样保留；"
+    "③ 什么透明度来源都没有 ⇒ 补一路全不透明。\n"
+    "注：「遮罩」输出端口在任何模式下都会给出一路（遮罩亮＝越透明），与图像通道数无关。\n"
     "说明：上游是灰度等其它通道数时一律按三通道处理；三种模式下喂给 VAE 编码的都只有前三通道。\n"
     "透明度说明：完全透明的像素在预览里一律按白色呈现（预览只画 RGB，PNG 里透明区的 RGB 常是 0，"
     "直接透出去会被渲染成黑块）；半透明像素的颜色照旧，真正的透明信息在第四通道或「遮罩」端口。"
 )
 # Latent 在 RETURN_TYPES 中的下标（图像=0 / 遮罩=1 / Latent=2）；用于判定该输出是否连接
 LATENT_OUTPUT_SLOT = 2
-MASK_OUTPUT_SLOT = 1
 
 
 # ===================== 下拉候选 =====================
@@ -201,7 +202,7 @@ def _read_alpha_channel(path):
 
 
 def _load_selected_image(name):
-    """按「选择图像」下拉里的文件名加载 (IMAGE, MASK, ALPHA)。
+    """按「选择图像」下拉（内部键名 image）里的文件名加载 (IMAGE, MASK, ALPHA)。
 
     优先复用原生 LoadImage.load_image（alpha 自动转遮罩、动图支持）；
     拿不到原生类时用 PIL 兜底（RGB + alpha 通道转遮罩，语义与原生一致）。
@@ -308,8 +309,11 @@ class JosiaImageEncode:
                                "• 一旦给「VAE」端口接了线，本项自动灰化 —— 接线优先。",
                 }),
 
-                # —— 选择图像（置底）：原生上传按钮 + 原生预览（image_upload 机制，按钮紧随其下）——
-                "选择图像": (_input_image_choices(), {
+                # —— image（置底，显示名「选择图像」）：原生上传按钮 + 原生预览（image_upload 机制）——
+                #     🔴 控件键名必须是 "image"：官方遮罩编辑器 readImageWidgetValue 硬编码只读名为 image 的
+                #        控件，键名改成别的会让遮罩编辑器加载到占位符 → 闪一下打不开。
+                #        中文显示名「选择图像」由前端借 widget.label 设置，不影响内部键名。
+                "image": (_input_image_choices(), {
                     "default": IMAGE_PLACEHOLDER,
                     "image_upload": True,  # 🔴 原生上传机制开关：前端据此注入上传按钮 + 图片预览（置于本 combo 下方）
                     "tooltip": "从 input 目录选择图像，或点下方「选择要上传的文件」按钮上传。\n"
@@ -319,8 +323,9 @@ class JosiaImageEncode:
                 }),
             },
             "optional": {
-                # 🔴 端口名用英文键（避免前端 addInput 的中文名坑），中文走 display_name
-                "image": ("IMAGE", {"display_name": "图像"}),
+                # 🔴 端口键名用英文 image_in：与上面「选择图像」控件键 image 撞名会让 ComfyUI 把两者
+                #    合并成一个函数参数导致串值；中文显示名仍走 display_name。
+                "image_in": ("IMAGE", {"display_name": "图像"}),
                 "mask": ("MASK", {"display_name": "遮罩"}),
                 "vae": ("VAE", {"display_name": "VAE"}),
             },
@@ -429,7 +434,7 @@ class JosiaImageEncode:
         return JosiaImageEncode._output_connected(unique_id, prompt, LATENT_OUTPUT_SLOT)
 
     @classmethod
-    def IS_CHANGED(cls, 缩放类型="按系数缩放", 通道切换=CHANNEL_MODE_DEFAULT, 选择图像="", **kwargs):
+    def IS_CHANGED(cls, 缩放类型="按系数缩放", 通道切换=CHANNEL_MODE_DEFAULT, image="", **kwargs):
         """上传文件内容变化时重新执行（口径与原生加载图像一致：文件 sha256）。
 
         「选择图像」为空（用端口 / 没图）时返回常量，交给上游连线变化驱动。
@@ -438,10 +443,10 @@ class JosiaImageEncode:
         漏掉的话前端判定「输入没变」⇒ 不重跑 ⇒ 改了开关看不出效果。
         """
         key = f"{缩放类型}|{通道切换}"
-        if not 选择图像 or 选择图像 in EMPTY_IMAGE_SENTINELS:
+        if not image or image in EMPTY_IMAGE_SENTINELS:
             return key
         try:
-            path = folder_paths.get_annotated_filepath(选择图像)
+            path = folder_paths.get_annotated_filepath(image)
             if not path or not os.path.isfile(path):
                 return float("nan")
             m = hashlib.sha256()
@@ -451,17 +456,37 @@ class JosiaImageEncode:
         except Exception:
             return float("nan")
 
+    @classmethod
+    def VALIDATE_INPUTS(cls, image, **kwargs):
+        """放行「遮罩编辑器」现场回写的 painted-mask 文件。
+
+        🔴 关键：把 `image` 列进 VALIDATE_INPUTS 形参后，ComfyUI 的 `execution.validate_inputs`
+        会**跳过**该输入的默认「候选列表白名单」校验（execution.py:1019 的 `if x not in
+        validate_function_inputs` 分支），改由本方法用 `exists_annotated_filepath` 判定文件是否真实存在。
+
+        否则遮罩编辑器保存时回写的 `clipspace-painted-masked-*.png [input]` 落在 input 目录、
+        却不在 `_input_image_choices()` 的静态候选里 ⇒ `value_not_in_list` ⇒ 整节点跑不起来
+        （原生「加载图像」正是靠同样的 VALIDATE_INPUTS 让遮罩编辑器回写值通过校验的）。
+
+        空选项（未选图 / 用端口）一律放行 —— 是否真的产出由 encode 内的快速略过逻辑兜底。
+        """
+        if not image or image in EMPTY_IMAGE_SENTINELS:
+            return True
+        if not folder_paths.exists_annotated_filepath(image):
+            return f"无效的图像文件：{image}"
+        return True
+
     # ============================================================
     # 主函数
     # ============================================================
     def encode(self, 缩放类型, 缩放系数, 长边尺寸, 短边尺寸, 百万像素, 对齐倍数, 通道切换=CHANNEL_MODE_DEFAULT,
-                VAE模型=VAE_PLACEHOLDER, 选择图像=IMAGE_PLACEHOLDER,
-                image=None, mask=None, vae=None, unique_id=None, prompt=None):
+                VAE模型=VAE_PLACEHOLDER, image=IMAGE_PLACEHOLDER,
+                image_in=None, mask=None, vae=None, unique_id=None, prompt=None):
         # 0) 快速略过：无任何图像来源（未选图 + 未接图像端口）⇒ 跳过 VAE 解析 / 全图扫描 / 大张量分配，
         #    直接返回极小占位（0.01 秒级），用于工作流里多颗参考节点只启用其一的场景。
         #    ⚠️ 仍返回合法的「图像 / 遮罩 / Latent」三元组（框架要求固定返回结构），
         #       但内容是 8×8 的占位，不会触发 VAE 编码、不会占用显存。
-        if image is None and 选择图像 in EMPTY_IMAGE_SENTINELS:
+        if image_in is None and image in EMPTY_IMAGE_SENTINELS:
             _ch = 4 if 通道切换 == "RGBA" else 3
             img_result = torch.zeros((1, 8, 8, _ch), dtype=torch.float32)
             mask_result = torch.ones((1, 8, 8), dtype=torch.float32)
@@ -488,26 +513,33 @@ class JosiaImageEncode:
                     "或接「Josia模型加载」节点、或直接给「VAE」端口连线。"
                 )
 
-        # 2.5) 「遮罩」输出端口有没有被连：连上了就按原生「合并图像Alpha」的口径，
-        #      在 RGBA 模式里把遮罩合并成第四通道（遮罩亮＝透明 ⇒ alpha = 1 − 遮罩），
-        #      这样一条链里就能完成合并，不必再接一颗原生节点。
-        mask_connected = (
-            JosiaImageEncode._output_connected(unique_id, prompt, MASK_OUTPUT_SLOT) is True
-        )
+        # 2.5) 判定「遮罩」**输入**端口是否接线（外部遮罩）：
+        #      仅当用户显式从「遮罩」端口喂入**外部**遮罩时，才在 RGBA 模式把它合并进
+        #      输出图像的第四通道（alpha = 1 − 遮罩）。
+        #      🔴 必须是「输入端口」而非「输出端口」：上传图 / 遮罩编辑器烘焙进 alpha 的遮罩
+        #        属于图像自身的 alpha；在「自动 / RGB」模式下它按本节点契约转成「遮罩」端口输出、图像本体不透明，
+        #        只有在「RGBA」模式下才保留进输出第四通道（严格四通道）。若按「输出端口连了下游」来合并，
+        #        会在非 RGBA 模式下把图像自身 alpha 反算回 alpha ⇒ 画过处又变透明（抠图）。
+        #      `mask` 是函数入参（端口接线时即张量、未接时 None），在此捕获不会受下方
+        #      「mask 为 None 时回退到上传图派生遮罩」的覆盖影响。
+        mask_input_wired = mask is not None
 
         # 3) 图像来源：端口 > 上传文件（端口没接时才走上传）
         uploaded_mask = None
         up_alpha = None
-        if image is None and 选择图像 and 选择图像 not in EMPTY_IMAGE_SENTINELS:
-            image, uploaded_mask, up_alpha = _load_selected_image(选择图像)
+        img = None                                  # 实际图像张量（端口或上传二选一）
+        if image_in is not None:
+            img = image_in
+        elif image and image not in EMPTY_IMAGE_SENTINELS:
+            img, uploaded_mask, up_alpha = _load_selected_image(image)
             if up_alpha is not None:
                 up_alpha = up_alpha[None]       # 统一成 (1,H,W)，循环里再按批次下标取
             if mask is None:
                 mask = uploaded_mask
 
         # 4) 原始尺寸（来自图像，其次遮罩，都没有则默认 1024×1024 透传）
-        if image is not None:
-            orig_h, orig_w = image.shape[1], image.shape[2]
+        if img is not None:
+            orig_h, orig_w = img.shape[1], img.shape[2]
         elif mask is not None:
             orig_h, orig_w = mask.shape[1], mask.shape[2]
         else:
@@ -527,25 +559,29 @@ class JosiaImageEncode:
             final_w, final_h = max(32, final_w), max(32, final_h)
 
         # 5.5) 通道策略（「通道切换」开关）
-        #   自动 ＝ 上游给几通道就透传几通道（三通道出 RGB、四通道出 RGBA）；
+        #   自动 ＝ 上游「图像」端口接线 ⇒ 严格透传（三通道出 RGB、四通道出 RGBA）；
+        #          仅走上传文件 ⇒ 原生加载图像口径（三通道 RGB + 遮罩，alpha 不进图像）。
         #   RGB  ＝ 强制三通道，第四通道（透明度）不跟图像走、改从「遮罩」端口出来；
-        #   RGBA ＝ 强制四通道（上游只有三通道时补一路「全不透明」的 alpha）。
+        #   RGBA ＝ 强制四通道：透明度按优先级取 —— ① 外部遮罩输入端口（alpha = 1 − 遮罩）
+        #          ② 图像自带透明度（上传文件 / 上游四通道）原样保留 ③ 都没有 ⇒ 补全不透明。
         #   🔴 遮罩一路恒等输出，所以这里的三/四通道只描述「图像」本身，合计是 3+1 / 4+1。
-        src_ch = int(image.shape[-1]) if (image is not None and image.ndim == 4) else 3
+        src_ch = int(img.shape[-1]) if (img is not None and img.ndim == 4) else 3
         if 通道切换 == "RGB":
             out_ch = 3
         elif 通道切换 == "RGBA":
             out_ch = 4
         else:
-            out_ch = src_ch if src_ch in (3, 4) else 3
+            # 自动：上游「图像」端口接线 ⇒ 严格透传（三通道出 RGB、四通道出 RGBA）；
+            #       仅走上传文件 ⇒ 原生加载图像口径（出三通道 RGB + 遮罩，alpha 不进图像）
+            out_ch = src_ch if (image_in is not None and src_ch in (3, 4)) else 3
 
         # 6) 批量处理图像 + 遮罩
         out_images = []
         out_masks = []
-        if image is not None:
-            batch = image.shape[0]
+        if img is not None:
+            batch = img.shape[0]
             for i in range(batch):
-                t = image[i].cpu().numpy()
+                t = img[i].cpu().numpy()
                 # 🔴 兜底：灰度 / 单通道等异常维度补齐成 RGB 再往下走（正常 IMAGE 端口只给 3、4 通道）
                 #    先补维度（2D ⇒ (H,W,1)），再复制通道；顺序反了会在 RGBA 分支拼 alpha 时炸维度。
                 if t.ndim == 2:
@@ -563,25 +599,38 @@ class JosiaImageEncode:
                     src_alpha = t[..., 3]                   # 上游直接给了四通道
                 else:
                     src_alpha = None
-                if src_alpha is not None:
+                # 🔴 是否把图像自带透明度「保留」进输出第四通道（RGBA 模式）：
+                #   RGBA ＝ 严格四通道输出 ⇒ 上传文件 / 上游自带的 alpha 原样保留（要透明出图就用 RGBA）；
+                #   自动 ＝ 上传文件走原生加载图像口径（图像不透明、透明度走「遮罩」端口），
+                #          上游四通道仍严格透传；RGB ＝ 三通道，alpha 不进图像。
+                _has_up_alpha = (up_alpha is not None and i < up_alpha.shape[0])
+                preserve_alpha = (out_ch == 4 and (_has_up_alpha or t.shape[-1] >= 4))
+                if preserve_alpha and src_alpha is not None:
+                    # 仅保留透明度的情形才做「透明区填白」：近全透明的像素 RGB 常被 PNG 写成 0 ⇒
+                    # 预览渲染成黑块，这里把 RGB 刷白（透明度仍在第四通道，只影响预览底色，不污染真实透明）。
+                    # ⚠️ 文件 alpha 当遮罩的情形【不】填白 —— 那块 RGB 是原始图像内容，填白会毁掉原图。
                     transparent_px = (
                         np.clip(src_alpha, 0.0, 1.0) * 255.0
                     ) < TRANSPARENT_ALPHA_MAX
                     if transparent_px.any():
                         rgb[transparent_px] = TRANSPARENT_FILL_VALUE
                 if out_ch == 4:
-                    if mask_connected and mask is not None and i < mask.shape[0]:
-                        # 「遮罩」端口接线 ⇒ 内置合并 RGBA：alpha = 1 − 遮罩（遮罩亮＝透明）
+                    if mask_input_wired and mask is not None and i < mask.shape[0]:
+                        # 「遮罩」**输入**端口喂了外部遮罩 ⇒ 内置合并 RGBA：alpha = 1 − 遮罩（遮罩亮＝透明）
                         alpha = (
                             np.clip(1.0 - mask[i].cpu().numpy(), 0.0, 1.0) * 255.0 + 0.5
                         ).astype(np.uint8)[..., None]
-                    elif src_alpha is not None:   # 有真实透明度（上传文件自带 / 上游第四通道）⇒ 原样带上
-                        alpha = (np.clip(src_alpha, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)[..., None]
-                    else:                         # 完全没有透明信息 ⇒ 补一路「全不透明」的 alpha
+                    elif preserve_alpha and src_alpha is not None:
+                        # 图像自带透明度原样保留（上游四通道透传 / RGBA 模式上传文件的 alpha）
+                        alpha = (
+                            np.clip(src_alpha, 0.0, 1.0) * 255.0 + 0.5
+                        ).astype(np.uint8)[..., None]
+                    else:
+                        # 没有任何透明度来源（外部遮罩 / 自带 alpha 都没有）⇒ 补一路全不透明
                         alpha = np.full(rgb.shape[:2] + (1,), 255, dtype=np.uint8)
                     pil_img = Image.fromarray(np.concatenate([rgb, alpha], axis=-1))
                 else:
-                    pil_img = Image.fromarray(rgb)   # 强制三通道：alpha 不跟图像走
+                    pil_img = Image.fromarray(rgb)   # 强制三通道：alpha 不跟图像走，改从「遮罩」端口出来
                 pil_mask = None
                 if mask is not None and i < mask.shape[0]:
                     mt = mask[i].cpu().numpy()
