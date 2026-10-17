@@ -2035,9 +2035,15 @@ app.registerExtension({
             return value !== USE_JOSIA_VAE;
           });
         },
+        // 记录「用户手动选过」：一旦手动改过（含改回请选择模型），后续刷新不再自动强切，
+        // 持久化到 node.properties（重载工作流后依然尊重用户选择）。
+        onChange: () => {
+          try { if (!node.properties) node.properties = {}; node.properties._jmsVae1Chosen = true; } catch (e) {}
+          node._jmsRefresh?.();
+        },
       });
       dropV1.el.title =
-        "解码主 VAE。\n• 「使用Josia模型加载VAE」= 复用「Josia模型加载」节点载入的 VAE，无需连线（需手动选择；不选则不使用模型加载节点的 VAE）。\n" +
+        "解码主 VAE。\n• 「使用Josia模型加载VAE」= 复用「Josia模型加载」节点载入的 VAE，无需连线；检测到该节点时会自动默认选中，也可手动改选其它模型或「请选择模型…」关闭。\n" +
         "• 也可手动选 models/vae 里的模型。\n• 给「Video_VAE」端口接线后本项自动灰化（接线优先）。";
       // 🔴 同一行等分撑满：flex 基准 220px（够放下「使用Josia模型加载VAE」整串，不再挤成省略号）。
       //    两个下拉基准和 > 行宽时，.jms-row 的 flex-wrap 会把它们分到两行，各自撑满。
@@ -2056,6 +2062,11 @@ app.registerExtension({
             const value = (v && typeof v === "object") ? v.value : v;
             return value !== USE_JOSIA_VAE;
           });
+        },
+        // 记录「用户手动选过」（与 VAE1 同语义）
+        onChange: () => {
+          try { if (!node.properties) node.properties = {}; node.properties._jmsVae2Chosen = true; } catch (e) {}
+          node._jmsRefresh?.();
         },
       });
       dropV2.el.title =
@@ -2258,22 +2269,40 @@ app.registerExtension({
         return metaOk.image.size ? metaOk.image.has(f) : true;
       }
 
-      // 识别 Josia 模型加载节点：检测到则一次性自动切 VAE1 到「使用Josia模型加载VAE」；
-      // 节点消失则去掉该选项并把已选中的降级为占位符。
-      // 🔴 判定＝「图里有该节点」或「注册表里已有 VAE」（见 josiaVaePresent），与创建先后无关。
-      // VAE2 的候选里有没有「使用Josia模型加载VAE」这一项（后端 _vae2_choices 决定）
+      // 识别 Josia 模型加载节点：检测到则「一次性」默认把 VAE1/VAE2 切到「使用Josia模型加载VAE」；
+      // 与创建先后无关（模型加载先建或后建都生效）。用户一旦手动改过下拉（含改回「请选择模型…」），
+      // 后续刷新永远尊重其选择，不再强切。模型加载节点被移除时，联动项回落占位符、并允许下次重新默认。
+      // 🔴 判定＝「图里有该节点」或「注册表里已有 VAE」（见 josiaVaePresent）。
       function syncJosiaVae() {
         const josiaPresent = josiaVaePresent();
         const v1 = String(W["VAE1"]?.value ?? "");
         const v2 = String(W["VAE2"]?.value ?? "");
-        // 🔴🔴 2026-10-07 修（哥哥反馈）：绝不自动切换。是否使用「Josia模型加载」联动完全由用户手动
-        //    决定 —— 只有用户**自己**在下拉里选了「使用Josia模型加载VAE」时才绑定模型加载节点；选了
-        //    真实 VAE 或停在默认「🎨 请选择模型…」都不要碰模型加载节点，也不要强行用模型加载来加载模型。
-        //    图里有模型加载节点时，下拉里保留该项（可手动选）；模型加载节点被移除时，已选中的联动项回落占位符。
         if (!josiaPresent) {
-          if (v1 === USE_JOSIA_VAE) setWidgetValue(node, W["VAE1"], VAE1_PLACEHOLDER);
-          if (v2 === USE_JOSIA_VAE) setWidgetValue(node, W["VAE2"], PLACEHOLDER_VAE2);
+          // 模型加载节点移除：已选中的联动项降级为占位符，并清掉 chosen 标记，
+          // 这样重新加回模型加载节点时会再次默认选中；用户手动选的真实 VAE 不受影响（其 chosen 仍为 true）。
+          if (v1 === USE_JOSIA_VAE) {
+            setWidgetValue(node, W["VAE1"], VAE1_PLACEHOLDER);
+            try { if (node.properties) node.properties._jmsVae1Chosen = false; } catch (e) {}
+          }
+          if (v2 === USE_JOSIA_VAE) {
+            setWidgetValue(node, W["VAE2"], PLACEHOLDER_VAE2);
+            try { if (node.properties) node.properties._jmsVae2Chosen = false; } catch (e) {}
+          }
+          node._jmsVaeAutoDone = false;
+          return;
         }
+        // 模型加载节点在位：本「默认 episode」已处理过就直接返回（尊重之后的手动改动）。
+        if (node._jmsVaeAutoDone) return;
+        const c1 = !!(node.properties && node.properties._jmsVae1Chosen);
+        const c2 = !!(node.properties && node.properties._jmsVae2Chosen);
+        if (!c1 && (v1 === VAE1_PLACEHOLDER || v1 === "")) {
+          setWidgetValue(node, W["VAE1"], USE_JOSIA_VAE);
+        }
+        if (!c2 && v2 === PLACEHOLDER_VAE2) {
+          setWidgetValue(node, W["VAE2"], USE_JOSIA_VAE);
+        }
+        // 标记本 episode 已默认处理（避免每次刷新重复强切；用户手动改过后 chosen 标记会进一步拦住）。
+        if (v1 === USE_JOSIA_VAE || v2 === USE_JOSIA_VAE) node._jmsVaeAutoDone = true;
       }
 
       function refreshInner() {
