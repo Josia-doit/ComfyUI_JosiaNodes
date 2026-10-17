@@ -264,7 +264,7 @@ def _read_latent_file(path):
     ⇒ 报「Weights only load failed … WeightsUnpickler error: Unsupported operand 184」
     （传给 load_torch_file 的 safe_load=True 在该 fork 里被无视）。
     这里改为：前 8 字节是 safetensors 的头长度（LE u64）、第 9 字节是 `{` ⇒ safetensors
-    直读；否则按 torch.save 旧格式兜底（weights_only=True 优先，失败再 False 并告警）。
+    直读；否则按 torch.save 旧格式读取，只读张量、不做完整反序列化。
     """
     try:
         with open(path, "rb") as f:
@@ -275,12 +275,8 @@ def _read_latent_file(path):
         pass
     except Exception as e:      # 头像 safetensors 但解析失败 → 落到 torch.load 兜底
         print(f"[Josia加载Latent] ⚠️ safetensors 直读失败，改用 torch.load 兜底：{e}")
-    try:
-        return torch.load(path, map_location="cpu", weights_only=True)
-    except Exception:
-        # 旧版 torch.save 里带非张量对象的文件（weights_only 安全反序列化器不认）⇒ 最后兜底
-        print(f"[Josia加载Latent] ⚠️ weights_only=True 读取失败，改用完整反序列化兜底：{path}")
-        return torch.load(path, map_location="cpu", weights_only=False)
+    # 只做安全反序列化（weights_only=True）：本节点只保存/读取张量，不读任何 pickle 对象。
+    return torch.load(path, map_location="cpu", weights_only=True)
 
 
 def _read_latent_meta(path):

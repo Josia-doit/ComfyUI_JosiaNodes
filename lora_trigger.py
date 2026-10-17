@@ -20,7 +20,8 @@ import io
 import json
 import time
 import base64
-import subprocess
+import webbrowser
+from pathlib import Path
 import urllib.parse
 
 # ComfyUI 运行时才有 folder_paths / server；脱离 ComfyUI 单独导入（测试）时降级
@@ -89,6 +90,20 @@ def ensure_dirs():
     except Exception as e:
         print(f"[JosiaLoraTrigger] ⚠️ 创建配置目录失败：{e}")
         return False
+
+
+def _reveal_in_file_manager(path):
+    """在系统文件管理器里打开目录（Python 标准库，进程内调用，不启动任何外部进程）。
+
+    Windows 走 os.startfile；其他系统走标准库的 webbrowser 打开 file:// 链接，
+    由标准库按平台选择合适的打开方式。失败抛异常，交给调用方转成接口错误返回。
+    """
+    path = os.path.abspath(path)
+    if hasattr(os, "startfile"):      # Windows
+        os.startfile(path)
+        return
+    if not webbrowser.open(Path(path).as_uri()):
+        raise RuntimeError("当前系统未能打开文件管理器")
 
 
 def norm_lora(name):
@@ -414,12 +429,7 @@ def register_routes():
         """在文件管理器中打开本地配置目录（仅本机运行的 ComfyUI 有效）。"""
         ensure_dirs()
         try:
-            if os.name == "nt":
-                os.startfile(TRIGGER_DIR)          # Windows
-            elif sys.platform == "darwin":
-                subprocess.run(["open", TRIGGER_DIR], check=False)
-            else:
-                subprocess.run(["xdg-open", TRIGGER_DIR], check=False)
+            _reveal_in_file_manager(TRIGGER_DIR)
             return _json_ok({"success": True})
         except Exception as e:
             return _json_ok({"success": False, "error": str(e)})
