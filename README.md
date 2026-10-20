@@ -391,8 +391,9 @@ ComfyUI_JosiaNodes/
   - **独立 UNET**：仅含 UNET，可自由选配外部 CLIP 与 VAE
   - **GGUF UNET**：量化模型，可搭配任意格式 CLIP（GGUF 或非 GGUF 均可）
 - **CLIP类型选择**：
-  - 1:1 完整复刻官方 CLIPLoader / DualCLIPLoader 全部类型（sdxl / flux / flux2 / sd3 / lumina2 / wan / LTXV / minimax / joyimage / mage 等），覆盖 MINIMAX H3 等最新开源模型，全部可正常启用
+  - 下拉列表自动跟随官方 CLIPLoader / DualCLIPLoader 的最新类型（sdxl / flux / flux2 / flux3 / sd3 / lumina2 / wan / ltxv / minimax / joyimage / mage / yue2 等）：官方每随新开源模型更新类型，本节点下拉即时同步，无需等待插件更新；官方读取不可用时自动回退内置全量列表，功能不受影响
   - AIO 模式自动适配 CLIP 类型，独立 UNET/GGUF 模式需手动选择
+  - 旧工作流中已保存的 CLIP 类型（含早期拼写）继续正常生效
 - **双 VAE 支持（视频 VAE + 音频 VAE）**：
   - 新增「VAE2模型」选框，视频模型可同时加载视频 VAE 与音频 VAE，分别由 VAE / VAE2 两个端口输出
   - 适配 LTX / MMAudio / SA3 / MINIMAX H3 等双 VAE 视频模型；音频 VAE 自动兼容官方各权重前缀（`audio_vae.` / `vocoder.`），无需手动改名

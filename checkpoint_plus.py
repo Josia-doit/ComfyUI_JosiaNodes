@@ -32,59 +32,105 @@ PLACEHOLDER_VAE       = "🎨 请选择模型…"
 PLACEHOLDER_CLIP_TYPE = "🏷️ 请选择类型…"
 PLACEHOLDER_VAE2      = "🎵 请选择模型…"
 
-# ── CLIP 类型选项（对齐官方 CLIPLoader / DualCLIPLoader 下拉，并修正失效项） ──
-# 说明：
-#  • 原列表顺序保持不变（避免破坏已保存工作流的 combo 索引对齐）。
+# ── CLIP 类型选项 ──
+# 设计：
+#  • 运行时优先从官方 CLIPLoader / DualCLIPLoader 的 INPUT_TYPES 实时读取类型列表
+#    （两者取并集），官方 loader 每次随新模型更新，本节点下拉即自动跟随，不会掉队；
+#  • 任何异常（官方类不存在 / 输入键改名 / 结构变化）回退到内置静态列表
+#    CLIP_TYPE_FALLBACK，保证极端环境下功能不残。
+# 注意：
 #  • `ace` 修正原 `ACE_Clip`（.upper()→ACE_CLIP 无法命中枚举 ACE，会静默回退 SD）；
 #    `pixeldit` 修正原 `pixeledit`（.upper()→PIXELEDIT 无法命中枚举 PIXELDIT，同样回退 SD）。
-#  • 末尾追加官方已支持但原列表缺失的新模型 CLIP 类型（v2.9.8）：
-#    cosmos / hidream / boogu / krea2（来自官方 CLIPLoader 列表），
-#    hunyuan_video / hunyuan_video_15 / kandinsky5 / kandinsky5_image / newbie
-#    （来自官方 DualCLIPLoader 列表与 CLIPType 枚举，一体化单 CLIP 加载同样适用）。
-#  • v2.9.9 继续补全官方 CLIPLoader 最新列表：joyimage（Qwen3-VL 8B）/ mage / minimax
-#    （MINIMAX H3 的 Qwen3-VL-32B 多模态 CLIP）；枚举成员 JOYIMAGE/MAGE/MINIMAX 已确认存在。
+#  • `sdxl` / `flux` 来自官方 DualCLIPLoader（双 CLIP 组合），单 CLIP 文件也可用；
+#    SDXL 枚举成员在部分 ComfyUI 版本中不存在，官方 loader 同样回退 STABLE_DIFFUSION，
+#    本节点 `_clip_type_to_enum` 与官方语义保持一致。
 #  • `_clip_type_to_enum` 用 `getattr(comfy.sd.CLIPType, type_str.upper(), STABLE_DIFFUSION)`，
 #    与官方 CLIPLoader.load_clip 逻辑一致，故下拉项能精确命中枚举即稳定可用。
-CLIP_TYPE_OPTIONS = [
+CLIP_TYPE_FALLBACK = [
     PLACEHOLDER_CLIP_TYPE,
-    "sdxl",              # 便利：一体化节点接单 CLIP 文件（官方 DualCLIPLoader 提供）
+    # ── 以下顺序/拼写与官方 CLIPLoader ∪ DualCLIPLoader 当前列表保持一致，
+    #    便于官方更新时直接比对；占位项在最前。 ──
     "stable_diffusion",
-    "lumina2",
-    "qwen_image",
-    "flux",              # 便利：接单 CLIP 文件（FLUX 枚举）
-    "flux2",
-    "sd3",
     "stable_cascade",
-    "mochi",
-    "wan",
-    "hunyuan_image",
-    "pixart",
-    "LTXV",              # 保留原大小写（.upper() 已能命中枚举 LTXV）
-    "chroma",
-    "ace",               # 修正：原 "ACE_Clip" 拼写错，会静默回退 stable_diffusion
-    "pixeldit",          # 修正：原 "pixeledit" 拼写错，会静默回退 stable_diffusion
-    "ideogram4",
-    "longcat_image",
-    "lens",
-    "ovis",
-    "omnigen2",
-    "cogvideox",
+    "sd3",
     "stable_audio",
-    # ── 新增：对齐官方 CLIPLoader / DualCLIPLoader 的最新 CLIP 类型 ──
+    "mochi",
+    "ltxv",             # 官方拼写为小写（.upper() 命中枚举 LTXV）
+    "pixart",
     "cosmos",
+    "lumina2",
+    "wan",
     "hidream",
+    "chroma",
+    "ace",              # 原 "ACE_Clip" 拼写错，.upper() 无法命中枚举 ACE
+    "omnigen2",
+    "qwen_image",
+    "hunyuan_image",
+    "flux2",
+    "ovis",
+    "longcat_image",
+    "cogvideox",
+    "lens",
+    "pixeldit",         # 原 "pixeledit" 拼写错，.upper() 无法命中枚举 PIXELDIT
+    "ideogram4",
     "boogu",
     "krea2",
+    "joyimage",         # Qwen3-VL 8B 编辑类 CLIP（CLIPType.JOYIMAGE）
+    "mage",             # CLIPType.MAGE
+    "minimax",          # MINIMAX H3：Qwen3-VL-32B 多模态 CLIP（CLIPType.MINIMAX）
+    "yue2",             # YuE 2 音乐生成 CLIP
+    "flux3",            # FLUX 3（Qwen3-VL 4B）
+    # ── 以下来自官方 DualCLIPLoader（双 CLIP 组合；单 CLIP 文件同样适用）──
+    "sdxl",             # 注：部分 ComfyUI 版本无 SDXL 枚举成员，官方 loader 同样回退 STABLE_DIFFUSION
+    "flux",
     "hunyuan_video",
     "hunyuan_video_15",
     "kandinsky5",
     "kandinsky5_image",
     "newbie",
-    # ── v2.9.9 新增：对齐官方最新 CLIPLoader 列表（MINIMAX H3 等最新开源模型）──
-    "joyimage",         # Qwen3-VL 8B 编辑类 CLIP（CLIPType.JOYIMAGE）
-    "mage",             # CLIPType.MAGE
-    "minimax",          # MINIMAX H3：Qwen3-VL-32B 多模态 CLIP（CLIPType.MINIMAX）
 ]
+
+
+def _get_official_clip_types():
+    """运行时从官方 CLIPLoader / DualCLIPLoader 读取 CLIP 类型列表（取并集）。
+
+    官方 loader 的 type 下拉随新模型发布持续更新；直接运行时读取，
+    本节点下拉即永远跟随官方最新，无需手动补项。
+    读取失败（官方类不存在 / 输入键改名 / 返回结构变化）一律返回 None，
+    由调用方回退内置静态列表——与官方 getattr 兜底语义一致，零风险。
+    """
+    try:
+        import nodes as _comfy_nodes
+        mappings = getattr(_comfy_nodes, "NODE_CLASS_MAPPINGS", {})
+        out = []
+        for cls_name in ("CLIPLoader", "DualCLIPLoader"):
+            cls = mappings.get(cls_name)
+            if cls is None:
+                continue
+            spec = cls.INPUT_TYPES().get("required", {}).get("type")
+            if not (isinstance(spec, (list, tuple)) and spec):
+                continue
+            opts = spec[0]
+            if not isinstance(opts, (list, tuple)):
+                continue
+            for t in opts:
+                if t not in out:
+                    out.append(t)
+        return out or None
+    except Exception:
+        return None
+
+
+def _build_clip_type_options():
+    """构造 CLIP 类型下拉：占位 + 官方动态列表（CLIPLoader ∪ DualCLIPLoader）。
+
+    动态读取失败时直接使用内置静态列表 CLIP_TYPE_FALLBACK
+    （其自身已含占位首项，不再重复前置）。
+    """
+    official = _get_official_clip_types()
+    if official:
+        return [PLACEHOLDER_CLIP_TYPE] + list(official)
+    return list(CLIP_TYPE_FALLBACK)
 
 def _clip_type_to_enum(type_str: str):
     """运行时将 CLIP 类型字符串转为 comfy.sd.CLIPType 枚举值。
@@ -565,7 +611,7 @@ class JosiaCheckpointPlus:
                         "选「请选择模型…」可由下游节点直接接入外部CLIP。"
                     ),
                 }),
-                "clip_type": (CLIP_TYPE_OPTIONS, {
+                "clip_type": (_build_clip_type_options(), {
                     "display_name": "CLIP类型",
                     "default": PLACEHOLDER_CLIP_TYPE,
                     "tooltip": (
