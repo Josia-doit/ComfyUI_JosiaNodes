@@ -80,6 +80,7 @@ CLIP_TYPE_FALLBACK = [
     "minimax",          # MINIMAX H3：Qwen3-VL-32B 多模态 CLIP（CLIPType.MINIMAX）
     "yue2",             # YuE 2 音乐生成 CLIP
     "flux3",            # FLUX 3（Qwen3-VL 4B）
+    "moss_image",       # MOSS Image（官方 CLIPLoader 新增，PR #17212）
     # ── 以下来自官方 DualCLIPLoader（双 CLIP 组合；单 CLIP 文件同样适用）──
     "sdxl",             # 注：部分 ComfyUI 版本无 SDXL 枚举成员，官方 loader 同样回退 STABLE_DIFFUSION
     "flux",
