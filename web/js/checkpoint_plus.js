@@ -762,27 +762,36 @@ function initNode(node) {
 // 彩色段仍是 📂 子文件夹，不占用其 12 色环。
 let _catMap = {};
 let _catMapLoaded = false;
+let _catMapInflight = null;
 
-async function loadCatMap() {
-    if (_catMapLoaded) return;
-    _catMapLoaded = true;
-    try {
-        const resp = await fetch("/josia/model_categories");
-        if (resp.ok) {
-            _catMap = await resp.json();
-            // 拉到后强制重绘，确保已创建的 main_model 也补上 💻 前缀
-            try {
-                const nodes = app.graph?._nodes;
-                if (Array.isArray(nodes)) {
-                    for (const n of nodes) {
-                        if (n?.widgets) n.setDirtyCanvas?.(true, false);
+async function loadCatMap(force = false) {
+    if (_catMapInflight) return _catMapInflight; // 拉取进行中：合并并发请求
+    if (_catMapLoaded && !force) return;
+    _catMapInflight = (async () => {
+        try {
+            const resp = await fetch("/josia/model_categories");
+            if (resp.ok) {
+                _catMap = await resp.json();
+                _catMapLoaded = true;
+                // 拉到后强制重绘，确保已创建的 main_model 也补上 💻 前缀
+                try {
+                    const nodes = app.graph?._nodes;
+                    if (Array.isArray(nodes)) {
+                        for (const n of nodes) {
+                            if (n?.widgets) n.setDirtyCanvas?.(true, false);
+                        }
                     }
-                }
-            } catch (e) {}
+                } catch (e) {}
+            } else if (!_catMapLoaded) {
+                _catMap = {}; // 首次失败：保持未加载态，后续刷新还能重试
+            }
+        } catch (e) {
+            if (!_catMapLoaded) _catMap = {};
+        } finally {
+            _catMapInflight = null;
         }
-    } catch (e) {
-        _catMap = {};
-    }
+    })();
+    return _catMapInflight;
 }
 
 /** 给 main_model 包一层 getOptionLabel，拼出「💻 cat/」中性前缀；命中不了则回退不带前缀。 */
@@ -964,6 +973,17 @@ app.registerExtension({
             initNode(node);
             if (!node._statePhase) setNodePhase(node, PHASE.IDLE);
         }, 100);
+    },
+
+    // ── refreshComboInNodes：R 键刷新库后重拉类别表 ──
+    // 后端 _MODEL_CAT_MAP 随 INPUT_TYPES（object_info 刷新）更新，但前端类别表是
+    // 一次性缓存，不失效 ⇒ 新拷贝的模型下拉里缺 💻 diffusion_models/ 前缀（旧模型仍带）。
+    // 官方 reloadNodeDefs 重建完所有 combo 后会 invokeExtensionsAsync('refreshComboInNodes')，
+    // 此时后端映射已是最新，强制重拉 + 重绘即可让新模型补上前缀。
+    async refreshComboInNodes() {
+        try {
+            await loadCatMap(true);
+        } catch (e) {}
     },
 
     // ── setup：启动即拉取父级类别映射表（💻 cat/ 前缀用） ──

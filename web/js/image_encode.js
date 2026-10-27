@@ -3,7 +3,8 @@
  * 做三件事：
  *  1) 按「缩放类型」变形唯一缩放参数行：关 → 整行隐藏；其它类型只显示对应的那一个
  *     （缩放系数 / 长边尺寸 / 短边尺寸 / 百万像素），对齐倍数仅在「关」时灰化。
- *  2) VAE 自动联动：图内有「Josia模型加载」节点时自动切到「使用Josia模型加载VAE」；
+ *  2) VAE 自动联动：图内有「Josia模型加载」节点时自动把 VAE 切到「使用Josia模型加载VAE」
+ *     （一次性默认；用户手动改过则记入 properties、之后不再强切，也可随时改回）；
  *     无该节点时移除该项并把已选中的降级回占位符；VAE 端口接线时灰化下拉（接线优先）。
  *  3) 上传联动：「图像」端口接线时灰化「选择图像」下拉（端口优先）。
  *     上传按钮 + 图片预览由前端 image_upload 原生机制提供，这里不做任何自定义样式。
@@ -143,6 +144,11 @@ function drawOutResText(ctx, widget, node) {
   const img = node.imgs && node.imgs[idx];
   if (!img || !img.naturalWidth || !img.naturalHeight) return;
   const [fw, fh] = outputSizeOf(node, img.naturalWidth, img.naturalHeight);
+  // 🔴 对外广播**真实输出**尺寸：本节点会先缩放再输出，而预览图 imgs 里装的是
+  //    缩放前的源图。下游（如框选编辑）若拿 naturalWidth 当坐标基准，框会按原图
+  //    尺寸算、与实际出图整体错位。把算好的输出尺寸挂到节点上供下游实时读取
+  //    （duck-typed：下游取不到就自动降级，不产生包间依赖）。
+  node._jencOutSize = [fw, fh];
 
   const nodeW = node.size[0] || 0;
   const y = (widget ? widget.y : 0) + (widget && widget.height ? widget.height : 20) * 0.72;
@@ -247,23 +253,44 @@ function applyScaleVisibility(widgetOrNode, scaleType) {
 function setWidgetValue(node, w, v) {
   if (!w) return;
   try {
-    if (typeof w.setValue === "function") w.setValue(v);
-    else w.value = v;
-  } catch (e) { w.value = v; }
+    if (typeof w.setValue === "function") {
+      // 🔴 这个 ComfyUI 构建版的控件签名是 setValue(value, { e, node, canvas })：
+      //    第二参解构出 canvas / node，缺失即抛「Cannot destructure property 'e'」。
+      //    对**可见的原生 combo** 尤其致命：异常被兜底吞掉后走 w.value 直赋，
+      //    Vue 组件层下一次渲染会拿控件值存储里的旧值把它覆盖回去 ⇒ 设值像没生效。
+      //    必须补全 node 与 canvas（canvas 缺失时用空对象兜底，避免 r.graph_mouse 再炸）。
+      w.setValue(v, { e: undefined, node: node, canvas: (typeof app !== "undefined" && app && app.canvas) ? app.canvas : {} });
+    } else {
+      w.value = v;
+    }
+  } catch (e) {
+    // 兜底：极少数旧构件无 setValue → 直接赋值；赋值 setter 本身也不抛错。
+    try { w.value = v; } catch (e2) { /* 忽略 */ }
+  }
   try { app.graph?.setDirtyCanvas(true, true); } catch (e) { /* 忽略 */ }
 }
 
-// VAE 联动（口径与 Josia媒体保存 完全一致）：
-//   图内有「Josia模型加载」节点 ⇒ 下拉里**加入**「使用Josia模型加载VAE」（需用户手动选，不自动选中）；
-//   该节点被删除             ⇒ 下拉里**移掉**该项，并把选中它的实例回落到「请选择VAE模型」。
-//   🔴 只有用户自己选了「使用Josia模型加载VAE」才绑定模型加载节点；选真实 VAE / 默认占位符都不碰。
+// VAE 自动联动（口径与 Josia媒体保存 完全一致）：
+//   图内有「Josia模型加载」节点 ⇒ 自动把 VAE 切到「使用Josia模型加载VAE」（一次性默认，
+//     与节点创建先后无关）；用户手动改过下拉（含改回「请选择VAE模型」或选其它 VAE）
+//     ⇒ 选择记入 node.properties，之后永远尊重其选择，不再强切。
+//   该节点被删除 ⇒ 下拉里移掉该项，并把选中它的实例回落到「请选择VAE模型」，
+//     同时解除「手动选过」标记 ⇒ 重新加回模型加载节点时会再次自动默认选中。
 // 🔴 这里动的是**展示层**（options.values）：后端 INPUT_TYPES 里该项必须常驻，
 //    否则 execution.validate_inputs 会拿提交值与后端候选比对 ⇒ value_not_in_list，节点跑不起来。
+// 🔴 原生 combo 的 setValue 会触发控件 callback（BaseWidget.setValue 里调 this.callback）
+//    ⇒ 联动自己的程序化设值必须走 setVaeValue（打 _jieVaeProg 标记），callback 据此区分
+//    「用户手动改」与「联动自动改」，只有前者才记 _jieVaeChosen（媒体保存 _jmsVae1Chosen 同语义）。
+function setVaeValue(node, w, v) {
+  if (!w) return;
+  node._jieVaeProg = true;
+  try { setWidgetValue(node, w, v); } catch (e) { /* 忽略 */ } finally { node._jieVaeProg = false; }
+}
+
 function syncJosiaVae(node) {
   const w = getWidget(node, "VAE模型");
   if (!w) return;
   const present = graphHasJosiaLoader();
-  const cur = String(w.value ?? "");
 
   // 1) 展示层增删「使用Josia模型加载VAE」这一项（真正的「不常驻」）
   const opts = (w.options && w.options.values) ? w.options.values.slice() : [];
@@ -282,12 +309,26 @@ function syncJosiaVae(node) {
   const wired = isPortWired(node, "vae");
   w.disabled = wired;
 
-  // 3) 回落：仅当模型加载节点被移除、且当前选中的是联动项时，回落占位符。
-  //    🔴🔴 2026-10-07 修（哥哥反馈）：**绝不自动切换**到联动项——是否使用「Josia模型加载」
-  //        联动完全由用户手动决定；选了真实 VAE 或停在默认占位符都不要碰模型加载节点。
-  if (!present && cur === USE_JOSIA_VAE) {
-    setWidgetValue(node, w, VAE_PLACEHOLDER);
+  // 3) 自动默认选中（媒体保存同款「一次性 episode」算法）
+  const cur = String(w.value ?? "");
+  if (!present) {
+    // 模型加载节点移除：选中联动项的实例回落占位符；清掉「手动选过」与 autoDone 标记，
+    // 重新加回节点时会再次自动默认。用户手选的其它 VAE 原样保留（不清标记）。
+    // 🔴 清除必须放在 setVaeValue 之后：setValue 会触发 callback，回调会把标记置回 true。
+    if (cur === USE_JOSIA_VAE) {
+      setVaeValue(node, w, VAE_PLACEHOLDER);
+      try { if (node.properties) node.properties._jieVaeChosen = false; } catch (e) {}
+    }
+    node._jieVaeAutoDone = false;
+    return;
   }
+  // 节点在位：本 episode 已默认处理过、或用户手动选过 ⇒ 尊重现状，绝不强切
+  if (node._jieVaeAutoDone) return;
+  const chosen = !!(node.properties && node.properties._jieVaeChosen);
+  if (!chosen && (cur === VAE_PLACEHOLDER || cur === "")) {
+    setVaeValue(node, w, USE_JOSIA_VAE);
+  }
+  if (String(w.value ?? "") === USE_JOSIA_VAE) node._jieVaeAutoDone = true;
 }
 
 // 图内增删节点 ⇒ 统一刷新所有本节点实例的 VAE 联动
@@ -369,6 +410,23 @@ app.registerExtension({
         st.callback = function (v) {
           applyScaleVisibility(this, v);
           return prev ? prev.call(this, v) : v;
+        };
+      }
+      // VAE 模型：用户手动改过（含改回占位符 / 选其它 VAE）⇒ 记「手动选过」并持久化到
+      // node.properties，后续刷新不再自动强切（媒体保存 _jmsVae1Chosen 同语义，重载工作流仍尊重）。
+      // 🔴 必须装在 syncAll 之前；程序化设值（setVaeValue 打 _jieVaeProg）不记，只记用户真实操作。
+      const vaeW = getWidget(this, "VAE模型");
+      if (vaeW) {
+        const prevVaeCb = vaeW.callback;
+        vaeW.callback = function (v) {
+          try {
+            const n = asNode(this);
+            if (n && !n._jieVaeProg) {
+              if (!n.properties) n.properties = {};
+              n.properties._jieVaeChosen = true;
+            }
+          } catch (e) { /* 忽略 */ }
+          return prevVaeCb ? prevVaeCb.call(this, v) : v;
         };
       }
       syncAll(this);
