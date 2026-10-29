@@ -133,11 +133,17 @@ const CSS = `
 .josia-lt-mask{
     position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:1200;
     display:flex;align-items:center;justify-content:center;
+    /* 关键：显式 auto。ComfyUI 设置面板等模态弹窗会给 document.body 设
+       pointer-events:none（让背后界面点不动），而 pointer-events 可继承，
+       若此处不写死 auto，遮罩会从 body 继承 none → 整块面板「看得见点不到」，
+       点击穿透到下方设置面板。写死 auto 后无论父级是否被模态层设 none 都能正常交互。 */
+    pointer-events:auto;
 }
 .josia-lt-dlg{
     width:340px;max-width:90vw;background:#2b2b2b;border:1px solid #555;
     border-radius:8px;box-shadow:0 8px 32px rgba(0,0,0,.6);
     font-family:var(--font-family,sans-serif);
+    pointer-events:auto;
 }
 .josia-lt-dlg-head{
     display:flex;align-items:center;justify-content:space-between;
@@ -163,6 +169,7 @@ const CSS = `
     box-shadow:0 8px 32px rgba(0,0,0,.6);
     display:flex;flex-direction:column;overflow:hidden;
     font-family:var(--font-family,sans-serif);
+    pointer-events:auto;
 }
 .josia-lt-mgr-head{
     display:flex;align-items:center;justify-content:space-between;
