@@ -34,10 +34,11 @@ PLACEHOLDER_VAE2      = "🎵 请选择模型…"
 
 # ── CLIP 类型选项 ──
 # 设计：
-#  • 运行时优先从官方 CLIPLoader / DualCLIPLoader 的 INPUT_TYPES 实时读取类型列表
-#    （两者取并集），官方 loader 每次随新模型更新，本节点下拉即自动跟随，不会掉队；
-#  • 任何异常（官方类不存在 / 输入键改名 / 结构变化）回退到内置静态列表
-#    CLIP_TYPE_FALLBACK，保证极端环境下功能不残。
+#  • 运行时从官方 CLIPLoader / DualCLIPLoader 的 INPUT_TYPES 实时读取类型列表，
+#    与内置表 CLIP_TYPE_FALLBACK 取并集：既跟随官方新模型自动扩展，也保证
+#    内置类型（MiniMax / MOSS Image 等）在旧版 ComfyUI 官方 loader 缺失时仍可选；
+#  • 任何异常（官方类不存在 / 输入键改名 / 结构变化）退化为纯内置静态列表，
+#    保证极端环境下功能不残。
 # 注意：
 #  • `ace` 修正原 `ACE_Clip`（.upper()→ACE_CLIP 无法命中枚举 ACE，会静默回退 SD）；
 #    `pixeldit` 修正原 `pixeledit`（.upper()→PIXELEDIT 无法命中枚举 PIXELDIT，同样回退 SD）。
@@ -54,6 +55,7 @@ CLIP_TYPE_FALLBACK = [
     "stable_cascade",
     "sd3",
     "stable_audio",
+    "hunyuan_dit",      # HunyuanDiT（CLIPType.HUNYUAN_DIT）
     "mochi",
     "ltxv",             # 官方拼写为小写（.upper() 命中枚举 LTXV）
     "pixart",
@@ -80,7 +82,9 @@ CLIP_TYPE_FALLBACK = [
     "minimax",          # MINIMAX H3：Qwen3-VL-32B 多模态 CLIP（CLIPType.MINIMAX）
     "yue2",             # YuE 2 音乐生成 CLIP
     "flux3",            # FLUX 3（Qwen3-VL 4B）
-    "moss_image",       # MOSS Image（官方 CLIPLoader 新增，PR #17212）
+    "moss_image",       # MOSS Image（CLIPType.MOSS_IMAGE）
+    "fibo2",            # FIBO 2（CLIPType.FIBO2）
+    "pan2",             # PAN 2（CLIPType.PAN2）
     # ── 以下来自官方 DualCLIPLoader（双 CLIP 组合；单 CLIP 文件同样适用）──
     "sdxl",             # 注：部分 ComfyUI 版本无 SDXL 枚举成员，官方 loader 同样回退 STABLE_DIFFUSION
     "flux",
@@ -98,7 +102,7 @@ def _get_official_clip_types():
     官方 loader 的 type 下拉随新模型发布持续更新；直接运行时读取，
     本节点下拉即永远跟随官方最新，无需手动补项。
     读取失败（官方类不存在 / 输入键改名 / 返回结构变化）一律返回 None，
-    由调用方回退内置静态列表——与官方 getattr 兜底语义一致，零风险。
+    由调用方退化为内置静态列表——与官方 getattr 兜底语义一致，零风险。
     """
     try:
         import nodes as _comfy_nodes
@@ -123,15 +127,18 @@ def _get_official_clip_types():
 
 
 def _build_clip_type_options():
-    """构造 CLIP 类型下拉：占位 + 官方动态列表（CLIPLoader ∪ DualCLIPLoader）。
+    """构造 CLIP 类型下拉：占位 + 官方动态列表 ∪ 内置静态表。
 
-    动态读取失败时直接使用内置静态列表 CLIP_TYPE_FALLBACK
-    （其自身已含占位首项，不再重复前置）。
+    官方动态列表与内置表取并集，旧版 ComfyUI 官方 loader 缺少的类型
+    （如 minimax / moss_image）依然可见；动态读取失败时退化为纯内置表。
+    返回列表首位固定为占位项。
     """
-    official = _get_official_clip_types()
-    if official:
-        return [PLACEHOLDER_CLIP_TYPE] + list(official)
-    return list(CLIP_TYPE_FALLBACK)
+    official = _get_official_clip_types() or []
+    merged = []
+    for t in list(official) + CLIP_TYPE_FALLBACK:
+        if t != PLACEHOLDER_CLIP_TYPE and t not in merged:
+            merged.append(t)
+    return [PLACEHOLDER_CLIP_TYPE] + merged
 
 def _clip_type_to_enum(type_str: str):
     """运行时将 CLIP 类型字符串转为 comfy.sd.CLIPType 枚举值。

@@ -227,8 +227,249 @@ const BTN_W        = 72;        // 开关按钮宽度
 const BTN_H        = 22;        // 开关按钮高度
 const MIN_W        = 270;       // 节点最小宽度
 const DROPDOWN_H   = 28;        // 单组：下拉框高度
-const SINGLE_H     = PAD_Y + DROPDOWN_H + 6 + ROW_H + PAD_Y; // 单组节点总高度（82px）
+const SINGLE_H     = PAD_Y + DROPDOWN_H + 6 + ROW_H + PAD_Y; // 单组节点默认总高度（82px）
 const RECOMPUTE_INTERVAL = 300; // 编组节点重新计算节流时间（ms）
+
+// ─────────────────────────────────────────────
+// 编组控制 UI 尺寸（总设置面板 / 悬浮面板共用，默认 0 = 当前尺寸）
+//   字号    0~150：0=当前 px，150 → 2.5 倍
+//   开关高度 0~150：0=当前 BTN_H 22px，150 → 2.5 倍；行高由它派生
+//   开关宽度 -20~+50：0=当前按钮宽（多组/单组 72、分组 64），可缩 20 / 放 50
+// 文字实测宽度超过按钮宽时按钮自动撑大，避免放大字号后文字溢出。
+// ─────────────────────────────────────────────
+const SET_FONT_SIZE   = "JosiaNodes.GroupCtrl.FontSize";
+const SET_BTN_HEIGHT  = "JosiaNodes.GroupCtrl.BtnHeight";
+const SET_BTN_WIDTH   = "JosiaNodes.GroupCtrl.BtnWidth";
+const GC_FONT_MAX     = 150;
+const GC_HEIGHT_MAX   = 150;
+const GC_WIDTH_MIN    = -20;
+const GC_WIDTH_MAX    = 50;
+
+// 三项设置的默认值（总设置 + 悬浮面板共享同一份定义，避免两处漂移）
+const GC_SETTING_DEFS = [
+  { id: SET_FONT_SIZE,  name: "编组行字号",   min: 0,        max: GC_FONT_MAX,   step: 1, def: 0 },
+  { id: SET_BTN_HEIGHT, name: "编组开关高度", min: 0,        max: GC_HEIGHT_MAX, step: 1, def: 0 },
+  { id: SET_BTN_WIDTH,  name: "编组开关宽度", min: GC_WIDTH_MIN, max: GC_WIDTH_MAX, step: 1, def: 0 },
+];
+
+function gcReadSetting(id) {
+  try {
+    if (app.ui?.settings?.getSettingValue) return app.ui.settings.getSettingValue(id);
+    if (app.extensionManager?.settings?.getSettingValue) return app.extensionManager.settings.getSettingValue(id);
+    if (app.settings?.getSettingValue) return app.settings.getSettingValue(id);
+    if (app.settings?.get) return app.settings.get(id);
+  } catch (_) {}
+  return undefined;
+}
+function gcWriteSetting(id, value) {
+  try {
+    if (app.ui?.settings?.setSettingValue) return app.ui.settings.setSettingValue(id, value);
+    if (app.extensionManager?.settings?.setSettingValue) return app.extensionManager.settings.setSettingValue(id, value);
+    if (app.settings?.setSettingValue) return app.settings.setSettingValue(id, value);
+    if (app.settings?.set) return app.settings.set(id, value);
+  } catch (_) {}
+}
+function gcScale(id, min, max) {
+  const v = Number(gcReadSetting(id));
+  return Number.isFinite(v) ? Math.max(min, Math.min(max, v)) : 0;
+}
+// 字号：仅编组相关文字使用（组名 / 节点数 / 跳过·启用），base=当前 px，150 → 2.5 倍
+function gcFont(base) {
+  const s = gcScale(SET_FONT_SIZE, 0, GC_FONT_MAX);
+  return s === 0 ? base : Math.max(base, Math.round(base * (1 + s / 100)));
+}
+// 开关高度：base=当前按钮高 22px，150 → 2.5 倍
+function gcBtnH(base) {
+  const s = gcScale(SET_BTN_HEIGHT, 0, GC_HEIGHT_MAX);
+  return s === 0 ? base : Math.max(base, Math.round(base * (1 + s / 100)));
+}
+// 开关宽度：base=当前按钮宽，正负增量像素；返回 max(最小 24px, base+增量)
+function gcBtnW(base) {
+  const d = gcScale(SET_BTN_WIDTH, GC_WIDTH_MIN, GC_WIDTH_MAX);
+  return Math.max(24, base + d);
+}
+// 行高 = 开关高度 + 原有上下留白（ROW_H - BTN_H = 10，G_ROW_H - G_BTN_H = 12）
+function mRowH() { return gcBtnH(BTN_H) + (ROW_H - BTN_H); }
+function mBtnH() { return gcBtnH(BTN_H); }
+function mBtnW() { return gcBtnW(BTN_W); }
+function gRowH() { return gcBtnH(G_BTN_H) + (G_ROW_H - G_BTN_H); }
+function gBtnH() { return gcBtnH(G_BTN_H); }
+function gBtnW() { return gcBtnW(G_BTN_W); }
+function singleH() { return PAD_Y + DROPDOWN_H + 6 + mRowH() + PAD_Y; }
+
+// 文字实测宽度（带当前字号）— 用于按钮自动撑大，与绘制共用同一 ctx 字体设置
+function gcTextW(ctx, text, fontPx, bold) {
+  ctx.save();
+  ctx.font = `${bold ? "bold " : ""}${fontPx}px sans-serif`;
+  const w = ctx.measureText(text).width;
+  ctx.restore();
+  return w;
+}
+
+// ─────────────────────────────────────────────
+// 悬浮 UI 设置面板（齿轮按钮打开，标题可拖动，三项滑块实时生效）
+// ─────────────────────────────────────────────
+let _gcPanel = null; // { el, sliders: Map<id, {input, val}> }
+
+function gcPanelClose() {
+  if (!_gcPanel) return;
+  _gcPanel.el.remove();
+  _gcPanel = null;
+}
+
+// 面板打开时按当前设置值刷新三个滑块的显示（与总设置面板双向同步）
+function gcPanelSync() {
+  if (!_gcPanel) return;
+  for (const def of GC_SETTING_DEFS) {
+    const s = _gcPanel.sliders.get(def.id);
+    if (!s) continue;
+    const v = gcScale(def.id, def.min, def.max);
+    if (document.activeElement !== s.input) s.input.value = String(v);
+    s.val.textContent = String(v);
+  }
+}
+
+function gcOpenUiPanel(clientX, clientY) {
+  gcPanelClose();
+  const el = document.createElement("div");
+  // 显式 pointer-events:auto：否则从模态 body 继承 none 导致看得见点不到
+  el.style.cssText =
+    "position:fixed;z-index:100001;width:286px;pointer-events:auto;" +
+    "background:#1e1e1e;color:#e6e6e6;border:1px solid #4a4a4a;border-radius:8px;" +
+    "box-shadow:0 8px 26px rgba(0,0,0,.6);font:12px sans-serif;overflow:hidden;";
+
+  // ── 标题栏（可拖动）──
+  const bar = document.createElement("div");
+  bar.style.cssText =
+    "display:flex;align-items:center;padding:8px 10px;cursor:move;" +
+    "background:#2a2a2a;border-bottom:1px solid #3a3a3a;user-select:none;";
+  const title = document.createElement("span");
+  title.textContent = "⚙ 编组显示设置";
+  title.style.cssText = "font-weight:bold;font-size:13px;";
+  const close = document.createElement("span");
+  close.textContent = "✕";
+  close.style.cssText = "margin-left:auto;cursor:pointer;color:#aaa;padding:0 2px;";
+  close.addEventListener("click", gcPanelClose);
+  bar.appendChild(title);
+  bar.appendChild(close);
+  el.appendChild(bar);
+
+  // 拖动逻辑：标题栏 pointerdown → 记录偏移 → document 上 move/up
+  let drag = null;
+  bar.addEventListener("pointerdown", (ev) => {
+    if (ev.target === close) return;
+    const r = el.getBoundingClientRect();
+    drag = { dx: ev.clientX - r.left, dy: ev.clientY - r.top };
+    ev.preventDefault();
+  });
+  const onMove = (ev) => {
+    if (!drag) return;
+    const vw = window.innerWidth, vh = window.innerHeight;
+    const r = el.getBoundingClientRect();
+    el.style.left = Math.max(0, Math.min(vw - r.width, ev.clientX - drag.dx)) + "px";
+    el.style.top  = Math.max(0, Math.min(vh - r.height, ev.clientY - drag.dy)) + "px";
+  };
+  const onUp = () => {
+    drag = null;
+    document.removeEventListener("pointermove", onMove);
+    document.removeEventListener("pointerup", onUp);
+  };
+  bar.addEventListener("pointerdown", () => {
+    document.addEventListener("pointermove", onMove);
+    document.addEventListener("pointerup", onUp);
+  });
+
+  // ── 三项滑块 ──
+  const body = document.createElement("div");
+  body.style.cssText = "padding:10px 12px 12px;";
+  const sliders = new Map();
+  for (const def of GC_SETTING_DEFS) {
+    const row = document.createElement("div");
+    row.style.cssText = "margin-bottom:12px;";
+    const head = document.createElement("div");
+    head.style.cssText = "display:flex;justify-content:space-between;margin-bottom:5px;";
+    const lab = document.createElement("span");
+    lab.textContent = def.name;
+    const val = document.createElement("span");
+    val.style.cssText = "color:#8ab4f8;font-variant-numeric:tabular-nums;";
+    head.appendChild(lab);
+    head.appendChild(val);
+
+    const input = document.createElement("input");
+    input.type = "range";
+    input.min = String(def.min);
+    input.max = String(def.max);
+    input.step = String(def.step);
+    input.value = String(gcScale(def.id, def.min, def.max));
+    input.style.cssText = "width:100%;accent-color:#1a73e8;cursor:pointer;";
+    val.textContent = input.value;
+    input.addEventListener("input", () => {
+      const v = Number(input.value);
+      val.textContent = String(v);
+      gcWriteSetting(def.id, v);
+      refreshGroupCtrlNodes();
+    });
+    sliders.set(def.id, { input, val });
+
+    row.appendChild(head);
+    row.appendChild(input);
+    body.appendChild(row);
+  }
+  const hint = document.createElement("div");
+  hint.textContent = "拖动滑块即时生效，可在画布上查看效果";
+  hint.style.cssText = "color:#777;font-size:11px;text-align:center;margin-top:2px;";
+  body.appendChild(hint);
+  el.appendChild(body);
+
+  document.body.appendChild(el);
+  // 初始定位到齿轮附近，并做视口边界收敛
+  const r = el.getBoundingClientRect();
+  const px = Math.max(4, Math.min(window.innerWidth - r.width - 4, clientX + 8));
+  const py = Math.max(4, Math.min(window.innerHeight - r.height - 4, clientY + 8));
+  el.style.left = px + "px";
+  el.style.top = py + "px";
+  _gcPanel = { el, sliders };
+}
+
+// 首行末尾的圆角正方形齿轮按钮：绘制并写入节点的 hit 区域（本地坐标）
+const GC_GEAR = 24; // 齿轮按钮边长（正方形）
+function drawGearBtn(node, ctx, x, y) {
+  ctx.save();
+  ctx.fillStyle = "rgba(255,255,255,0.08)";
+  ctx.strokeStyle = "rgba(255,255,255,0.2)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  drawRoundRect(ctx, x, y, GC_GEAR, GC_GEAR, 5);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = "#ccc";
+  ctx.font = `${Math.round(GC_GEAR * 0.62)}px sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText("⚙", x + GC_GEAR / 2, y + GC_GEAR / 2 + 0.5);
+  ctx.restore();
+  node._hitGear = { x, y, w: GC_GEAR, h: GC_GEAR };
+}
+// 用节点本地坐标判断齿轮命中；命中则用真实鼠标屏幕坐标打开面板
+function gcGearHit(node, mx, my, e) {
+  const r = node._hitGear;
+  if (!r || mx < r.x || mx > r.x + r.w || my < r.y || my > r.y + r.h) return false;
+  const p = _eventClientPos(e) ?? [window.innerWidth / 2, 80];
+  gcOpenUiPanel(p[0], p[1]);
+  return true;
+}
+
+// 设置变更后：重算画布上三节点尺寸并重绘
+function refreshGroupCtrlNodes() {
+  if (!app.graph?.nodes) return;
+  for (const n of app.graph.nodes) {
+    const t = n.type || n.comfyClass;
+    if (t === NODE_TYPE_M || t === NODE_NAME_M) n.size[1] = computeHeightM(getAllGroups().length);
+    else if (t === NODE_TYPE_G || t === NODE_NAME_G) n.size[1] = computeHeightG(n);
+    else if (t === NODE_TYPE_S || t === NODE_NAME_S) n.size[1] = singleH();
+  }
+  app.graph?.setDirtyCanvas?.(true, false);
+}
 
 // ─────────────────────────────────────────────
 // Canvas 工具函数
@@ -380,8 +621,9 @@ function navigateToGroup(group) {
  * @returns {number} 节点高度
  */
 function computeHeightM(groupCount) {
+  const rowH = mRowH();
   return PAD_Y + HEADER_H + ROW_GAP
-       + Math.max(1, groupCount) * (ROW_H + ROW_GAP)
+       + Math.max(1, groupCount) * (rowH + ROW_GAP)
        + PAD_Y;
 }
 
@@ -453,19 +695,21 @@ function drawMultiNode(node, ctx) {
   node._hitRows       = [];
   node._hitHeaderBtns = [];
   node._hitMutexBtn   = null;
+  node._hitGear       = null;
 
   let y = PAD_Y;
 
-  // 计算三个头部按钮的宽度（等宽，自适应节点宽度）
-  const headerTotalW = W - PAD_X * 2;
+  // 计算三个头部按钮的宽度（等宽，自适应节点宽度；最右侧留出齿轮）
+  const gearGap    = 5;
+  const headerTotalW = W - PAD_X * 2 - GC_GEAR - gearGap;
   const btnGap = 4;  // 按钮之间的间距
   const headerBtnW = (headerTotalW - btnGap * 2) / 3;  // 三个按钮等宽
   const headerBtnH = HEADER_H - 6;  // 与头部按钮相同的高度
-  
+
   // 绘制全局按钮（全部跳过/全部启用）和单选模式按钮
   _drawHeaderBtn(node, ctx, PAD_X, y, headerBtnW, headerBtnH, "全部跳过", "#7a1515", "bypass_all");
   _drawHeaderBtn(node, ctx, PAD_X + headerBtnW + btnGap, y, headerBtnW, headerBtnH, "全部启用", "#155c30", "enable_all");
-  
+
   // 绘制单选模式按钮
   const mutexMode = node.properties?.mutexMode ?? false;
   const mutexX = PAD_X + (headerBtnW + btnGap) * 2;
@@ -485,7 +729,10 @@ function drawMultiNode(node, ctx) {
   ctx.textBaseline = "middle";
   ctx.fillText("单选模式", mutexX + headerBtnW / 2, y + headerBtnH / 2);
   ctx.restore();
-  
+
+  // 齿轮按钮（首行最右）
+  drawGearBtn(node, ctx, W - PAD_X - GC_GEAR, y + (headerBtnH - GC_GEAR) / 2);
+
   y += HEADER_H;
 
   // 绘制分隔线
@@ -505,7 +752,7 @@ function drawMultiNode(node, ctx) {
     ctx.font         = "italic 12px sans-serif";
     ctx.textAlign    = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText("工作流中没有编组", W / 2, y + ROW_H / 2 + 4);
+    ctx.fillText("工作流中没有编组", W / 2, y + mRowH() / 2 + 4);
     ctx.restore();
     return;
   }
@@ -515,9 +762,10 @@ function drawMultiNode(node, ctx) {
     const nodes    = getGroupNodes(group);
     const bypassed = nodes.length > 0 && nodes.every((n) => n.mode === BYPASS_MODE);
     const mixed    = !bypassed && nodes.some((n) => n.mode === BYPASS_MODE);
-    node._hitRows.push({ group, y, bypassed, mixed });
-    _drawGroupRow(ctx, group, y, bypassed, mixed, nodes.length, W);
-    y += ROW_H + ROW_GAP;
+    const hit      = { group, y, bypassed, mixed, btn: null };
+    node._hitRows.push(hit);
+    hit.btn = _drawGroupRow(ctx, group, y, bypassed, mixed, nodes.length, W);
+    y += mRowH() + ROW_GAP;
   }
 }
 
@@ -559,62 +807,64 @@ function _drawHeaderBtn(node, ctx, x, y, w, h, label, color, action) {
  * @param {number} W - 节点宽度
  */
 function _drawGroupRow(ctx, group, y, bypassed, mixed, nodeCount, W) {
+  const rowH = mRowH(), btnH = mBtnH();
+  const label  = bypassed ? "已跳过" : (mixed ? "部分跳过" : "已启用");
+  const fontPx = gcFont(10);
+  // 文字实测宽度超过设定宽度时撑大按钮（左右各留 6px）
+  const btnW = Math.max(mBtnW(), Math.ceil(gcTextW(ctx, label, fontPx, true)) + 12);
   ctx.save();
   // 行背景色（跳过/启用状态区分）
   ctx.fillStyle = bypassed ? "rgba(122,21,21,0.18)" : "rgba(255,255,255,0.04)";
   ctx.beginPath();
-  drawRoundRect(ctx, PAD_X, y + 1, W - PAD_X * 2, ROW_H - 2, 4);
+  drawRoundRect(ctx, PAD_X, y + 1, W - PAD_X * 2, rowH - 2, 4);
   ctx.fill();
 
   let textStartX = PAD_X + 8;
-  // 绘制编组颜色色块
+  // 绘制编组颜色色块（固定 16px，不随行高变）
   if (group.color) {
     ctx.fillStyle = group.color;
     ctx.beginPath();
-    drawRoundRect(ctx, PAD_X + 5, y + (ROW_H - 16) / 2, 6, 16, 3);
+    drawRoundRect(ctx, PAD_X + 5, y + (rowH - 16) / 2, 6, 16, 3);
     ctx.fill();
     textStartX += 14;
   }
 
-  // 开关按钮位置
-  const btnX = W - PAD_X - BTN_W - 4;
-  const btnY = y + (ROW_H - BTN_H) / 2;
+  // 开关按钮位置（右对齐，宽度可被文字撑大）
+  const btnX = W - PAD_X - btnW - 4;
+  const btnY = y + (rowH - btnH) / 2;
 
   // 绘制开关按钮（跳过/启用/部分跳过）
   ctx.fillStyle = bypassed ? "#7a1515" : (mixed ? "#7a4c15" : "#155c30");
   ctx.beginPath();
-  drawRoundRect(ctx, btnX, btnY, BTN_W, BTN_H, 11);
+  drawRoundRect(ctx, btnX, btnY, btnW, btnH, Math.min(11, btnH / 2));
   ctx.fill();
 
   ctx.fillStyle    = "rgba(255,255,255,0.9)";
-  ctx.font         = "bold 10px sans-serif";
+  ctx.font         = `bold ${fontPx}px sans-serif`;
   ctx.textAlign    = "center";
   ctx.textBaseline = "middle";
-  ctx.fillText(
-    bypassed ? "已跳过" : (mixed ? "部分跳过" : "已启用"),
-    btnX + BTN_W / 2, btnY + BTN_H / 2
-  );
+  ctx.fillText(label, btnX + btnW / 2, btnY + btnH / 2);
 
   // 绘制节点数徽章
   const cntX = btnX - 28;
   ctx.fillStyle = "rgba(255,255,255,0.1)";
   ctx.beginPath();
-  drawRoundRect(ctx, cntX, btnY, 24, BTN_H, 4);
+  drawRoundRect(ctx, cntX, btnY, 24, btnH, 4);
   ctx.fill();
   ctx.fillStyle    = "#999";
-  ctx.font         = "10px sans-serif";
+  ctx.font         = `${fontPx}px sans-serif`;
   ctx.textAlign    = "center";
   ctx.textBaseline = "middle";
-  ctx.fillText(String(nodeCount), cntX + 12, btnY + BTN_H / 2);
+  ctx.fillText(String(nodeCount), cntX + 12, btnY + btnH / 2);
 
   // 绘制编组名称（截断）
   const maxTitleW = cntX - textStartX - 6;
   ctx.fillStyle    = bypassed ? "#777" : "#ddd";
-  ctx.font         = "13px sans-serif";
+  ctx.font         = `${gcFont(13)}px sans-serif`;
   ctx.textAlign    = "left";
   ctx.textBaseline = "middle";
   const title = truncateText(ctx, group.title || "未命名编组", maxTitleW);
-  ctx.fillText(title, textStartX, y + ROW_H / 2);
+  ctx.fillText(title, textStartX, y + rowH / 2);
 
   // 跳过状态下添加删除线
   if (bypassed) {
@@ -622,11 +872,12 @@ function _drawGroupRow(ctx, group, y, bypassed, mixed, nodeCount, W) {
     ctx.strokeStyle = "#666";
     ctx.lineWidth   = 1;
     ctx.beginPath();
-    ctx.moveTo(textStartX, y + ROW_H / 2);
-    ctx.lineTo(textStartX + tw, y + ROW_H / 2);
+    ctx.moveTo(textStartX, y + rowH / 2);
+    ctx.lineTo(textStartX + tw, y + rowH / 2);
     ctx.stroke();
   }
   ctx.restore();
+  return { x: btnX, y: btnY, w: btnW, h: btnH };
 }
 
 // ─────────────────────────────────────────────
@@ -643,8 +894,7 @@ function _drawGroupRow(ctx, group, y, bypassed, mixed, nodeCount, W) {
 function handleMouseDownM(node, e, localPos) {
   if (!localPos) return false;
   const [mx, my] = localPos;
-  const W    = node.size[0];
-  const btnX = W - PAD_X - BTN_W - 4;
+  if (gcGearHit(node, mx, my, e)) return true;
 
   // 处理互斥模式按钮点击
   const mbtn = node._hitMutexBtn;
@@ -697,12 +947,13 @@ function handleMouseDownM(node, e, localPos) {
   }
 
   // 处理编组行点击（开关/导航）
+  const rowH = mRowH();
   for (const row of node._hitRows) {
-    if (my < row.y || my > row.y + ROW_H) continue;
-    const btnY = row.y + (ROW_H - BTN_H) / 2;
-    // 开关按钮点击：切换跳过/启用状态
-    if (mx >= btnX && mx <= btnX + BTN_W &&
-        my >= btnY && my <= btnY + BTN_H) {
+    if (my < row.y || my > row.y + rowH) continue;
+    const b = row.btn;
+    // 开关按钮点击：切换跳过/启用状态（命中区域用绘制时缓存的实际矩形）
+    if (b && mx >= b.x && mx <= b.x + b.w &&
+        my >= b.y && my <= b.y + b.h) {
       recomputeGroupNodes(row.group);
       
       // 互斥模式逻辑：如果开启互斥且要启用该编组，则跳过其他所有编组
@@ -729,7 +980,7 @@ function handleMouseDownM(node, e, localPos) {
       return true;
     }
     // 编组名称区域点击：导航至编组
-    if (mx < btnX - 30) {
+    if (mx < (b ? b.x : node.size[0] - PAD_X - mBtnW() - 4) - 30) {
       navigateToGroup(row.group);
       return true;
     }
@@ -757,10 +1008,11 @@ function ensureStateS(node) {
 
   node._hitDropdown     = null;          // 下拉框点击区域
   node._hitToggleS      = null;          // 开关按钮点击区域
+  node._hitGear         = null;          // 齿轮按钮点击区域
   node._lastRecomputeMs = node._lastRecomputeMs ?? 0; // 最后一次重新计算时间
   node.serialize_widgets = false;        // 不序列化widgets
   node.isVirtualNode    = true;          // 标记为虚拟节点
-  node.size             = [MIN_W, SINGLE_H]; // 固定尺寸
+  node.size             = [MIN_W, singleH()]; // 固定尺寸（随 UI 尺寸设置）
 }
 
 // ─────────────────────────────────────────────
@@ -775,7 +1027,7 @@ function ensureStateS(node) {
 function drawSingleNode(node, ctx) {
   if (node.flags?.collapsed) return;
 
-  node.size[1] = SINGLE_H; // 固定高度
+  node.size[1] = singleH(); // 固定高度（随 UI 尺寸设置）
 
   const W        = node.size[0];
   const groups   = getAllGroups();
@@ -800,9 +1052,11 @@ function drawSingleNode(node, ctx) {
   // ── 绘制下拉框 ──────────────────────────────
   const dX = PAD_X;
   const dY = y;
-  const dW = W - PAD_X * 2;
+  const dW = W - PAD_X * 2 - GC_GEAR - 5; // 右侧留出齿轮
   const dH = DROPDOWN_H;
   node._hitDropdown = { x: dX, y: dY, w: dW, h: dH };
+  node._hitGear     = null;
+  drawGearBtn(node, ctx, dX + dW + 5, dY + (dH - GC_GEAR) / 2);
 
   // 下拉框背景
   ctx.save();
@@ -859,22 +1113,30 @@ function drawSingleNode(node, ctx) {
   ctx.restore();
 
   // ── 绘制开关按钮行 ───────────────────────────
-  const btnX = W - PAD_X - BTN_W - 4;
-  const btnY = y + (ROW_H - BTN_H) / 2;
-  node._hitToggleS = { x: btnX, y: btnY, w: BTN_W, h: BTN_H };
+  const rowH = mRowH(), btnH = mBtnH();
+  const fontPx = gcFont(10);
+  // 用最长标签「部分跳过」做宽度基准，状态切换时按钮宽度不跳动
+  const labelW = Math.max(
+    gcTextW(ctx, "部分跳过", fontPx, true),
+    gcTextW(ctx, "未选择", fontPx, true)
+  );
+  const btnW = Math.max(mBtnW(), Math.ceil(labelW) + 12);
+  const btnX = W - PAD_X - btnW - 4;
+  const btnY = y + (rowH - btnH) / 2;
+  node._hitToggleS = { x: btnX, y: btnY, w: btnW, h: btnH };
 
   if (!group) {
     // 未选择编组：禁用开关按钮
     ctx.save();
     ctx.fillStyle = "rgba(255,255,255,0.05)";
     ctx.beginPath();
-    drawRoundRect(ctx, btnX, btnY, BTN_W, BTN_H, 11);
+    drawRoundRect(ctx, btnX, btnY, btnW, btnH, Math.min(11, btnH / 2));
     ctx.fill();
     ctx.fillStyle    = "#555";
-    ctx.font         = "bold 10px sans-serif";
+    ctx.font         = `bold ${fontPx}px sans-serif`;
     ctx.textAlign    = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText("未选择", btnX + BTN_W / 2, btnY + BTN_H / 2);
+    ctx.fillText("未选择", btnX + btnW / 2, btnY + btnH / 2);
     ctx.restore();
 
     // 提示文字
@@ -883,22 +1145,22 @@ function drawSingleNode(node, ctx) {
     ctx.font         = "italic 11px sans-serif";
     ctx.textAlign    = "left";
     ctx.textBaseline = "middle";
-    ctx.fillText("请先选择编组", PAD_X + 4, y + ROW_H / 2);
+    ctx.fillText("请先选择编组", PAD_X + 4, y + rowH / 2);
     ctx.restore();
   } else {
     // 已选择编组：绘制开关按钮
     ctx.save();
     ctx.fillStyle = bypassed ? "#7a1515" : (mixed ? "#7a4c15" : "#155c30");
     ctx.beginPath();
-    drawRoundRect(ctx, btnX, btnY, BTN_W, BTN_H, 11);
+    drawRoundRect(ctx, btnX, btnY, btnW, btnH, Math.min(11, btnH / 2));
     ctx.fill();
     ctx.fillStyle    = "rgba(255,255,255,0.9)";
-    ctx.font         = "bold 10px sans-serif";
+    ctx.font         = `bold ${fontPx}px sans-serif`;
     ctx.textAlign    = "center";
     ctx.textBaseline = "middle";
     ctx.fillText(
       bypassed ? "已跳过" : (mixed ? "部分跳过" : "已启用"),
-      btnX + BTN_W / 2, btnY + BTN_H / 2
+      btnX + btnW / 2, btnY + btnH / 2
     );
     ctx.restore();
 
@@ -907,24 +1169,24 @@ function drawSingleNode(node, ctx) {
     ctx.save();
     ctx.fillStyle = "rgba(255,255,255,0.1)";
     ctx.beginPath();
-    drawRoundRect(ctx, cntX, btnY, 24, BTN_H, 4);
+    drawRoundRect(ctx, cntX, btnY, 24, btnH, 4);
     ctx.fill();
     ctx.fillStyle    = "#999";
-    ctx.font         = "10px sans-serif";
+    ctx.font         = `${fontPx}px sans-serif`;
     ctx.textAlign    = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText(String(groupNodes.length), cntX + 12, btnY + BTN_H / 2);
+    ctx.fillText(String(groupNodes.length), cntX + 12, btnY + btnH / 2);
     ctx.restore();
 
     // 绘制编组名称标签（左侧）
     ctx.save();
     ctx.fillStyle    = bypassed ? "#777" : "#bbb";
-    ctx.font         = "12px sans-serif";
+    ctx.font         = `${gcFont(12)}px sans-serif`;
     ctx.textAlign    = "left";
     ctx.textBaseline = "middle";
     ctx.fillText(
       truncateText(ctx, group.title || "未命名编组", cntX - PAD_X - 8),
-      PAD_X + 4, y + ROW_H / 2
+      PAD_X + 4, y + rowH / 2
     );
     ctx.restore();
   }
@@ -944,6 +1206,7 @@ function drawSingleNode(node, ctx) {
 function handleMouseDownS(node, e, localPos) {
   if (!localPos) return false;
   const [mx, my] = localPos;
+  if (gcGearHit(node, mx, my, e)) return true;
 
   // 下拉框点击：弹出编组选择菜单
   const dd = node._hitDropdown;
@@ -1019,6 +1282,7 @@ function ensureStateG(node) {
   if (typeof node.properties.gColor !== "string") node.properties.gColor = "";
   node._gHit  = { count: null, minus: null, plus: null, color: null, mutex: null };
   node._gRows = [];
+  node._hitGear = null;
   node._lastRecomputeMs = node._lastRecomputeMs ?? 0;
   node.serialize_widgets = false;
   node.isVirtualNode    = true;
@@ -1028,7 +1292,7 @@ function ensureStateG(node) {
 function computeHeightG(node) {
   const slots = node.properties?.gSlots ?? [null];
   let h = G_PAD + G_HEADER_H + G_ROW_GAP;
-  for (const s of slots) h += (s == null ? G_DD_H : G_ROW_H) + G_ROW_GAP;
+  for (const s of slots) h += (s == null ? G_DD_H : gRowH()) + G_ROW_GAP;
   h += G_PAD;
   return h;
 }
@@ -1090,6 +1354,8 @@ function drawGroupNode(node, ctx) {
 
   // ── 顶部控制条 ──
   const mutexW = 70;
+  const gearX  = W - G_PAD - GC_GEAR;
+  const mutexX = gearX - 5 - mutexW; // 单选按钮左移，给最右齿轮腾位
   ctx.save();
   ctx.fillStyle = "#aaa"; ctx.font = "12px sans-serif";
   ctx.textAlign = "left"; ctx.textBaseline = "middle";
@@ -1106,14 +1372,13 @@ function drawGroupNode(node, ctx) {
   _drawSmallBtn(ctx, plusX, smBtnY, G_SM_BTN, G_SM_BTN, "+", "#33383f", slots.length < G_MAX_ROWS);
 
   const colorX = plusX + G_SM_BTN + 10;
-  const colorW = Math.max(40, W - G_PAD - mutexW - 6 - colorX);
+  const colorW = Math.max(40, mutexX - 6 - colorX);
   const gColor = node.properties?.gColor ?? "";
   const hasFilter = (node.properties?.gSlots ?? []).some((s) => s);
   const colorLabel = gColor ? colorName(gColor) : (hasFilter ? "无色" : "颜色筛选");
   node._gHit.color = { x: colorX, y: smBtnY, w: colorW, h: G_SM_BTN + 4 };
   _drawColorMatchBtn(ctx, colorX, smBtnY, colorW, G_SM_BTN + 4, gColor, colorLabel);
 
-  const mutexX = W - G_PAD - mutexW;
   node._gHit.mutex = { x: mutexX, y: smBtnY, w: mutexW, h: G_SM_BTN + 4 };
   const mutexOn = node.properties?.gMutex ?? false;
   ctx.save();
@@ -1128,6 +1393,9 @@ function drawGroupNode(node, ctx) {
   ctx.textAlign = "center"; ctx.textBaseline = "middle";
   ctx.fillText("单选模式", mutexX + mutexW / 2, smBtnY + (G_SM_BTN + 4) / 2);
   ctx.restore();
+
+  // 齿轮按钮（顶部控制条最右）
+  drawGearBtn(node, ctx, gearX, smBtnY);
 
   y += G_HEADER_H + G_ROW_GAP;
 
@@ -1150,9 +1418,10 @@ function drawGroupNode(node, ctx) {
       const gNodes   = group ? getGroupNodes(group) : [];
       const bypassed = gNodes.length > 0 && gNodes.every((n) => n.mode === BYPASS_MODE);
       const mixed    = !bypassed && gNodes.some((n) => n.mode === BYPASS_MODE);
-      node._gRows.push({ kind: "row", i, y, bypassed, mixed, key });
-      _drawOptRow(ctx, group, y, bypassed, mixed, gNodes.length, W, i);
-      y += G_ROW_H + G_ROW_GAP;
+      const hit = { kind: "row", i, y, bypassed, mixed, key, btn: null };
+      node._gRows.push(hit);
+      hit.btn = _drawOptRow(ctx, group, y, bypassed, mixed, gNodes.length, W, i);
+      y += gRowH() + G_ROW_GAP;
     }
   }
 }
@@ -1200,33 +1469,38 @@ function _drawPendingDropdown(ctx, x, y, w, h) {
 }
 
 function _drawOptRow(ctx, group, y, bypassed, mixed, nodeCount, W) {
+  const rowH = gRowH(), btnH = gBtnH();
+  const label  = bypassed ? "已跳过" : (mixed ? "部分跳过" : "已启用");
+  const fontPx = gcFont(10);
+  const btnW = Math.max(gBtnW(), Math.ceil(gcTextW(ctx, label, fontPx, true)) + 12);
   ctx.save();
   ctx.fillStyle = bypassed ? "rgba(122,21,21,0.18)" : "rgba(255,255,255,0.04)";
-  ctx.beginPath(); drawRoundRect(ctx, G_PAD, y + 1, W - G_PAD * 2, G_ROW_H - 2, 4); ctx.fill();
+  ctx.beginPath(); drawRoundRect(ctx, G_PAD, y + 1, W - G_PAD * 2, rowH - 2, 4); ctx.fill();
   let textStartX = G_PAD + 8;
   if (group?.color) {
     ctx.fillStyle = group.color;
-    ctx.beginPath(); drawRoundRect(ctx, G_PAD + 5, y + (G_ROW_H - 16) / 2, 6, 16, 3); ctx.fill();
+    ctx.beginPath(); drawRoundRect(ctx, G_PAD + 5, y + (rowH - 16) / 2, 6, 16, 3); ctx.fill();
     textStartX += 14;
   }
-  const btnX = W - G_PAD - G_BTN_W - 4;
-  const btnY = y + (G_ROW_H - G_BTN_H) / 2;
+  const btnX = W - G_PAD - btnW - 4;
+  const btnY = y + (rowH - btnH) / 2;
   ctx.fillStyle = bypassed ? "#7a1515" : (mixed ? "#7a4c15" : "#155c30");
-  ctx.beginPath(); drawRoundRect(ctx, btnX, btnY, G_BTN_W, G_BTN_H, 11); ctx.fill();
-  ctx.fillStyle = "rgba(255,255,255,0.9)"; ctx.font = "bold 10px sans-serif";
+  ctx.beginPath(); drawRoundRect(ctx, btnX, btnY, btnW, btnH, Math.min(11, btnH / 2)); ctx.fill();
+  ctx.fillStyle = "rgba(255,255,255,0.9)"; ctx.font = `bold ${fontPx}px sans-serif`;
   ctx.textAlign = "center"; ctx.textBaseline = "middle";
-  ctx.fillText(bypassed ? "已跳过" : (mixed ? "部分跳过" : "已启用"), btnX + G_BTN_W / 2, btnY + G_BTN_H / 2);
+  ctx.fillText(label, btnX + btnW / 2, btnY + btnH / 2);
   const cntX = btnX - 28;
   ctx.fillStyle = "rgba(255,255,255,0.1)";
-  ctx.beginPath(); drawRoundRect(ctx, cntX, btnY, 24, G_BTN_H, 4); ctx.fill();
-  ctx.fillStyle = "#999"; ctx.font = "10px sans-serif";
+  ctx.beginPath(); drawRoundRect(ctx, cntX, btnY, 24, btnH, 4); ctx.fill();
+  ctx.fillStyle = "#999"; ctx.font = `${fontPx}px sans-serif`;
   ctx.textAlign = "center"; ctx.textBaseline = "middle";
-  ctx.fillText(String(nodeCount), cntX + 12, btnY + G_BTN_H / 2);
+  ctx.fillText(String(nodeCount), cntX + 12, btnY + btnH / 2);
   const maxTitleW = cntX - textStartX - 6;
-  ctx.fillStyle = bypassed ? "#777" : "#ddd"; ctx.font = "13px sans-serif";
+  ctx.fillStyle = bypassed ? "#777" : "#ddd"; ctx.font = `${gcFont(13)}px sans-serif`;
   ctx.textAlign = "left"; ctx.textBaseline = "middle";
-  ctx.fillText(truncateText(ctx, group?.title || "未命名编组", maxTitleW), textStartX, y + G_ROW_H / 2);
+  ctx.fillText(truncateText(ctx, group?.title || "未命名编组", maxTitleW), textStartX, y + rowH / 2);
   ctx.restore();
+  return { x: btnX, y: btnY, w: btnW, h: btnH };
 }
 
 // ─────────────────────────────────────────────
@@ -1237,6 +1511,7 @@ function handleMouseDownG(node, e, localPos) {
   const [mx, my] = localPos;
   const W = node.size[0];
   const slots = node.properties?.gSlots ?? [null];
+  if (gcGearHit(node, mx, my, e)) return true;
 
   const h = node._gHit;
   if (h.minus && inRect(mx, my, h.minus) && slots.length > G_MIN_ROWS) {
@@ -1264,16 +1539,15 @@ function handleMouseDownG(node, e, localPos) {
   }
 
   for (const row of node._gRows) {
-    if (my < row.y || my > row.y + (row.kind === "dd" ? G_DD_H : G_ROW_H)) continue;
+    if (my < row.y || my > row.y + (row.kind === "dd" ? G_DD_H : gRowH())) continue;
     if (row.kind === "dd") {
       _showOptionalGroupMenu(node, row.i, e); return true;
     }
-    const btnX = W - G_PAD - G_BTN_W - 4;
-    const btnY = row.y + (G_ROW_H - G_BTN_H) / 2;
-    if (mx >= btnX && mx <= btnX + G_BTN_W && my >= btnY && my <= btnY + G_BTN_H) {
+    const b = row.btn;
+    if (b && mx >= b.x && mx <= b.x + b.w && my >= b.y && my <= b.y + b.h) {
       _toggleOptGroup(node, row.key); return true;
     }
-    if (mx < btnX - 30) {
+    if (mx < (b ? b.x : W - G_PAD - gBtnW() - 4) - 30) {
       _showOptionalGroupMenu(node, row.i, e); return true;
     }
   }
@@ -1396,6 +1670,30 @@ function _showOptionalGroupMenu(node, slotIndex, e) {
 app.registerExtension({
   name: "JosiaGroupController",  // 扩展名称
 
+  // 设置面板：编组控制（三项共用 GC_SETTING_DEFS，0=当前尺寸）
+  settings: GC_SETTING_DEFS.map((d) => ({
+    id: d.id,
+    name: d.name,
+    type: "slider",
+    defaultValue: d.def,
+    tooltip:
+      d.id === SET_FONT_SIZE
+        ? "编组行的三类文字：组名 / 组内节点数 / 已跳过·已启用·部分跳过。" +
+          "默认 0 = 当前字号；调到 150 时为当前的 2.5 倍。其它文字不受影响。"
+        : d.id === SET_BTN_HEIGHT
+        ? "编组开关按钮的高度，行高随之联动。默认 0 = 当前高度（22px）；" +
+          "调到 150 时为当前的 2.5 倍。解决画布缩小后开关不好点/看不清的问题。"
+        : "编组开关按钮的宽度。默认 0 = 当前宽度（多组/单组 72、分组 64）；" +
+          "可缩 20px、最多加 50px。字号撑大后按钮会按文字实测宽度自动变宽，不受此上限约束。",
+    category: ["⚡️JosiaNodes", "编组控制", d.id.split(".").pop()],
+    attrs: { min: d.min, max: d.max, step: d.step },
+    onChange: () => refreshGroupCtrlNodes(),
+  })),
+  init() {
+    // 设置值已在绘制时实时读取；此处仅触发一次重算以套用非默认值
+    requestAnimationFrame(() => refreshGroupCtrlNodes());
+  },
+
   /**
    * 注册节点前的钩子（扩展节点功能）
    * @param {function} nodeType - 节点类型构造函数
@@ -1476,10 +1774,10 @@ app.registerExtension({
         origOnAddedS?.call(this, graph);
       };
 
-      // 扩展computeSize：固定节点高度
+      // 扩展computeSize：固定节点高度（随 UI 尺寸设置）
       nodeType.prototype.computeSize = function () {
         ensureStateS(this);
-        return [MIN_W, SINGLE_H];
+        return [MIN_W, singleH()];
       };
 
       // 扩展onDrawForeground：自定义绘制
@@ -1572,7 +1870,7 @@ app.registerExtension({
         node.size[1] = computeHeightG(node);
       } else {
         ensureStateS(node);
-        node.size[1] = SINGLE_H;
+        node.size[1] = singleH();
       }
       app.graph?.setDirtyCanvas?.(true, false);
     });

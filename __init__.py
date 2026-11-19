@@ -35,6 +35,10 @@ def register_node(module_name, node_alias, display_name):
         if hasattr(module, "NODE_CLASS_MAPPINGS"):
             if node_alias in module.NODE_CLASS_MAPPINGS:
                 node_cls = module.NODE_CLASS_MAPPINGS[node_alias]
+                # 归入节点库的「COMFY 节点」分区：前端按 ESSENTIALS_CATEGORY
+                # 将节点判为 Essentials，与 CATEGORY 分类字符串无关。
+                if not hasattr(node_cls, "ESSENTIALS_CATEGORY"):
+                    node_cls.ESSENTIALS_CATEGORY = "Basics"
                 NODE_CLASS_MAPPINGS[node_alias] = node_cls
                 NODE_DISPLAY_NAME_MAPPINGS[node_alias] = display_name
                 # 成功时不打印，最后统一汇总
